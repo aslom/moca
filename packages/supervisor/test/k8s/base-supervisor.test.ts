@@ -115,7 +115,7 @@ describe.skipIf(NO_KUBECTL)('deploy/k8s base: supervisor', () => {
     expect(p.spec.ingress[0].from).toEqual([{ podSelector: {} }]);
   });
 
-  it('egresses only to Redis, the relay exec port, the control plane and 443', () => {
+  it('egresses only to Redis, the relay exec port, the control plane, Context Service and 443', () => {
     const p = find(render('base'), 'NetworkPolicy', 'moca-supervisor', 'moca');
     const rules = p.spec.egress.map((r: { to: unknown[]; ports: { port: number }[] }) => [
       r.to,
@@ -125,6 +125,17 @@ describe.skipIf(NO_KUBECTL)('deploy/k8s base: supervisor', () => {
       [[{ podSelector: { matchLabels: { app: 'redis' } } }], [6379]],
       [[{ podSelector: { matchLabels: { app: 'sandbox-relay' } } }], [9444]],
       [[{ podSelector: { matchLabels: { app: 'moca-control-plane' } } }], [8080]],
+      [
+        [
+          {
+            namespaceSelector: {
+              matchLabels: { 'kubernetes.io/metadata.name': 'context-service' },
+            },
+            podSelector: { matchLabels: { 'app.kubernetes.io/name': 'context-service' } },
+          },
+        ],
+        [8080],
+      ],
       [[{ ipBlock: { cidr: '0.0.0.0/0' } }], [443]],
     ]);
   });
