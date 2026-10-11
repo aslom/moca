@@ -5,8 +5,8 @@
 # degrades into documentation that lies (the control-plane spec §9.3 test 3 argument, verbatim).
 #
 # Scope, mirroring the control-plane document's own boundary note: only the client-facing
-# surface. The handler also serves the workload lifecycle (/workloads — currently 501-refused,
-# #455) and the pre-/v1 wire paths (/turn, /runs, /run-leaf*) — all listed in src/routes.ts as
+# surface. The handler also serves the workload lifecycle (/workloads — off unless the operator
+# enables it, see docs/context-service.md) and the pre-/v1 wire paths (/turn, /runs, /run-leaf*) — all listed in src/routes.ts as
 # surface: 'internal' and deliberately not described here. /runs/status has no /v1 form; it is
 # the canonical path.
 openapi: 3.1.0
@@ -406,8 +406,8 @@ paths:
 
         `sandboxPoolSelector` is internal routing state and is deleted at the request boundary —
         never settable by an external caller. A run naming a `workloadId` is refused with 501
-        workloads_unavailable rather than run on the default pool — Context Service no longer
-        allocates sandbox pools for Moca (#455).
+        workload_runs_unavailable rather than run on the default pool: delivering a workload's
+        context to the sandbox is a later change (docs/context-service.md).
       security:
         - sessionToken: []
       requestBody:
@@ -453,8 +453,8 @@ paths:
           description: |
             async_runs_unavailable — async: true with a token-bearing caller. Not a capability
             this deployment grants; a token-less caller on a require-auth deployment never
-            reaches it (401 token_required fires first). workloads_unavailable — the envelope
-            named a workloadId, and the workload lifecycle is unavailable (#455).
+            reaches it (401 token_required fires first). workload_runs_unavailable — the
+            envelope named a workloadId; runs on a workload are not available yet.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

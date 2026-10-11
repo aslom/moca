@@ -145,7 +145,7 @@ const redis = createClient({ url: REDIS_URL });
 const quotaOf = async (owner: string) =>
   Number(
     (await redis.get(
-      `sh:workload-quota:${createHash('sha256').update(owner).digest('hex').slice(0, 32)}`,
+      `sh:wl-quota:${createHash('sha256').update(owner).digest('hex').slice(0, 32)}`,
     )) ?? '0',
   );
 
@@ -333,7 +333,7 @@ describe('workload lifecycle', () => {
   it('expires a deleted record, and only a deleted one', async () => {
     vi.stubEnv('MOCA_WORKLOAD_DELETED_TTL_SECONDS', '120');
     await create(alice, 'expiring');
-    const key = `sh:workload:${createHash('sha256').update(alice).digest('hex').slice(0, 32)}:expiring`;
+    const key = `sh:wl:${createHash('sha256').update(alice).digest('hex').slice(0, 32)}:expiring`;
     expect(await redis.ttl(key)).toBe(-1);
     expect((await call('DELETE', '/workloads/expiring', alice)).status).toBe(204);
     const ttl = await redis.ttl(key);
@@ -349,6 +349,18 @@ describe('workload lifecycle', () => {
     const [[second]] = cs.ownedBy(alice);
     expect(second).not.toBe(first);
     expect(await quotaOf(alice)).toBe(1);
+  });
+
+  it('treats a body-less create as all defaults', async () => {
+    const response = await fetch(base + '/workloads', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${apiToken(alice)}` },
+    });
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({
+      workloadId: expect.stringMatching(/^wl-/),
+      status: 'awaiting_upload',
+    });
   });
 
   it('validates the request', async () => {

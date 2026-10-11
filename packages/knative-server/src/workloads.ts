@@ -70,8 +70,10 @@ export function workloadsEnabled(): boolean {
 
 const sha256 = (value: string) => createHash('sha256').update(value).digest('hex');
 const ownerScope = (owner: string) => sha256(owner).slice(0, 32);
-const recordKey = (owner: string, name: string) => `sh:workload:${ownerScope(owner)}:${name}`;
-const quotaKey = (owner: string) => `sh:workload-quota:${ownerScope(owner)}`;
+// `sh:wl:`, not `sh:workload:`: the upgrade note's cleanup of legacy records (`sh:workload:*`, see
+// docs/context-service.md) must never match a live workload.
+const recordKey = (owner: string, name: string) => `sh:wl:${ownerScope(owner)}:${name}`;
+const quotaKey = (owner: string) => `sh:wl-quota:${ownerScope(owner)}`;
 /** Unique per owner, name and reservation, so a rollback can never delete a newer Context. */
 const contextNameFor = (owner: string, name: string, generation: string) =>
   `w-${sha256(`${owner}\0${name}\0${generation}`).slice(0, 32)}`;
@@ -165,8 +167,11 @@ async function readJson(req: IncomingMessage): Promise<unknown> {
     if (size > MAX_BODY_BYTES) throw new BodyError(413, 'body_too_large');
     chunks.push(chunk);
   }
+  const text = Buffer.concat(chunks).toString();
+  // Every create field is optional, so a body-less request means "all defaults".
+  if (text.trim() === '') return {};
   try {
-    return JSON.parse(Buffer.concat(chunks).toString());
+    return JSON.parse(text);
   } catch {
     throw new BodyError(400, 'invalid_json');
   }
@@ -287,7 +292,12 @@ async function rollbackCreate(store: WorkloadStore, reserved: WorkloadRecord): P
     let cleaned = true;
     await deleteContext(reserved.contextName, reserved.owner).catch((err: unknown) => {
       cleaned = false;
-      console.error('workload create rollback could not delete its Context:', err);
+      // The Context name is derived and does not reveal the owner; log it so an operator can
+      // delete the Context if no record is left for a retry to act on.
+      console.error(
+        `workload create rollback could not delete Context ${reserved.contextName}:`,
+        err,
+      );
     });
     await transition(store, reserved, { ...reserved, status: cleaned ? 'deleted' : 'deleting' });
   } catch (err) {
