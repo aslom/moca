@@ -88,6 +88,11 @@ printf %s "$KEY" | mocactl credentials add NAME --host HOST [--host HOST ...] \
 mocactl credentials delete NAME [--json]    # exit 1 if you own no credential of that name
 ```
 
+> **Preview.** `mocactl spawn`, `mocactl subagents`, and `mocactl get` are implemented but not
+> yet declared Stable; flags, ledger format, and output shapes may change. Follow-ups tracked
+> under the subagent commands issue: `watch`, `approve`/`reject`, `follow-up`, and a
+> configurable concurrency cap.
+
 ```bash
 mocactl spawn "prompt" --bundle sha256:… --kind prompt|converge \
   [--repo URL --ref REF] [--tag T] [--json]  # fork a detached subagent; prints its sessionId
