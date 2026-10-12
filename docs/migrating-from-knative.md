@@ -4,8 +4,8 @@
 > ScaledJobs, `KubectlTransport` and pod-exec sandboxes under `deploy/knative/` — is deprecated
 > ([ADR-0041](adrs/0041-deprecate-knative-keda-deployment.md)). P6, the process-manager runtime,
 > is the primary way to run MOCA sessions. During the window the old path receives security and
-> breakage fixes only, and no new features. Removal comes no earlier than **April 2027**, and only
-> once its remaining users have migrated — if that is you, say so in a
+> breakage fixes only, and no new features. Removal comes no earlier than **end of October
+> 2026**, and only once its remaining users have migrated — if that is you, say so in a
 > [GitHub discussion](https://github.com/rossoctl/moca/discussions) so the date can account for
 > you.
 
@@ -103,6 +103,6 @@ between turns.
   features.
 - If you run the control plane on the deprecated K8s path during the window, #248's
   namespace-collocation consideration still applies to it, unchanged by the deprecation.
-- Removal happens no earlier than April 2027 and only once the remaining users have migrated.
-  [Tell us when you have moved](https://github.com/rossoctl/moca/discussions) — the condition is
-  users, not the calendar alone.
+- Removal happens no earlier than end of October 2026 and only once the remaining users have
+  migrated. [Tell us when you have moved](https://github.com/rossoctl/moca/discussions) — the
+  condition is users, not the calendar alone.

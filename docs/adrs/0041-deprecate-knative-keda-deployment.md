@@ -34,9 +34,9 @@ autoscaling.
 
 - **Support during the window:** security and breakage fixes only; no new features on the
   deprecated path.
-- **Removal:** no earlier than **April 2027**, and only once the remaining Knative users have
-  confirmed migration — the "removal tracked separately" RA1 §1 asked for, made concrete where its
-  §5 tree sketch said "no removal date set."
+- **Removal:** no earlier than **end of October 2026**, and only once the remaining Knative users
+  have confirmed migration — the "removal tracked separately" RA1 §1 asked for, made concrete where
+  its §5 tree sketch said "no removal date set."
 - **What is not deprecated:** `deploy/k8s/` (P6 on Kubernetes, ADR-0037), a migration destination;
   the container sandbox tier; and the shared code in `packages/knative-server` and the non-K8s
   half of `packages/k8s-sandbox` — the supervisor forks `knative-server/src/worker.ts`
