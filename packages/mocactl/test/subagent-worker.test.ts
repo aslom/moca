@@ -10,12 +10,7 @@ import {
   type LeafResultBody,
 } from '../src/transport/leaf-turn.js';
 
-/**
- * The detached worker owns the terminal state the parent cannot write: it's the one that holds
- * the `POST /v1/runs` call open and sees the final body. These tests pin that every exit path
- * — happy, error, early-return — leaves the ledger in a state `subagents` can read without a
- * stuck `running` row.
- */
+/** Pins every runSpawnWorker exit path to a ledger state `subagents` can read. */
 
 const ENV: LeafEnvelope = {
   sessionId: 'sess-abc',
@@ -25,9 +20,7 @@ const ENV: LeafEnvelope = {
 };
 
 function makeRt(scratch: string, over: Partial<any> = {}): any {
-  // `now` is monotonic across the retry loop so the wall budget actually advances with each
-  // iteration. Default `sleep` is a no-op (tests don't wait for real seconds); override per test
-  // when a saturated-retry case needs the wall clock to move.
+  // Fake clock: `sleep` advances `now` so the retry wall budget moves without real waits.
   let t = 10_000;
   return {
     cp: {},
@@ -85,7 +78,7 @@ describe('runSpawnWorker — happy path', () => {
     expect(r).toBe(0);
     const row = openLedger(ledgerPath).readAll()[0]!;
     expect(row.lastKnownState).toBe('done');
-    // The envelope the worker sent carries configRef — this is M1's point. Pin it here too.
+    // Envelope carries configRef so `/v1/runs` resolves the bundle.
     expect(transport.submitLeafTurn).toHaveBeenCalledWith(
       expect.objectContaining({ configRef: ENV.configRef }),
       'tok',
@@ -133,7 +126,7 @@ describe('runSpawnWorker — terminal ledger writes on every non-retry exit', ()
     expect(row.stateDetail).toBe('bad_inputs');
   });
 
-  it('on no harness URL and no forwarded endpoints, writes a failed ledger line (never silent)', async () => {
+  it('with no harness URL and no forwarded endpoints, writes a failed ledger line', async () => {
     const rt = makeRt(scratch, { harness: undefined });
     seedLedgerRow(rt.paths.subagentsFile);
     const r = await runSpawnWorker(rt, {
@@ -149,8 +142,6 @@ describe('runSpawnWorker — terminal ledger writes on every non-retry exit', ()
 /* --- retryable path: saturation retries then records a terminal row --- */
 
 describe('runSpawnWorker — sync 503 saturated retries with bounded budget', () => {
-  // The transport surfaces 503 as a thrown ApiError (that is where errorFromResponse maps it);
-  // import ApiError locally so each test matches the shape the worker's catch block checks.
   it('retries up to 3 times honoring Retry-After, then records failed with the saturated detail', async () => {
     const { ApiError } = await import('../src/api/errors.js');
     const rt = makeRt(scratch);
@@ -165,7 +156,7 @@ describe('runSpawnWorker — sync 503 saturated retries with bounded budget', ()
       transport,
     });
     expect(r).toBe(1);
-    // Three attempts: initial + 2 retries. The fourth would exceed the attempt budget.
+    // Initial + 2 retries = 3 attempts.
     expect((transport.submitLeafTurn as any).mock.calls.length).toBe(3);
     const row = openLedger(rt.paths.subagentsFile).readAll()[0]!;
     expect(row.lastKnownState).toBe('failed');
@@ -193,11 +184,9 @@ describe('runSpawnWorker — sync 503 saturated retries with bounded budget', ()
     expect(row.lastKnownState).toBe('done');
   });
 
-  // End-to-end: drive through the real LeafTransport + errorFromResponse so a server-shaped 503
-  // body `{status:'failed', reason:'saturated'}` becomes an ApiError the retry loop recognizes.
-  // This is what guards against the "retry loop silently never fires in production" failure mode:
-  // if errorFromResponse ever stops folding `body.reason` into `code`, this test fails.
-  it('end-to-end: a real 503 body drives the retry loop (not just a hand-built ApiError)', async () => {
+  // Guards against the "retry loop never fires in production" mode by driving through the real
+  // LeafTransport + errorFromResponse; fails if `body.reason` ever stops folding into `code`.
+  it('end-to-end: a real 503 response body drives the retry loop', async () => {
     let hits = 0;
     const fakeFetch = vi.fn(async (url: string | URL) => {
       hits += 1;
@@ -230,17 +219,17 @@ describe('runSpawnWorker — sync 503 saturated retries with bounded budget', ()
 /* --- stdin-parse failures --- */
 
 describe('runSpawnWorker — malformed stdin', () => {
-  it('on non-JSON stdin, exits 2 (no ledger write; the parent already wrote the row at spawn)', async () => {
+  it('on non-JSON stdin, exits 2 without a ledger write', async () => {
     const rt = makeRt(scratch);
     seedLedgerRow(rt.paths.subagentsFile);
     const r = await runSpawnWorker(rt, { readStdin: async () => 'not json' });
     expect(r).toBe(2);
-    // The row the parent appended is still `running` — the worker did not advance it.
+    // Parent's row stays `running`; worker did not advance it.
     const row = openLedger(rt.paths.subagentsFile).readAll()[0]!;
     expect(row.lastKnownState).toBe('running');
   });
 
-  it('on JSON missing sessionId/token, exits 2 without crashing (defensive against a parent-build drift)', async () => {
+  it('on JSON missing sessionId/token, exits 2 without crashing', async () => {
     const rt = makeRt(scratch);
     seedLedgerRow(rt.paths.subagentsFile);
     const r = await runSpawnWorker(rt, {
@@ -253,11 +242,9 @@ describe('runSpawnWorker — malformed stdin', () => {
 /* --- forwarded endpoints: parent passes URLs on stdin, child rebuilds its runtime --- */
 
 describe('runSpawnWorker — endpoint forwarding', () => {
-  it('rebuilds the harness client and routes POST /v1/runs through it when the child has no endpoint flags', async () => {
-    // Simulate a child spawned with no --control-plane-url and no SH_* env: rt.harness and
-    // rt.endpoints are empty. The stdin payload carries the resolved URLs. We swap rt.fetchImpl
-    // so the HarnessClient `applyEndpoints` builds routes its POST through the fake — proving
-    // the applyEndpoints → wire → HarnessClient chain actually ran.
+  it('rebuilds the harness client from stdin when the child has no endpoint flags', async () => {
+    // Child has empty rt.harness/rt.endpoints; proves the applyEndpoints → wire → HarnessClient
+    // chain runs by letting a fake fetch observe the final POST URL.
     const fetchCalls: string[] = [];
     const fakeFetch = vi.fn(async (url: string | URL) => {
       fetchCalls.push(String(url));
@@ -287,10 +274,7 @@ describe('runSpawnWorker — endpoint forwarding', () => {
   });
 
   it("overrides a child-side DiscoveringHarness so the parent's resolved URL wins", async () => {
-    // The failure mode this pins: the child's own env/config.json points buildRuntime at a
-    // DIFFERENT control plane, so wire() built a DiscoveringHarness that would resolve to the
-    // wrong harness. The forwarded `harnessUrl` must still be applied — not skipped on the
-    // "rt.harness is already truthy" branch, which was the earlier bug.
+    // Pins the "forwarded URL must apply even when rt.harness is already truthy" branch.
     const fetchCalls: string[] = [];
     const fakeFetch = vi.fn(async (url: string | URL) => {
       fetchCalls.push(String(url));
@@ -300,7 +284,7 @@ describe('runSpawnWorker — endpoint forwarding', () => {
       });
     });
     const rt = makeRt(scratch, {
-      // Pre-wired to a stale harness — this is what the child's buildRuntime would have produced.
+      // Simulates what the child's own buildRuntime would have wired up.
       harness: { baseUrl: async () => 'https://stale.test' },
       endpoints: { controlPlaneUrl: 'https://cp.test', harnessUrl: undefined },
       fetchImpl: fakeFetch as unknown as typeof fetch,
@@ -315,7 +299,6 @@ describe('runSpawnWorker — endpoint forwarding', () => {
       }),
     });
     expect(r).toBe(0);
-    // The POST landed on the forwarded URL, not the pre-wired stale one.
     expect(fetchCalls[0]).toBe('https://harness.correct/v1/runs');
   });
 });

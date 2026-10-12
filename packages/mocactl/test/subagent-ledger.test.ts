@@ -53,7 +53,7 @@ describe('openLedger — updateState folding', () => {
     expect(only.stateDetail).toBeUndefined();
   });
 
-  it('clears stateDetail when a later update omits it, so a stale detail string does not linger', () => {
+  it('clears stateDetail when a later update omits it', () => {
     const l = openLedger(path);
     l.append(rec());
     l.updateState('s1', 'running', { detail: 'child exited; waiting for result', now: 10 });
@@ -62,7 +62,7 @@ describe('openLedger — updateState folding', () => {
     expect(l.readAll()[0]!.stateDetail).toBeUndefined();
   });
 
-  it('records the childPid only after it is passed in — supporting write-record-before-fork', () => {
+  it('records the childPid only after it is passed in (write-record-before-fork)', () => {
     const l = openLedger(path);
     l.append(rec()); // no childPid yet — the ledger is written before the worker is forked
     expect(l.readAll()[0]!.childPid).toBeUndefined();
@@ -85,7 +85,7 @@ describe('openLedger — file integrity', () => {
     expect(mode).toBe(0o600);
   });
 
-  it('skips a malformed trailing line (recovers from a crash-mid-append) instead of refusing to read', () => {
+  it('skips a malformed trailing line (recovers from a crash-mid-append)', () => {
     const l = openLedger(path);
     l.append(rec());
     appendFileSync(path, '{partial-write-no-closing-brace\n');
@@ -95,7 +95,7 @@ describe('openLedger — file integrity', () => {
     expect(all[0]!.sessionId).toBe('s1');
   });
 
-  it('compact rewrites the file so only folded current state remains (updates collapse into records)', () => {
+  it('compact rewrites the file so only folded current state remains', () => {
     const l = openLedger(path);
     l.append(rec({ sessionId: 'a' }));
     l.append(rec({ sessionId: 'b', submittedAt: 2_000_000 }));
@@ -119,7 +119,7 @@ describe('openLedger — file integrity', () => {
 });
 
 describe('initLedger', () => {
-  it('creates an empty file with 0600 so readAll on a fresh install returns [] (not throws)', () => {
+  it('creates an empty file with 0600 so readAll on a fresh install returns []', () => {
     initLedger(path);
     expect(existsSync(path)).toBe(true);
     expect(statSync(path).mode & 0o777).toBe(0o600);

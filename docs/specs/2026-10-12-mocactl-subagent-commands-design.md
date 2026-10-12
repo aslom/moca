@@ -5,69 +5,56 @@ Issue: [#381](https://github.com/rossoctl/moca/issues/381)
 
 ## 1. Problem
 
-`mocactl` today only drives `/v1/turn` — a prompt, streamed, foreground, one session at a
-time. A workflow where a parent agent fires off work, exits, and another `mocactl`
-invocation later collects the result has no client surface, so demo and scripting work
-that needs that shape has to go through its own one-off wrappers.
+`mocactl` today only drives `/v1/turn`: a prompt, streamed, foreground, one session at a
+time. Fire-and-forget work that outlives the parent `mocactl` process has no client
+surface, so demos and scripts need their own wrappers.
 
-The server side has what we need: the sync `POST /v1/runs` + `GET /runs/status` leaf
-endpoints
-([`2026-06-26-mvp-leaf-session-contract-design.md`](2026-06-26-mvp-leaf-session-contract-design.md)),
-with `/v1/runs` applying a `configRef` carried on the request envelope through the
-resolve-and-overlay path
-([`2026-10-06-mocactl-config-bundle-promotion-design.md`](2026-10-06-mocactl-config-bundle-promotion-design.md)).
-`/v1/runs` reads `configRef` from the request body, so a client that wants its leaves to
-run under a promoted bundle must send `configRef` on every leaf envelope. What is missing
-is a client that can build that envelope, fire the leaf, survive its own exit, and later
-re-join the result from another invocation.
+The sync leaf endpoints are already in place (`POST /v1/runs` +
+`GET /runs/status`,
+[`2026-06-26-mvp-leaf-session-contract-design.md`](2026-06-26-mvp-leaf-session-contract-design.md)),
+and `/v1/runs` resolves `configRef` from the request body
+([`2026-10-06-mocactl-config-bundle-promotion-design.md`](2026-10-06-mocactl-config-bundle-promotion-design.md)) —
+so a client that wants its leaves to run under a promoted bundle must send `configRef`
+on every envelope. What's missing is the client that builds the envelope, forks a worker
+that survives its own exit, and later re-joins the result.
 
 ## 2. Decision — three commands, one transport, one ledger
 
+The three commands and their flags are documented in
+[`packages/mocactl/README.md`](../../packages/mocactl/README.md) and
+[`docs/reference/cli-mocactl.md`](../reference/cli-mocactl.md); this section covers the
+decisions behind them.
+
 ### 2.1 `mocactl spawn` — fork a detached leaf-turn worker
 
-```
-mocactl spawn "prompt" [--config sha256:…] --kind prompt|solve \
-  [--repo URL --ref REF] [--tag T] [--json]
-```
-
-Creates a session (pinned to the bundle at `--config`, following the same `--config`
-vocabulary `mocactl run` already uses), writes a `record` line to the ledger (§2.5), then
-forks a detached worker (§2.6) that holds the sync `POST /v1/runs` call outside this
-process group. The envelope the worker sends carries `configRef` so the leaf runs under
-the promoted bundle (§1). The sessionId is printed on stdout immediately so a script can
-capture it; quitting `mocactl` does not kill the worker.
-
-`--kind solve` requires `--repo URL` and `--ref REF`; `--kind prompt` refuses them. The
-prompt text becomes `env.prompt` on a prompt envelope and `env.problemStatement` on a
-solve envelope (the harness builds the agent's prompt itself for solve). `--tag T`
-groups related spawns so `subagents --tag T` can list a single parent agent's children
-in isolation. The prompt is capped at 64 KiB so a ledger `record` line stays small enough
-to fit one `write(2)` on a local filesystem (§2.5).
+- `--config DIGEST` (not `--bundle`) matches the `mocactl run` vocabulary so the two
+  commands share one flag name for the same digest.
+- Flow: create session → append a `record` line to the ledger (§2.5) → fork a detached
+  worker (§2.6) that holds the sync `POST /v1/runs`. The sessionId is printed on stdout
+  before the fork completes so a shell pipeline can capture it even if the worker exits
+  immediately.
+- The envelope carries `configRef` on every leaf: `/v1/runs` resolves the bundle from the
+  body, not from the session record (§1).
+- `--kind solve` requires `--repo` + `--ref` because the server's solve envelope requires
+  `problemStatement` + `repoUrl` + `ref`. The user's text goes to `problemStatement`; the
+  harness builds the agent's prompt itself. `--kind prompt` sends `env.prompt`.
+- The 64 KiB prompt cap keeps a `record` ledger line within one atomic `write(2)` on a
+  local filesystem (§2.5).
 
 ### 2.2 `mocactl subagents` — join ledger with `/runs/status`
 
-```
-mocactl subagents [--tag T] [--json]
-```
-
-Reads the ledger and joins each row with `/runs/status`, resolving the server's
-three-way `queued` (still running / never recorded / aged out) with child-pid liveness
-and a 60-second grace window (§2.7). Terminal rows are not re-queried — see §2.5 for
-why that matters at 24 hours. Oldest-first by dispatch time.
+- Resolves the server's three-way `queued` (still running / never recorded / aged out)
+  with child-pid liveness and a 60-second grace window (§2.7).
+- Terminal rows are not re-queried: `/runs/status` has a 24-hour TTL, so a day after a
+  run `queued` would otherwise regress a durable `done` row to `unknown`.
 
 ### 2.3 `mocactl get SESSIONID` — write terminal result files
 
-```
-mocactl get SESSIONID [--out DIR] [--json]
-```
-
-Fetches a terminal result and writes `<sid>.text` (prompt), `<sid>.patch` (solve, trailing
-newline normalized so `git apply` does not reject it), and `<sid>.verdict.json` if the
-server returned a verdict. Exit `0` only for `responded` / `done` / `solved`; `paused` is
-terminal but a gate decision is still pending, so it exits `1`. On a `failed` body, exits
-`1` with the status, reason, and detail message echoed to stderr (all sanitized through
-the same table-rendering filter the listing uses, since every string comes from the
-server).
+- `paused` is terminal but exits `1`: the gate decision is still pending, so the caller
+  should not treat the row as a finished result.
+- `failed` echoes `status`/`reason`/`message` on stderr sanitized through the same filter
+  the listing uses, since every string comes from the server.
+- Patch output has its trailing newline normalized so `git apply` does not reject it.
 
 ### 2.4 Leaf-turn transport
 
@@ -79,55 +66,41 @@ can replace the backend without touching the commands.
 
 ### 2.5 Subagent ledger
 
-`$XDG_STATE_HOME/mocactl/subagents.jsonl`, mode 0600. Append-only JSONL with two line
-types folded by sessionId on read:
+`$XDG_STATE_HOME/mocactl/subagents.jsonl`, mode 0600, append-only JSONL. Two line types
+folded by sessionId on read: `record` (one per spawn, full dispatch envelope so a future
+`approve`/`reject` can resend with a decision) and `update` (one per state change).
 
-- `record` — written once per spawn, carries the full dispatch envelope so a future
-  `approve`/`reject` can resend with a gate decision.
-- `update` — written on every state change, carries just the delta.
-
-Each append is a single `O_APPEND` `write(2)` on a local filesystem, which the kernel
-commits as one non-interleaving unit so concurrent writers do not clobber each other
-without an explicit lock. The 64 KiB prompt cap in §2.1 keeps a `record` line short
-enough that the OS commits it in one syscall.
-
-The ledger is authoritative past a terminal state. `/runs/status` has a 24-hour TTL
-on the harness side, so a `subagents` call a day after a run would otherwise regress a
-durable `done` row to `unknown`. §2.2 skips the re-query for terminal rows for exactly
-this reason.
-
-File creation and append use `openSync` with `O_CREAT | O_NOFOLLOW` and the 0600 mode
-passed to the syscall itself, so the mode is set atomically on create and a symlinked
-state file is refused at open time.
+- **Atomicity without locks.** Each line is a single `O_APPEND` `write(2)` on a local
+  filesystem; the 64 KiB prompt cap in §2.1 keeps every line within one syscall.
+- **TOCTOU-free create.** `openSync` with `O_CREAT | O_NOFOLLOW` and the 0600 mode on
+  the syscall itself; a symlinked state file ELOOPs.
+- **Authoritative past terminal.** `/runs/status`'s 24-hour TTL would otherwise regress
+  a durable `done` row to `unknown`, so §2.2 skips the re-query for terminal rows.
 
 ### 2.6 Detached-child mechanism
 
-`child_process.spawn` with `detached: true` + `unref()`, re-execing the same
-`mocactl.mjs` into a hidden `__spawn-worker` subcommand. The session token is passed on
-stdin so it stays out of argv and env. The parent also forwards the resolved
-control-plane and harness URLs on stdin so the worker can rebuild its runtime from a
-single source. The worker's stdout/stderr go to
-`$XDG_STATE_HOME/mocactl/spawn-<sid>.log`. Fork completion is awaited on the child's
-`'spawn'` / `'error'` events before the parent returns, so an async failure (ENOENT,
-EACCES after `spawn()` returned) marks the ledger row `failed`, closes the log fd, and
-surfaces to the caller instead of being reported as a successful spawn.
+`child_process.spawn` with `detached: true` + `unref()`, re-execing `mocactl.mjs` into a
+hidden `__spawn-worker` subcommand. Design choices:
 
-Every worker exit that has a sessionId writes a ledger update. On a terminal body
-(`responded`/`done`/`solved`/`paused`/`failed`/`aborted`) the row becomes terminal with
-the matching honest state. A 503 `saturated` is a retry-later signal (per
-`packages/knative-server/src/server.ts`'s saturation handler: _"a 503 is 'retry', not a
-terminal failure, and `/runs/status` must not report it as one"_). The server's own
-bounded in-band retry runs first; past that, the worker retries up to three times
-honoring `Retry-After` within a five-minute wall budget before giving up and recording
-the ledger row as `failed` with `stateDetail: 'saturated — exhausted retries'`. The one
-exit without a ledger write is a malformed-stdin failure (no sessionId yet); the
-parent's `record` row stays authoritative and `subagents` drives it from `/runs/status`
-on the next call.
+- **Token on stdin, not argv/env.** Keeps it out of `ps` and `/proc/<pid>/environ`.
+- **Endpoints forwarded on stdin.** The parent's resolved URLs (post-discovery when
+  applicable) are the child's single source of truth, overriding anything the child's own
+  env/config would otherwise wire up.
+- **Fork completion awaited on `'spawn'`/`'error'`.** Without this, an async ENOENT /
+  EACCES after `spawn()` returned would be reported as a successful spawn.
+- **Every exit with a sessionId writes a terminal ledger line.** Malformed stdin (no
+  sessionId) is the one exception; the parent's row stays authoritative there.
+- **Bounded retry on 503 `saturated`.** The server's saturation handler calls out that
+  _"a 503 is 'retry', not a terminal failure, and `/runs/status` must not report it as
+  one"_ (`packages/knative-server/src/server.ts`), and runs its own in-band retry first.
+  The worker then retries up to three times honoring `Retry-After` within a five-minute
+  wall budget; on exhaustion the ledger row becomes `failed` with
+  `stateDetail: 'saturated — exhausted retries'`.
 
 ### 2.7 Honest states
 
-Surfaced to users as `running | done | paused | failed | unknown`. The mapping from
-(server body, child liveness, grace) to honest state lives in `transport/leaf-turn.ts`:
+User-facing states: `running | done | paused | failed | unknown`. The mapping from
+(server body, child liveness, grace) is in `transport/leaf-turn.ts`:
 
 | Server                      | Child alive | Within grace | Honest state |
 | --------------------------- | ----------- | ------------ | ------------ |
@@ -139,32 +112,22 @@ Surfaced to users as `running | done | paused | failed | unknown`. The mapping f
 | `failed`                    | —           | —            | `failed`     |
 | `aborted`                   | —           | —            | `failed`     |
 
-Grace defaults to 60 s and covers a just-exited child's result-write race. The
-within-grace `running` row carries a `child exited; waiting for result` detail string so
-the TUI column shows the distinction. `/runs/status` returns `200 {status: 'queued'}`
-for a missing record, which the `queued` rows above handle.
+The 60 s grace covers a just-exited child's result-write race; within it the row carries
+a `child exited; waiting for result` detail. `/runs/status` returns `200 {status:
+'queued'}` for a missing record, so there is no 404 row.
 
 ## 3. Error handling
 
-- `createSession` failure: no ledger row written, exit `1`.
-- Fork failure after `createSession` (synchronous throw or async `'error'` event): the
-  ledger row is marked `failed` with the fork error as `stateDetail`, exit `1`. (The row
-  still exists so a later `subagents` call shows the failed spawn.)
-- Worker-side missing-harness exit: the worker writes a terminal `failed` ledger update
-  with the reason on `stateDetail`.
-- Worker-side bad-stdin exit: no sessionId to anchor an update, so the worker returns `2`
-  without touching the ledger; the parent's `record` row stays authoritative and
-  `subagents` drives it from `/runs/status` on the next call.
-- Sync 503 `saturated` on `POST /v1/runs`: the worker retries up to three times honoring
-  `Retry-After` within a five-minute wall budget. If still saturated, the ledger row
-  becomes `failed` with `stateDetail: 'saturated — exhausted retries'`.
-- Per-row `/runs/status` failure in `subagents`: that row is reported as `unknown`
-  with the error as its detail; other rows still render.
-- `spawn` validation: bundle digest must match `sha256:<64 lowercase hex>`;
-  `--kind solve` must have both `--repo` and `--ref`; `--kind prompt` must have neither;
-  prompt must be non-empty and under 64 KiB.
-- `get` validation: sessionId must match the harness-side alphabet
-  (`[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]`); unmet exits `2`.
+See [`docs/reference/cli-mocactl.md`](../reference/cli-mocactl.md) for validation exit
+codes. Behavioral notes:
+
+- `createSession` failure: no ledger row written, exit `1`. Fork failure (sync throw or
+  async `'error'`) after a successful `createSession`: ledger row marked `failed` with
+  the fork error as `stateDetail`, exit `1`.
+- Per-row `/runs/status` failure in `subagents` reports that row as `unknown` with the
+  error as detail; other rows still render.
+- Worker exits are covered under §2.6 (every exit with a sessionId writes a terminal
+  ledger line; malformed stdin is the one exception).
 
 ## 4. Alternatives considered
 

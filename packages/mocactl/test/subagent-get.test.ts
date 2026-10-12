@@ -153,7 +153,7 @@ describe('cmdGet — terminal result shapes', () => {
 /* --- --json mode --- */
 
 describe('cmdGet --json', () => {
-  it('emits one JSON line listing files written, with no human-readable summary on stdout', async () => {
+  it('--json emits one JSON line, with no human summary on stdout', async () => {
     const { rt } = makeRt(scratch);
     const { io, out } = makeIo();
     const body = { status: 'solved', patch: 'diff\n' } as const;
@@ -175,7 +175,7 @@ describe('cmdGet --json', () => {
 /* --- API errors --- */
 
 describe('cmdGet — ApiError translation', () => {
-  it('maps a 404 ApiError to the same "no session" message as not_found (no stack trace to the user)', async () => {
+  it('on a 404 ApiError with code=session_not_found, prints "no session" (no stack trace)', async () => {
     const { rt } = makeRt(scratch);
     const { io, err } = makeIo();
     const transport = {
@@ -190,7 +190,7 @@ describe('cmdGet — ApiError translation', () => {
 });
 
 describe('cmdGet — paused is not success', () => {
-  it('exits 1 for a paused body — a session waiting on a gate is terminal but not a finished result', async () => {
+  it('exits 1 for a paused body (terminal, but still awaiting a gate decision)', async () => {
     const { rt } = makeRt(scratch);
     const { io } = makeIo();
     const body = {
@@ -202,7 +202,7 @@ describe('cmdGet — paused is not success', () => {
     expect(r).toBe(1);
   });
 
-  it('--json on paused still emits the file list on stdout (so scripts can see which files were written)', async () => {
+  it('--json on paused still emits the file list on stdout', async () => {
     const { rt } = makeRt(scratch);
     const { io, out } = makeIo();
     const body = { status: 'paused', text: 'awaiting decision' } as const;

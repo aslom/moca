@@ -27,12 +27,9 @@ import {
 } from './transport/leaf-turn.js';
 
 const BUNDLE_DIGEST = /^sha256:[0-9a-f]{64}$/;
-/**
- * Cap keeps a ledger append small enough that one `O_APPEND` `write(2)` on a local filesystem
- * commits the whole line as one unit, which is what keeps concurrent writers from interleaving.
- */
+/** Keeps a ledger append within one atomic `O_APPEND write(2)` on a local filesystem. */
 const MAX_PROMPT_BYTES = 64 * 1024;
-/** Harness-side session-id alphabet (mirrors run-leaf.ts `leafSessionId`). */
+/** Harness-side session-id alphabet (mirrors `leafSessionId` in run-leaf.ts). */
 const SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]$/;
 
 interface SpawnedSession {
@@ -120,8 +117,7 @@ export async function cmdSpawn(rt: Runtime, io: Io, opts: SpawnOptions): Promise
     io.err(describeError(err));
     return 1;
   }
-  // Defense-in-depth: the harness mints these, but a would-be bug on either side should not let a
-  // sessionId with path metacharacters reach `join()` for the worker log.
+  // Defense-in-depth before this sessionId reaches `join()` for the worker log.
   if (!SAFE_ID_RE.test(session.sessionId)) {
     io.err(`control plane returned an unexpected sessionId '${sanitizeRemote(session.sessionId)}'`);
     return 1;
@@ -143,13 +139,11 @@ export async function cmdSpawn(rt: Runtime, io: Io, opts: SpawnOptions): Promise
   };
   ledger.append(record);
 
-  // Resolve the harness URL here (while the parent is still running) so a child without flags
-  // or SH_* env never has to re-discover and never silently falls back to a different harness.
+  // Resolve the harness URL in the parent so the child never re-discovers.
   let resolvedHarnessUrl: string | undefined;
   try {
     resolvedHarnessUrl = await rt.harness.baseUrl();
   } catch {
-    // Discovery failed in the parent; fall back to whatever the child can resolve itself.
     resolvedHarnessUrl = rt.endpoints.harnessUrl;
   }
   const forkFn =
@@ -186,11 +180,10 @@ async function createSession(cp: ControlPlaneApi, configRef?: string): Promise<S
 
 function buildEnvelope(sessionId: string, opts: SpawnOptions): LeafEnvelope {
   const base: LeafEnvelope = { sessionId, kind: opts.kind };
-  // configRef on the envelope is what makes the leaf run with the user's promoted bundle: `/runs`
-  // reads it from the body (run-leaf.ts `runPromptLeaf`/`runSolveLeaf`), not from the session.
+  // `/runs` reads configRef from the body (not the session); the harness builds the solve prompt
+  // itself from `problemStatement`.
   if (opts.configRef) base.configRef = opts.configRef;
   if (opts.kind === 'prompt') return { ...base, prompt: opts.prompt };
-  // solve: the user's intent is `problemStatement`; the harness builds the agent's prompt itself.
   return { ...base, problemStatement: opts.prompt, repoUrl: opts.repoUrl!, ref: opts.ref! };
 }
 
@@ -222,11 +215,8 @@ async function defaultFork(
     env: { ...process.env },
   });
   try {
-    // ENOENT/EACCES on execPath land as an async 'error' event rather than a sync throw. Wait
-    // for whichever event fires first — 'spawn' (the child successfully started) or 'error' —
-    // before telling the caller the pid is valid. Without this, the parent would report success
-    // for a worker that never actually ran. Clean up the losing listener so the ChildProcess
-    // isn't left with a stray handler attached under --trace-warnings.
+    // ENOENT/EACCES surface as an async 'error' event, not a sync throw — await either event
+    // before trusting `spawned.pid`, and detach the loser so no stray listener remains.
     await new Promise<void>((resolveStart, rejectStart) => {
       const onSpawn = () => {
         spawned.off('error', onError);
@@ -239,10 +229,8 @@ async function defaultFork(
       spawned.once('spawn', onSpawn);
       spawned.once('error', onError);
     });
-    // Pass the session token on stdin so it stays out of argv (visible to `ps`). Forward the
-    // resolved endpoints the same way so the child rebuilds its runtime from a single source.
-    // Forward the parent's resolved harness URL (post-discovery when applicable, raw flag/env
-    // otherwise) so the child uses the same harness the parent did without re-discovering.
+    // Token on stdin so it stays out of argv (visible via `ps`); endpoints alongside so the
+    // child doesn't need its own flags/env.
     const payload: SpawnWorkerPayload = {
       sessionId,
       token,
@@ -250,19 +238,15 @@ async function defaultFork(
       ...(rt.endpoints.controlPlaneUrl ? { controlPlaneUrl: rt.endpoints.controlPlaneUrl } : {}),
       ...(harnessUrl ? { harnessUrl } : {}),
     };
-    // Swallow a late stdin error (child exited before reading its payload — EPIPE). The ledger
-    // row is driven by the worker's own writes or, if the worker never ran, by the parent's row.
-    spawned.stdin!.on('error', () => {});
+    spawned.stdin!.on('error', () => {}); // swallow EPIPE if the child exits before reading
     spawned.stdin!.end(JSON.stringify(payload) + '\n');
     spawned.unref();
     if (spawned.pid === undefined) throw new Error('spawn produced no pid');
     return spawned.pid;
   } catch (err) {
     closeSync(logFd);
-    // Defense-in-depth: if an error raced in after 'spawn' resolved, the detached unref'd child
-    // would survive this throw. kill() is a no-op if the child never started or already exited.
     try {
-      spawned.kill();
+      spawned.kill(); // defense-in-depth; no-op if the child never started
     } catch {
       /* ignore */
     }
@@ -281,9 +265,8 @@ export interface SpawnWorkerDeps {
 
 /**
  * Detached-worker entry: read payload from stdin, POST /v1/runs, record outcome, exit.
- * Every exit path that has a sessionId writes a ledger update (terminal, or a running-ping on
- * saturated). The malformed-stdin branch has no sessionId to anchor an update; the parent's
- * `record` row stays authoritative, and `subagents` reconciles it from `/runs/status`.
+ * Every exit path with a sessionId writes a terminal ledger line. The malformed-stdin branch
+ * has no sessionId to anchor on; the parent's row stays authoritative there.
  */
 export async function runSpawnWorker(rt: Runtime, deps: SpawnWorkerDeps = {}): Promise<number> {
   const ledger = deps.ledger ?? openLedger(rt.paths.subagentsFile, rt.now);
@@ -296,14 +279,11 @@ export async function runSpawnWorker(rt: Runtime, deps: SpawnWorkerDeps = {}): P
     }
     payload = parsed as SpawnWorkerPayload;
   } catch {
-    // Malformed stdin: no sessionId to anchor a ledger update. The parent printed the sessionId
-    // on stdout before forking, so the row the parent appended at spawn time is what `subagents`
-    // sees; it will drive it from `/runs/status` on the next call.
+    // Malformed stdin — no sessionId to anchor on. The parent's row stays authoritative.
     return 2;
   }
-  // The payload is the parent's resolved endpoints — single source of truth. Apply it whenever
-  // present, not only when rt.harness is empty: the child's own env/config.json may already have
-  // produced a DiscoveringHarness that would silently ignore the --harness-url the user passed.
+  // Payload is the parent's resolved endpoints; apply unconditionally so a child-side
+  // DiscoveringHarness built from stale env/config doesn't override it.
   if (payload.harnessUrl || payload.controlPlaneUrl) {
     const { applyEndpoints } = await import('./runtime.js');
     applyEndpoints(rt, {
@@ -319,10 +299,9 @@ export async function runSpawnWorker(rt: Runtime, deps: SpawnWorkerDeps = {}): P
     return 2;
   }
   const transport = deps.transport ?? new LeafTransport(rt.harness, rt.fetchImpl);
-  // 503 `saturated` is a retry-later signal — the server does its own in-band retry inside its
-  // bounded window and only 503s if the pool is still full. The worker's retry budget covers a
-  // second burst beyond that window; without it, saturation reaches the user as a terminal
-  // failure. Bounded by both attempts and total wall time so the worker never hangs.
+  // 503 saturated is a retry-later signal; the server retries in-band first, so this is a
+  // bounded second burst beyond that window. Capped by attempts AND wall time to defend
+  // against a hostile `Retry-After`.
   const MAX_SATURATED_ATTEMPTS = 3;
   const MAX_RETRY_WALL_MS = 5 * 60_000;
   const DEFAULT_RETRY_AFTER_S = 5;
@@ -337,8 +316,8 @@ export async function runSpawnWorker(rt: Runtime, deps: SpawnWorkerDeps = {}): P
       });
       return view.state === 'done' ? 0 : 1;
     } catch (err) {
-      // Saturated reaches here as ApiError(status: 503, code: 'saturated') once errorFromResponse
-      // folds in `body.reason` as the code (see api/errors.ts). Any other error → terminal failed.
+      // `errorFromResponse` folds `body.reason` into `code`, so 503 saturated arrives as
+      // ApiError(status: 503, code: 'saturated'); anything else is terminal.
       const saturated = err instanceof ApiError && err.status === 503 && err.code === 'saturated';
       if (!saturated) {
         ledger.updateState(payload.sessionId, 'failed', {
@@ -348,15 +327,12 @@ export async function runSpawnWorker(rt: Runtime, deps: SpawnWorkerDeps = {}): P
         return 1;
       }
       if (attempt >= MAX_SATURATED_ATTEMPTS) break;
-      // Sleep until the server's Retry-After, but never past the wall budget — otherwise a
-      // misconfigured `Retry-After: 999999` would wedge the worker for days.
       const remainingMs = MAX_RETRY_WALL_MS - (rt.now() - retryStart);
       if (remainingMs <= 0) break;
       const requestedMs = (err.retryAfterS ?? DEFAULT_RETRY_AFTER_S) * 1000;
       await rt.sleep(Math.max(0, Math.min(requestedMs, remainingMs)));
     }
   }
-  // Attempts or wall budget exhausted while still saturated.
   ledger.updateState(payload.sessionId, 'failed', {
     detail: 'saturated — exhausted retries',
     now: rt.now(),
@@ -399,8 +375,8 @@ export async function cmdSubagents(rt: Runtime, io: Io, opts: SubagentsOptions):
   const now = rt.now();
   const views: Array<{ record: LedgerRecord; view: StateView }> = [];
   for (const r of records) {
-    // Ledger is authoritative past a terminal state — /runs/status has a 24h TTL, so re-reading
-    // would regress a durable `done` row to `unknown` once the server-side record ages out.
+    // Ledger is authoritative past terminal: /runs/status's 24h TTL would otherwise regress
+    // `done` to `unknown` once the server-side record ages out.
     if (isTerminalState(r.lastKnownState)) {
       views.push({ record: r, view: { state: r.lastKnownState, detail: r.stateDetail } });
       continue;
@@ -455,13 +431,10 @@ export async function cmdSubagents(rt: Runtime, io: Io, opts: SubagentsOptions):
   return 0;
 }
 
-/**
- * `kill(pid, 0)` liveness probe. OS pid reuse is the known blind spot — a pid+start-time pair
- * or a harness-side deadline (tracked under the spec's Scope) closes it.
- */
+/** `kill(pid, 0)` liveness probe. OS pid-reuse is the known blind spot — see spec §5. */
 function isAlive(pid: number): boolean {
   try {
-    process.kill(pid, 0); // signal 0 only probes.
+    process.kill(pid, 0);
     return true;
   } catch {
     return false;
@@ -500,8 +473,7 @@ export async function cmdGet(rt: Runtime, io: Io, opts: GetOptions): Promise<num
     const token = await rt.cp.mintSessionToken(opts.sessionId);
     raw = await transport.readLeafState(opts.sessionId, token.token, opts.signal);
   } catch (err) {
-    // A 404 with code=session_not_found means the harness has no record of this sessionId; other
-    // 404s (route misconfig, auth-mapping) should surface as the real error, not as "no session".
+    // Match on code, not bare status: a route/auth 404 should surface its real error.
     if (err instanceof ApiError && err.status === 404 && err.code === 'session_not_found') {
       io.err(`no session '${sanitizeRemote(opts.sessionId)}'`);
       return 1;
@@ -532,9 +504,8 @@ export async function cmdGet(rt: Runtime, io: Io, opts: GetOptions): Promise<num
     writeFileSync(p, raw.patch.endsWith('\n') ? raw.patch : raw.patch + '\n', { mode: 0o644 });
     written.push(p);
   }
-  // Exit 0 only for a complete answer; `paused` is terminal but still awaiting a gate decision.
+  // `paused` is terminal but still awaiting a gate decision — exit 1.
   const completed = raw.status === 'responded' || raw.status === 'done' || raw.status === 'solved';
-  // Status (and any failure reason/message) come from the server; sanitize before echoing them.
   const status = sanitizeRemote(raw.status);
   const reason = raw.reason ? sanitizeRemote(raw.reason) : undefined;
   const message = raw.message ? sanitizeRemote(raw.message) : undefined;

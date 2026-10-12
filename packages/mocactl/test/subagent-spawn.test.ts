@@ -127,7 +127,7 @@ describe('cmdSpawn — flag validation refuses before any session is created', (
 /* --- happy path --- */
 
 describe('cmdSpawn — happy path', () => {
-  it('creates the session with configRef when --config is given, writes a ledger record before fork, forks, then updates pid', async () => {
+  it('with --config, creates the session, writes the ledger record before fork, then updates pid', async () => {
     const { rt, cp, createdSessions } = makeRt();
     const ledger = withLedger(rt);
     const { io, out, err } = makeIo();
@@ -184,7 +184,7 @@ describe('cmdSpawn — happy path', () => {
     expect(seenEnvelope?.configRef).toBeUndefined();
   });
 
-  it('solve envelope carries problemStatement, not prompt (the server-side solve path reads problemStatement)', async () => {
+  it('solve envelope carries problemStatement, not prompt', async () => {
     const { rt } = makeRt();
     const { io } = makeIo();
     let seenEnvelope: LeafEnvelope | undefined;
@@ -253,7 +253,7 @@ describe('cmdSpawn — happy path', () => {
 /* --- failure paths --- */
 
 describe('cmdSpawn — oversized prompt is refused up front', () => {
-  it('refuses a prompt over the 64 KiB cap so it cannot overflow the ledger append-atomicity window', async () => {
+  it('refuses a prompt over the 64 KiB cap', async () => {
     const { rt, cp } = makeRt();
     const { io, err } = makeIo();
     const big = 'x'.repeat(64 * 1024 + 1);
@@ -269,7 +269,7 @@ describe('cmdSpawn — oversized prompt is refused up front', () => {
 });
 
 describe('cmdSpawn — failure paths that must not create a ledger orphan', () => {
-  it('fork throwing after the session was created marks the ledger row failed (not left as running)', async () => {
+  it('fork throwing after createSession marks the ledger row failed', async () => {
     const { rt } = makeRt();
     const ledger = withLedger(rt);
     const { io, err } = makeIo();
@@ -291,7 +291,7 @@ describe('cmdSpawn — failure paths that must not create a ledger orphan', () =
     expect(only.stateDetail).toContain('ENOSPC');
   });
 
-  it('createSession throwing leaves the ledger empty (no record if the session never existed)', async () => {
+  it('createSession throwing leaves the ledger empty', async () => {
     const { rt, cp } = makeRt();
     cp.createSession.mockRejectedValueOnce(new Error('control plane unreachable'));
     const ledger = withLedger(rt);
@@ -304,7 +304,7 @@ describe('cmdSpawn — failure paths that must not create a ledger orphan', () =
     expect(openLedger(ledgerPath).readAll()).toEqual([]);
   });
 
-  it('async fork rejection (ENOENT on execPath after spawn() returns) marks the ledger failed', async () => {
+  it('async fork rejection (ENOENT after spawn returns) marks the ledger failed', async () => {
     // Simulates the adversary-M3 case: child_process.spawn emits an 'error' event asynchronously
     // (next tick) rather than throwing. The fork seam here delivers the rejection as a Promise,
     // which is the shape defaultFork now awaits in the real binary.

@@ -51,7 +51,7 @@ describe('mapHonestState — server-terminal records', () => {
 describe("mapHonestState — the 'queued' ambiguity", () => {
   // The server's 'queued' means three different things (server.ts:678-680); the ambiguity is
   // this slice's reason to exist. Pin every branch of the resolution rule.
-  it('live child + queued → running (nothing cluster-side yet, worker still holds the POST)', () => {
+  it('live child + queued → running', () => {
     expect(mapHonestState('queued', { alive: true, observedAt: 0 }, 1_000_000)).toEqual({
       state: 'running',
     });
@@ -132,7 +132,7 @@ describe('LeafTransport.submitLeafTurn', () => {
       t.submitLeafTurn({ sessionId: 's', kind: 'prompt', prompt: 'p' }, 'tok'),
     ).rejects.toThrow(/config_bundle_not_found/);
   });
-  it('rejects when the harness returns non-JSON instead of silently returning an empty body', async () => {
+  it('rejects when the harness returns non-JSON', async () => {
     const fetchImpl = vi.fn(
       async () =>
         new Response('not json at all', { status: 200, headers: { 'content-type': 'text/plain' } }),
@@ -145,24 +145,24 @@ describe('LeafTransport.submitLeafTurn', () => {
 });
 
 describe('LeafTransport.readLeafState', () => {
-  it('url-encodes the sessionId so a session with reserved characters is still fetchable', async () => {
+  it('url-encodes the sessionId', async () => {
     const fetchImpl = vi.fn(async (_url: string) => okJson({ status: 'responded', text: 'hi' }));
     const t = new LeafTransport(harness, fetchImpl as unknown as typeof fetch);
     await t.readLeafState('run.1', 'tok');
     const [url] = fetchImpl.mock.calls[0]!;
     expect(url).toBe('https://harness.test/runs/status?sessionId=run.1');
   });
-  it('surfaces a 404 as an ApiError so the caller can distinguish auth refusal from queued', async () => {
+  it('surfaces a 404 as an ApiError (distinguishable from queued)', async () => {
     const fetchImpl = vi.fn(async () => new Response('', { status: 404 }));
     const t = new LeafTransport(harness, fetchImpl as unknown as typeof fetch);
     await expect(t.readLeafState('s', 'tok')).rejects.toMatchObject({ status: 404 });
   });
-  it("returns 'queued' as the sentinel string so mapHonestState can resolve it with liveness", async () => {
+  it("returns 'queued' as the sentinel for mapHonestState to resolve with liveness", async () => {
     const fetchImpl = vi.fn(async () => okJson({ status: 'queued' }));
     const t = new LeafTransport(harness, fetchImpl as unknown as typeof fetch);
     expect(await t.readLeafState('s', 'tok')).toBe('queued');
   });
-  it('passes through a terminal body unchanged (so patch/verdict/text reach the caller)', async () => {
+  it('passes through a terminal body unchanged', async () => {
     const body: LeafResultBody = {
       status: 'solved',
       patch: 'diff --git a b',

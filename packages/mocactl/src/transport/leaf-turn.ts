@@ -5,10 +5,7 @@
 import { ApiError, errorFromResponse, networkError } from '../api/errors.js';
 import { trimTrailingSlashes } from '../api/url.js';
 
-/**
- * Mirrors harness/src/run-leaf.ts `LeafEnvelope` for the two kinds this client sends. A solve
- * envelope carries the user's intent as `problemStatement` and the server returns a patch.
- */
+/** Mirrors `harness/src/run-leaf.ts` LeafEnvelope for the two kinds this client sends. */
 export interface LeafEnvelope {
   sessionId: string;
   kind: 'prompt' | 'solve';
@@ -20,8 +17,8 @@ export interface LeafEnvelope {
 }
 
 /**
- * Shape returned by `POST /v1/runs` (sync) and `GET /runs/status`, flattened across result
- * kinds. `aborted` is persisted by the server; `queued` is the server's "no record yet" shape.
+ * Flattened body of `POST /v1/runs` and `GET /runs/status`. `aborted` is server-persisted,
+ * `queued` is the server's no-record shape.
  */
 export interface LeafResultBody {
   status: 'responded' | 'done' | 'solved' | 'paused' | 'failed' | 'aborted' | 'queued';
@@ -35,10 +32,7 @@ export interface LeafResultBody {
   usage?: Record<string, number>;
 }
 
-/**
- * Honest state surfaced to users. Resolves the server's three-way `queued` (still running /
- * never recorded / aged out) with child-pid liveness and a grace window.
- */
+/** User-facing state, resolved from `queued`'s three meanings via child liveness + grace. */
 export type HonestState = 'running' | 'done' | 'failed' | 'paused' | 'unknown';
 
 export interface StateView {

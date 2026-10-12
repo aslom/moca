@@ -16,9 +16,11 @@ Run `mocactl --help` for the usage text. `--help` is not per command: `mocactl r
 same global usage. `mocactl --version` prints a release tag, `edge-<sha>` or `dev`.
 
 All flags are accepted by one parser. An unknown flag, or a missing flag value, prints the usage and
-exits 2. Some flags are always rejected (exit 2) outside their command: `--kind`, `--consumer`, `--host` and
-`--endpoint` outside `credentials add`, `--config` outside `run`, and `--all` outside `logout`. Other flags
-a command does not use are not rejected and may be ignored.
+exits 2. Some flags are always rejected (exit 2) outside their command: `--consumer`, `--host` and
+`--endpoint` outside `credentials add`; `--kind` outside `credentials add` and `spawn`; `--config`
+outside `run` and `spawn`; `--repo` and `--ref` outside `spawn`; `--tag` outside `spawn` and
+`subagents`; `--out` outside `get`; and `--all` outside `logout`. Other flags a command does not use
+are not rejected and may be ignored.
 
 ## Endpoints
 
@@ -68,6 +70,9 @@ reachable?` instead; `auth token` exits 3 (login required) or 4; `logout` while 
 | `mocactl credentials [--json]`                                                                                                    | Lists names, kinds, consumers, hosts and endpoints; never secrets                                                                           |
 | `printf %s "$KEY" \| mocactl credentials add NAME --host HOST [--host H ...] [--kind K] [--consumer C] [--endpoint URL] [--json]` | Stores a credential (`PUT /v1/credentials/{name}`). The secret is read from stdin and a terminal on stdin is refused                        |
 | `mocactl credentials delete NAME [--json]`                                                                                        | Deletes a credential; exit 1 if you own none of that name                                                                                   |
+| `mocactl spawn "prompt" [--config DIGEST] --kind prompt\|solve [--repo URL --ref REF] [--tag T] [--json]`                         | Creates a session, writes a ledger record, forks a detached worker that holds a `POST /v1/runs`. Prints the sessionId on stdout             |
+| `mocactl subagents [--tag T] [--json]`                                                                                            | Lists spawned subagents from the ledger joined with `GET /runs/status`                                                                      |
+| `mocactl get SESSIONID [--out DIR] [--json]`                                                                                      | Fetches a terminal result from `GET /runs/status` and writes `<sid>.text` / `<sid>.verdict.json` / `<sid>.patch`                            |
 
 ### `run`
 
@@ -99,6 +104,25 @@ Consumers are `inference`, `sandbox-egress` and `control-plane`. `basic` is not 
 with `--consumer sandbox-egress`. For the `inference` consumer, Anthropic `sk-ant-oat…` OAuth tokens are
 rejected, as is an `sk-ant-api…` key under a bearer kind (`bearer` or `oauth2-token`), and an
 `api.anthropic.com` endpoint with a bearer kind is rejected before stdin is read.
+
+### `spawn`, `subagents`, `get`
+
+See [`packages/mocactl/README.md`](../../packages/mocactl/README.md) and
+[`docs/specs/2026-10-12-mocactl-subagent-commands-design.md`](../specs/2026-10-12-mocactl-subagent-commands-design.md)
+for behavior; this section covers only CLI-reference details.
+
+- `spawn` exit 2: empty prompt, prompt over 64 KiB, bundle digest not matching `sha256:<64 lowercase
+hex>`, `--kind` other than `prompt`/`solve`, `--kind solve` without both `--repo` and `--ref`, or
+  `--repo`/`--ref` on `--kind prompt`.
+- `spawn` on a sync 503 `saturated`: the worker retries up to 3 times honoring `Retry-After`,
+  bounded by a 5-minute wall budget; after that the ledger row is `failed` with
+  `stateDetail: 'saturated — exhausted retries'`.
+- `get` exit 2: sessionId outside `[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]`. Exit 0 only on
+  `responded`/`done`/`solved`; `queued`/`paused`/`failed` exit 1.
+- `--json`:
+  - `spawn` → `{"type":"session","sessionId","pid"}`.
+  - `subagents` → `{"subagents":[{"sessionId","tag","kind","state","detail","bundle","submittedAt"}]}`.
+  - `get` → `{"sessionId","status","files":[…],"reason"?,"message"?}`.
 
 ### `promote` exit codes
 

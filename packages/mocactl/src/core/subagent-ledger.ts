@@ -1,11 +1,9 @@
 /**
- * Client-side ledger of spawned subagents. Stored at $XDG_STATE_HOME/mocactl/subagents.jsonl
- * (mode 0600). Each line is a `record` (initial write) or an `update` (state delta); `readAll`
- * folds updates onto records by sessionId. Concurrent appends stay atomic because each line
- * is written with a single `O_APPEND` write on a local filesystem — no explicit lock. The
- * 64 KiB prompt cap keeps every line short enough to fit one write. `compact` is a whole-file
- * rewrite via `.tmp` + rename and is not called automatically today; a future trigger is
- * tracked under the subagent-commands spec's Scope section.
+ * Client-side ledger of spawned subagents at `$XDG_STATE_HOME/mocactl/subagents.jsonl` (0600).
+ * Each line is a `record` (initial) or `update` (state delta); `readAll` folds updates onto
+ * records by sessionId. Lock-free: single `O_APPEND` write per line on a local filesystem is
+ * atomic, and the 64 KiB prompt cap keeps every line in one `write(2)`. `compact` rewrites via
+ * tmp+rename; it has no automatic trigger (see spec §5).
  */
 import {
   closeSync,
@@ -22,12 +20,7 @@ import { dirname } from 'node:path';
 import type { HonestState } from '../transport/leaf-turn.js';
 
 export interface LedgerEnvelope {
-  /**
-   * Full dispatch envelope — needed for a future `approve/reject` to resend with a decision.
-   * `kind` is widened to `string` on read so a ledger line written by an older binary (e.g.
-   * `kind: 'converge'`) still deserializes without a type lie; new writes stay within the
-   * narrower `'prompt' | 'solve'` set.
-   */
+  /** `string` (not a union) so legacy rows (e.g. `kind: 'converge'`) read without a type lie. */
   kind: string;
   prompt?: string;
   repoUrl?: string;
@@ -113,8 +106,7 @@ export function openLedger(path: string, now: () => number = Date.now): Ledger {
 }
 
 function writeLine(path: string, line: LedgerLine): void {
-  // O_NOFOLLOW + the mode on the syscall itself is the TOCTOU-free equivalent of
-  // existsSync→append→chmod: a symlink races to ELOOP instead of being followed.
+  // Mode on the syscall + O_NOFOLLOW is TOCTOU-free; a symlinked state file ELOOPs.
   const flags = fsConst.O_WRONLY | fsConst.O_CREAT | fsConst.O_APPEND | fsConst.O_NOFOLLOW;
   const fd = openSync(path, flags, 0o600);
   try {
@@ -135,7 +127,7 @@ function readLines(path: string): LedgerLine[] {
     try {
       line = JSON.parse(raw);
     } catch {
-      continue; // crashed-mid-append partial; a later `compact` would clear it.
+      continue; // partial write from a crash; `compact` clears it.
     }
     const l = line as LedgerLine;
     if (l?.v === 1 && (l.type === 'record' || l.type === 'update')) out.push(l);
@@ -150,8 +142,7 @@ function foldLines(lines: LedgerLine[]): LedgerRecord[] {
       byId.set(line.record.sessionId, { ...line.record });
     } else {
       const existing = byId.get(line.sessionId);
-      if (!existing) continue; // orphaned update — ignore (a later `compact` would drop it).
-
+      if (!existing) continue; // orphaned update; `compact` drops it.
       existing.lastKnownState = line.lastKnownState;
       existing.stateObservedAt = line.stateObservedAt;
       if (line.stateDetail !== undefined) existing.stateDetail = line.stateDetail;
@@ -159,7 +150,6 @@ function foldLines(lines: LedgerLine[]): LedgerRecord[] {
       if (line.childPid !== undefined) existing.childPid = line.childPid;
     }
   }
-  // Oldest-first by dispatch time.
   return [...byId.values()].sort((a, b) => a.submittedAt - b.submittedAt);
 }
 
@@ -173,7 +163,6 @@ function ensureParentDir(path: string): void {
 /** Touch the file so `readAll` on a fresh install returns []. */
 export function initLedger(path: string): void {
   ensureParentDir(path);
-  // O_CREAT with the mode on the syscall; O_NOFOLLOW refuses a symlinked state file.
   const flags = fsConst.O_WRONLY | fsConst.O_CREAT | fsConst.O_APPEND | fsConst.O_NOFOLLOW;
   const fd = openSync(path, flags, 0o600);
   closeSync(fd);
