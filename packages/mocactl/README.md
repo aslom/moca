@@ -88,6 +88,32 @@ printf %s "$KEY" | mocactl credentials add NAME --host HOST [--host HOST ...] \
 mocactl credentials delete NAME [--json]    # exit 1 if you own no credential of that name
 ```
 
+```bash
+mocactl spawn "prompt" --bundle sha256:… --kind prompt|converge \
+  [--repo URL --ref REF] [--tag T] [--json]  # fork a detached subagent; prints its sessionId
+mocactl subagents [--tag T] [--json]        # list spawned subagents + current honest state
+mocactl get SESSIONID [--out DIR] [--json]  # write result files + bounded summary
+```
+
+`mocactl spawn` creates a session (pinned to the bundle if `--bundle` is given), writes a record to
+`$XDG_STATE_HOME/mocactl/subagents.jsonl`, then forks a detached worker that holds the sync
+`POST /runs` call outside this process group. Quitting `mocactl` does not kill the worker; the
+sessionId is printed on stdout immediately so a script can capture it. `--kind converge` requires
+both `--repo URL` and `--ref REF`; `--kind prompt` refuses them. The optional `--tag T` groups
+related spawns (e.g. a parent agent's own subagents under one tag) so `mocactl subagents --tag T`
+can list them in isolation.
+
+`mocactl subagents` reads the ledger and joins it with `/runs/status`, resolving the server's
+`queued` ambiguity with child-pid liveness and a 60-second grace: a `queued` row with a live
+child is `running`; past the grace with a dead child it is `unknown`. Without `--tag`, every
+spawn you own is listed, oldest first by dispatch time.
+
+`mocactl get SESSIONID` fetches a terminal result and writes files to `--out DIR` (default: cwd):
+`<sid>.text` for a prompt response, `<sid>.verdict.json` for converge, and `<sid>.patch` for a
+solve result (with a trailing newline normalized so `git apply` does not reject it). A session
+that has not finished yet exits `1` with a hint; a `failed` body exits `1` with the reason on
+stderr.
+
 `mocactl run` continues the session `--session` names, or starts a new one (`--new`, the default).
 
 `mocactl promote` prints what it built and the preflight report (warnings on stderr) BEFORE
@@ -136,6 +162,9 @@ their own shapes. These shapes are stable: fields may be added, but none is rena
 | `credentials`        | `{"credentials":[{"name","kind","consumer","hosts","endpoint"}]}`                                  |
 | `credentials add`    | `{"name","status":"stored"}`                                                                       |
 | `credentials delete` | `{"name","status":"deleted"}`                                                                      |
+| `spawn`              | `{"type":"session","sessionId","pid"}`                                                             |
+| `subagents`          | `{"subagents":[{"sessionId","tag","kind","state","detail","bundle","submittedAt"}]}`               |
+| `get`                | `{"sessionId","status","files":["<path>",…]}`                                                      |
 
 `createdAt` and `lastTurnAt` are epoch milliseconds as the control plane sends them (`lastTurnAt`
 is `null` before the first turn); `endpoint` is `null` when the deployment default applies.
@@ -149,6 +178,9 @@ local history (the control plane stores no titles).
   it (mode 0600). A login renews itself for 30 days after its last use and 90 days at most; every
   renewal replaces the refresh token, so a copied file stops working the next time either copy is
   used. `mocactl logout` ends it. No provider key is ever stored.
+- `$XDG_STATE_HOME/mocactl/subagents.jsonl` — ledger of subagents spawned on this machine (mode
+  0600). Append-only JSONL with periodic compaction; `mocactl subagents` reads from it. Includes
+  the dispatch envelope so a future gate-decision command can resume the subagent.
 - `$XDG_STATE_HOME/mocactl/transcripts/` — local session history, per subject and per control plane
   (mode 0600). A session resumed from another machine shows no history — it belongs to a
   different transcript store.

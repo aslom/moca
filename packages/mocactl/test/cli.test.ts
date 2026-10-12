@@ -344,3 +344,107 @@ describe('B14 commands', () => {
     expect(USAGE).toContain('mocactl logout [--all]');
   });
 });
+
+/* ---------------- spawn / subagents / get ---------------- */
+
+describe('spawn / subagents / get', () => {
+  it('spawn routes --bundle, --kind, --repo, --ref, --tag through to cmdSpawn', async () => {
+    const stub = vi.fn(async (..._a: unknown[]) => 0);
+    const mod = await import('../src/subagent.js');
+    const spy = vi.spyOn(mod, 'cmdSpawn').mockImplementation(stub);
+    onTestFinished(() => spy.mockRestore());
+    const DIGEST = 'sha256:' + 'a'.repeat(64);
+    expect(
+      await main(
+        [
+          'spawn',
+          'do a thing',
+          '--bundle',
+          DIGEST,
+          '--kind',
+          'converge',
+          '--repo',
+          'https://x',
+          '--ref',
+          'main',
+          '--tag',
+          'parent-1',
+        ],
+        {},
+        io(),
+        { buildRuntime: fakeBuild },
+      ),
+    ).toBe(0);
+    expect(stub).toHaveBeenCalledTimes(1);
+    expect(stub.mock.calls[0][2]).toMatchObject({
+      prompt: 'do a thing',
+      kind: 'converge',
+      bundle: DIGEST,
+      repoUrl: 'https://x',
+      ref: 'main',
+      tag: 'parent-1',
+    });
+  });
+
+  it('spawn refuses an invalid --kind at the CLI level (never reaches cmdSpawn)', async () => {
+    const mod = await import('../src/subagent.js');
+    const spy = vi.spyOn(mod, 'cmdSpawn');
+    onTestFinished(() => spy.mockRestore());
+    const o = io();
+    expect(await main(['spawn', 'p', '--kind', 'solve'], {}, o, { buildRuntime: fakeBuild })).toBe(
+      2,
+    );
+    expect(spy).not.toHaveBeenCalled();
+    expect(o.errs.join('\n')).toContain('--kind must be prompt or converge');
+  });
+
+  it('rejects --bundle / --repo / --ref outside spawn, and --tag outside spawn/subagents', async () => {
+    for (const extra of [
+      ['--bundle', 'sha256:x'],
+      ['--repo', 'u'],
+      ['--ref', 'r'],
+    ]) {
+      expect(await main(['sessions', ...extra], {}, io(), { buildRuntime: fakeBuild })).toBe(2);
+    }
+    expect(await main(['run', 'p', '--tag', 't'], {}, io(), { buildRuntime: fakeBuild })).toBe(2);
+    // But --tag on subagents is allowed.
+    const sub = await import('../src/subagent.js');
+    const spy = vi.spyOn(sub, 'cmdSubagents').mockImplementation(async () => 0);
+    onTestFinished(() => spy.mockRestore());
+    expect(await main(['subagents', '--tag', 't'], {}, io(), { buildRuntime: fakeBuild })).toBe(0);
+  });
+
+  it('subagents refuses extra positionals and routes --json through', async () => {
+    const mod = await import('../src/subagent.js');
+    const stub = vi.fn(async (..._a: unknown[]) => 0);
+    const spy = vi.spyOn(mod, 'cmdSubagents').mockImplementation(stub);
+    onTestFinished(() => spy.mockRestore());
+    expect(await main(['subagents', 'extra'], {}, io(), { buildRuntime: fakeBuild })).toBe(2);
+    expect(stub).not.toHaveBeenCalled();
+    expect(await main(['subagents', '--json'], {}, io(), { buildRuntime: fakeBuild })).toBe(0);
+    expect(stub.mock.calls[0][2]).toMatchObject({ json: true });
+  });
+
+  it('get needs exactly one sessionId and threads --out through', async () => {
+    const mod = await import('../src/subagent.js');
+    const stub = vi.fn(async (..._a: unknown[]) => 0);
+    const spy = vi.spyOn(mod, 'cmdGet').mockImplementation(stub);
+    onTestFinished(() => spy.mockRestore());
+    expect(await main(['get'], {}, io(), { buildRuntime: fakeBuild })).toBe(2);
+    expect(await main(['get', 'a', 'b'], {}, io(), { buildRuntime: fakeBuild })).toBe(2);
+    // --out only on get.
+    expect(await main(['sessions', '--out', '/tmp'], {}, io(), { buildRuntime: fakeBuild })).toBe(
+      2,
+    );
+    expect(
+      await main(['get', 'sess1', '--out', '/tmp/x'], {}, io(), { buildRuntime: fakeBuild }),
+    ).toBe(0);
+    expect(stub.mock.calls[0][2]).toMatchObject({ sessionId: 'sess1', outDir: '/tmp/x' });
+  });
+
+  it('USAGE documents all three new commands so --help remains the one source of truth', () => {
+    expect(USAGE).toContain('mocactl spawn');
+    expect(USAGE).toContain('mocactl subagents');
+    expect(USAGE).toContain('mocactl get');
+  });
+});
