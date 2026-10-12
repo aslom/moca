@@ -27,6 +27,7 @@ Preview paths is an open decision; see [`REORG-PLAN.md`](REORG-PLAN.md), open qu
 | Pick an install path and run MOCA  | [Get started](get-started/index.md)                                                                                                   |
 | Leave the Knative/KEDA deployment  | [Migrating off the Knative/KEDA deployment](migrating-from-knative.md)                                                                |
 | See the terms MOCA uses            | [Glossary](glossary.md)                                                                                                               |
+| Look up an environment variable    | [Configuration reference](reference/configuration.md)                                                                                 |
 | Call the HTTP API                  | [`api/openapi.yaml`](api/openapi.yaml), [`api/harness-openapi.yaml`](api/harness-openapi.yaml), [Context service](context-service.md) |
 | Watch a guided walkthrough         | [Demos](demos/README.md)                                                                                                              |
 | Understand why a decision was made | [ADRs](adrs/README.md) and the [spec registry](specs/README.md)                                                                       |
@@ -38,6 +39,7 @@ Preview paths is an open decision; see [`REORG-PLAN.md`](REORG-PLAN.md), open qu
 | ------------------------------------------------------------- | ---------------------------------------------------------------------- | ----------- |
 | `get-started/`                                                | Install-path chooser                                                   | New users   |
 | `migrating-from-knative.md`                                   | The single deprecation and migration page                              | Operators   |
+| `reference/configuration.md`                                  | Environment variables by component                                     | Operators   |
 | `glossary.md`, `context-service.md`, `api/`                   | Terms and API reference                                                | Integrators |
 | `demos/`                                                      | Guided, hand-driven walkthroughs                                       | Evaluators  |
 | `specs/` (registry: `specs/README.md`)                        | Design specs; the milestone registry is the source of truth for status | Maintainers |
@@ -47,6 +49,6 @@ Preview paths is an open decision; see [`REORG-PLAN.md`](REORG-PLAN.md), open qu
 | `REORG-PLAN.md`                                               | The plan this structure follows, with the audit and open questions     | Maintainers |
 
 Install and operations guides live next to the scripts they describe: `deploy/compose/`,
-`deploy/vm/`, `deploy/k8s/` and `deploy/microvm/`. Config and env-var reference, operations and
-concept pages are planned but do not exist yet; see the new-docs backlog in
+`deploy/vm/`, `deploy/k8s/` and `deploy/microvm/`. Operations and concept pages are planned but
+do not exist yet; see the new-docs backlog in
 [`REORG-PLAN.md`](REORG-PLAN.md).
