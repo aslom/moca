@@ -15,7 +15,7 @@ real value is swapped in at the proxy, _after_ an allow/deny gate.
 The path is gated behind the **`SH_AUTHBRIDGE`** feature flag (off by default). It
 runs the same way on Kind and OpenShift; only the enable/run entrypoints differ.
 
-- Design: [`../specs/2026-07-10-authbridge-egress-control-plane-poc-design.md`](../specs/2026-07-10-authbridge-egress-control-plane-poc-design.md) · [ADR-0025](../adrs/0025-authbridge-deployment-topology.md)
+- Design: [`docs/specs/2026-07-10-authbridge-egress-control-plane-poc-design.md`](../../docs/specs/2026-07-10-authbridge-egress-control-plane-poc-design.md) · [ADR-0025](../../docs/adrs/0025-authbridge-deployment-topology.md)
 - Base deploy guides: [`README-kind.md`](README-kind.md) · [`README-ocp.md`](README-ocp.md)
 
 ## The two hops
