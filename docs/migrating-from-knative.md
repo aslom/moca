@@ -5,8 +5,8 @@
 > ([ADR-0041](adrs/0041-deprecate-knative-keda-deployment.md)). P6, the process-manager runtime,
 > is the primary way to run MOCA sessions. During the window the old path receives security and
 > breakage fixes only, and no new features. Removal comes no earlier than **end of October
-> 2026**, and only once its remaining users have migrated — if that is you, say so in a
-> [GitHub discussion](https://github.com/rossoctl/moca/discussions) so the date can account for
+> 2026**, and only once its remaining users have migrated — if that is you, say so in the
+> [tracking issue](https://github.com/rossoctl/moca/issues/490) so the date can account for
 > you.
 
 ## What is deprecated — and what is not
@@ -101,7 +101,7 @@ CronJob scheduled on-ramp) run only on the deprecated path today. What the repo 
 What that means for you:
 
 - **Stay on the deprecated path for those workloads** until a P6 equivalent is announced, and say
-  so in the [migration discussion](https://github.com/rossoctl/moca/discussions): removal waits for
+  so in the [migration tracking issue](https://github.com/rossoctl/moca/issues/490): removal waits for
   remaining users to migrate, and a dependency on A or C is exactly the case that moves the date.
 - **Interactive turns can move first.** The two deployments share only Redis and the session
   schema is the same, so running P6 for `/turn` traffic while async and cron stay on Knative is the
@@ -171,7 +171,7 @@ easy return. After removal lands, the deprecated path will not be there to roll 
 - If you run the control plane on the deprecated K8s path during the window, #248's
   namespace-collocation consideration still applies to it, unchanged by the deprecation.
 - Removal happens no earlier than end of October 2026 and only once the remaining users have
-  migrated. [Tell us when you have moved](https://github.com/rossoctl/moca/discussions) — the
+  migrated. [Tell us when you have moved](https://github.com/rossoctl/moca/issues/490) — the
   condition is users, not the calendar alone.
 
 ## Status log
