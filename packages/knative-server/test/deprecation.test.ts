@@ -97,3 +97,34 @@ describe('the KEDA drainer warns at boot (ADR-0041)', () => {
     expect(r.stderr).toMatch(/MOCA_TENANCY=multi requires SH_REQUIRE_AUTH=true/);
   }, 30_000);
 });
+
+describe('the CronJob on-ramp warns at boot (ADR-0041)', () => {
+  const PKG_DIR = fileURLToPath(new URL('..', import.meta.url));
+  const TSX = fileURLToPath(new URL('../node_modules/.bin/tsx', import.meta.url));
+  const cronDispatchPath = fileURLToPath(new URL('../src/cron-dispatch.ts', import.meta.url));
+
+  it('prints the notice even when dispatch dies on a missing config, before the crash line', () => {
+    // The missing-config crash is the deterministic fast-exit path: status 1, no Redis dialed, no
+    // HTTP attempted. The CronJob pod restarts on every schedule — it is the most frequently
+    // restarted component on the deprecated path — so its logs are the one runtime channel that
+    // repeatedly reaches a scheduled-dispatch-only operator. The notice must lead the crash.
+    const r = spawnSync(TSX, [cronDispatchPath], {
+      cwd: PKG_DIR,
+      encoding: 'utf8',
+      timeout: 20_000,
+      env: {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        CRON_CONFIG: '/nonexistent/schedule.json',
+      },
+    });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(KNATIVE_DEPRECATION_NOTICE);
+    expect(r.stderr).toMatch(/cron-dispatch error:/);
+    // Order pinned on purpose: the warning is the first statement of main(), before loadConfig
+    // can throw — a dying pod's log must open with the deprecation, not bury it.
+    expect(r.stderr.indexOf(KNATIVE_DEPRECATION_NOTICE)).toBeLessThan(
+      r.stderr.indexOf('cron-dispatch error:'),
+    );
+  }, 30_000);
+});
