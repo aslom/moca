@@ -1,5 +1,11 @@
 # AuthBridge Two-Hop Egress Control (RC1)
 
+> **Deprecated 2026-10-11 ([ADR-0041](../../docs/adrs/0041-deprecate-knative-keda-deployment.md)).**
+> The Knative + KEDA deployment path this page describes is deprecated: security and breakage
+> fixes only, and removal comes no earlier than **end of October 2026**, once the remaining
+> users have migrated. P6 — the process-manager runtime — is the primary way to run MOCA
+> sessions: see [Migrating off the Knative/KEDA deployment](../../docs/migrating-from-knative.md).
+
 This demo shows **Rosso Cortex / AuthBridge** acting as the zero-trust credential
 plane on MOCA: it does both **credential injection** and
 **action control** on the harness's two HTTP egress hops, and the real credential
