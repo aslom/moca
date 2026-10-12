@@ -46,14 +46,15 @@ manager, the addressing and the way isolation is enforced differ.
 
 ## What maps to what
 
-| Knative path                                                       | P6 path                                                                                                                                                                                                                                                                                                                     |
-| ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Knative Service: scale-to-zero HTTP endpoint, activator cold-start | Supervisor: L4-only ingress, socket hand-off to a fixed worker pool ([ADR-0034](adrs/0034-vm-process-manager-socket-handoff.md)). Workers are warm — there is no cold-start term in the ceiling.                                                                                                                            |
-| KEDA ScaledJob: `leaf-worker` pods 0→N on queue depth              | Supervisor-managed workers: many sessions per worker, a bounded number of concurrent in-flight turns each, admission control instead of autoscaling.                                                                                                                                                                        |
-| Pod-exec sandboxes via `kubectl` (`KubectlTransport`)              | `remote-worker` sandboxes — container tier, or per-`Exec` microVM tier ([ADR-0035](adrs/0035-per-exec-microvm-warm-standby.md)) — dialed in over the gRPC relay. The sandbox dials out; it needs no inbound route.                                                                                                          |
-| Kourier / Route ingress                                            | L4 only. Any L7 hop that pools upstream connections silently defeats the supervisor's per-connection hand-off (ADR-0037 §3). On OpenShift, TLS terminates in a sidecar behind a passthrough Route.                                                                                                                          |
-| Scale-to-zero between turns                                        | Warm process-manager pods. Idle capacity costs memory continuously; in exchange there is no activator cold-start and no Knative/KEDA operators to run or upgrade.                                                                                                                                                           |
-| `async: true` leaf fan-out, drained by KEDA `leaf-worker` pods     | **No P6 equivalent yet.** The P6 runtime serves turns; async leaf dispatch and the CronJob scheduled on-ramp are owed follow-ups (flagged in [ADR-0034](adrs/0034-vm-process-manager-socket-handoff.md) and still open). If you depend on them, say so in the migration discussion — it changes your earliest removal date. |
+| Knative path                                                       | P6 path                                                                                                                                                                                                                                             |
+| ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Knative Service: scale-to-zero HTTP endpoint, activator cold-start | Supervisor: L4-only ingress, socket hand-off to a fixed worker pool ([ADR-0034](adrs/0034-vm-process-manager-socket-handoff.md)). Workers are warm — there is no cold-start term in the ceiling.                                                    |
+| KEDA ScaledJob: `leaf-worker` pods 0→N on queue depth              | Supervisor-managed workers: many sessions per worker, a bounded number of concurrent in-flight turns each, admission control instead of autoscaling.                                                                                                |
+| Pod-exec sandboxes via `kubectl` (`KubectlTransport`)              | `remote-worker` sandboxes — container tier, or per-`Exec` microVM tier ([ADR-0035](adrs/0035-per-exec-microvm-warm-standby.md)) — dialed in over the gRPC relay. The sandbox dials out; it needs no inbound route.                                  |
+| Kourier / Route ingress                                            | L4 only. Any L7 hop that pools upstream connections silently defeats the supervisor's per-connection hand-off (ADR-0037 §3). On OpenShift, TLS terminates in a sidecar behind a passthrough Route.                                                  |
+| Scale-to-zero between turns                                        | Warm process-manager pods. Idle capacity costs memory continuously; in exchange there is no activator cold-start and no Knative/KEDA operators to run or upgrade.                                                                                   |
+| `async: true` leaf fan-out, drained by KEDA `leaf-worker` pods     | **No P6 equivalent yet.** The P6 runtime serves turns; async leaf dispatch is an owed follow-up (see [If you depend on async fan-out or the CronJob](#if-you-depend-on-async-fan-out-or-the-cronjob)).                                              |
+| CronJob scheduled on-ramp (`cron-dispatch`, Archetype C)           | **No P6 equivalent yet.** The VM spec names a supervisor timer over `cron-dispatch` as the intended replacement, but scheduled dispatch on P6 is out of scope for round one ([P6 spec](specs/2026-09-08-p6-vm-process-manager-design.md) §2.2, §8). |
 
 ## Scaling the P6 runtime
 
@@ -84,6 +85,80 @@ between turns.
   instances. After cutover a session's next turn re-derives its workspace — the tree is a detached
   worktree at a pinned commit and continuity lives in the Redis session log, so this costs a
   fetch, not data.
+
+## If you depend on async fan-out or the CronJob
+
+Archetype A (`async: true` fan-out drained by KEDA `leaf-worker` pods) and Archetype C (the
+CronJob scheduled on-ramp) run only on the deprecated path today. What the repo states:
+
+- [ADR-0041](adrs/0041-deprecate-knative-keda-deployment.md) lists both as having **no P6
+  equivalent yet**, and the [P6 spec](specs/2026-09-08-p6-vm-process-manager-design.md) puts async
+  leaf and cron on the VM out of scope for round one. The supervisor's `--role` flag exists; the
+  experiment that would use it does not.
+- No design, interim workaround or tracking issue for either is referenced in ADR-0034 or
+  ADR-0041. This guide does not invent one.
+
+What that means for you:
+
+- **Stay on the deprecated path for those workloads** until a P6 equivalent is announced, and say
+  so in the [migration discussion](https://github.com/rossoctl/moca/discussions): removal waits for
+  remaining users to migrate, and a dependency on A or C is exactly the case that moves the date.
+- **Interactive turns can move first.** The two deployments share only Redis and the session
+  schema is the same, so running P6 for `/turn` traffic while async and cron stay on Knative is the
+  intended shape of "bring the P6 side up in parallel" above. The repo's smoke tests do not
+  exercise this mixed setup _(unverified)_; canary it before relying on it.
+- Archetype B (human gate) and sync `/turn` and `/runs` are not affected.
+
+## Configuration: what changes
+
+Only variables verified in the shipped manifests and env templates are listed. For anything not
+listed, the destination README is authoritative (`deploy/vm/env/*.env.example`, `deploy/k8s/`,
+`deploy/compose/`).
+
+| Knative path (`deploy/knative/service.yaml`)                                                   | P6 path                                                                                                                                                                                                                                                    |
+| ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `REDIS_URL`                                                                                    | Unchanged (`supervisor.env.example`: "inherited unchanged"). Point it at the same Redis to keep sessions.                                                                                                                                                  |
+| `KAGENTI_SANDBOX_POD`                                                                          | Not used by the supervisor template. Sandboxes are discovered from relay records: `SH_SANDBOX_DISCOVERY=records` and `SH_REMOTE_SANDBOX=1`.                                                                                                                |
+| `KAGENTI_SANDBOX_POOL_SELECTOR`                                                                | Still present in the supervisor template (`app=sandbox`), together with `KAGENTI_SANDBOX_CAP`.                                                                                                                                                             |
+| `SH_REQUIRE_AUTH`, `SH_EXCHANGE_TOKEN`, `SH_SESSION_TOKEN_PUBLIC_KEYS`, `SH_CONTROL_PLANE_URL` | Same names. On a VM, `setup-vm.sh` generates the secrets (`SH_SESSION_TOKEN_PRIVATE_KEY`, `SH_CREDENTIAL_KEK`, `SH_EXCHANGE_TOKEN`) as systemd credentials; setting one in the env file as well makes the control plane refuse to boot.                    |
+| `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`                              | Inference credentials are per user, issued by the control plane. An operator-wide key is opt-in: `SH_ALLOW_OPERATOR_FALLBACK=true` with `SH_DEFAULT_INFERENCE_ENDPOINT` (`control-plane.env.example`; `deploy/vm/README.md`, "The operator-key fallback"). |
+| `LEAF_RESULT_TTL_SECONDS`                                                                      | Read only by the async entrypoints (`server.ts`, `leaf-job.ts`); no P6 counterpart while async has no P6 equivalent.                                                                                                                                       |
+| _(none)_                                                                                       | New and required on VM: `SH_TURNS_PER_WORKER` (no default), `SH_RELAY_ADDR`, `SH_RELAY_TOKEN`, `MOCA_RELAY_EXEC_TOKEN`, `SH_GITHUB_CLIENT_ID`, `SH_PUBLIC_HARNESS_URL`. Optional: `SH_WORKERS`, `SH_ROUTING_POLICY`.                                       |
+
+`SH_MODEL` has no mapping verified here; check the destination README before assuming it carries over.
+
+## Clients: `mocactl`
+
+`mocactl` talks to the MU1 control plane, which tells it where the harness is
+(`GET /v1/discovery`, set with `SH_PUBLIC_HARNESS_URL`), so migrating clients means pointing them at
+the control plane's URL, not at the harness. See [`packages/mocactl/README.md`](../packages/mocactl/README.md).
+
+- Install: `curl -fsSL https://raw.githubusercontent.com/rossoctl/moca/main/scripts/install-mocactl.sh | sh`
+  (Node 22+; `MOCACTL_VERSION` and `MOCACTL_INSTALL_DIR` override defaults).
+- First run: `mocactl` onboards, then `mocactl login` does the device-flow login.
+  `--harness-url` / `SH_HARNESS_URL` override discovery, for example behind a local port-forward.
+- The Knative quick start (`deploy/knative/mocactl-quickstart.sh`, `make mocactl-quickstart`) is
+  deprecated along with the rest of `deploy/knative/`. The P6 equivalents are the Compose and VM
+  READMEs above.
+
+## Rolling back
+
+Bring-up runs the P6 side next to the Knative deployment, so rollback is a client change while you
+have not yet done step 4 of Bring-up:
+
+1. Repoint clients at the Knative endpoint.
+2. Sessions written by P6 resume there: both paths use `@moca/session-backend` with the same schema.
+3. Sandbox filesystems do not carry in either direction; the next turn re-derives its workspace.
+
+Keep the Knative Service and ScaledJobs in place until you are satisfied; step 4 is the point of no
+easy return. After removal lands, the deprecated path will not be there to roll back to.
+
+## Status log
+
+| Date       | Change                                                                                                                                                                             |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-10-11 | Knative/KEDA deployment path deprecated ([ADR-0041](adrs/0041-deprecate-knative-keda-deployment.md)). Removal: no earlier than end of October 2026, after remaining users migrate. |
+| 2026-10-12 | Added the async/cron section, configuration mapping, `mocactl` guidance and rollback.                                                                                              |
 
 ## Bring-up
 
