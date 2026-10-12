@@ -1,17 +1,9 @@
 /**
- * Subagent ledger: client-side batch record of leaves this operator spawned.
- *
- * Stored at $XDG_STATE_HOME/mocactl/subagents.jsonl, mode 0600. Append-only JSONL with periodic
- * compaction: each line is either an initial record or an update. `readAll` folds updates into
- * records keyed by sessionId.
- *
- * The ledger is the *caller's* authority on the parent/child tree (there is no server-side
- * parentSessionId today). `subagents` renders this file joined with /runs/status.
- *
- * Concurrency: POSIX guarantees atomic appends under PIPE_BUF (4 KiB). Each JSONL line is well
- * under that limit for both initial records and updates, so concurrent spawn + subagents reads
- * do not need a user-space lock on the common path. Compaction is the one write that rewrites
- * the whole file; it uses a `.tmp` + rename pattern so a reader never sees a torn file.
+ * Client-side ledger of spawned subagents. Stored at $XDG_STATE_HOME/mocactl/subagents.jsonl
+ * (mode 0600). Each line is a `record` (initial write) or an `update` (state delta); `readAll`
+ * folds updates onto records by sessionId. Concurrent appends stay atomic under POSIX
+ * PIPE_BUF (4 KiB) without an explicit lock. `compact` is the one whole-file write and uses
+ * `.tmp` + rename.
  */
 import {
   appendFileSync,
@@ -48,15 +40,10 @@ export interface LedgerRecord {
   /** Latest observed state. Starts as 'running'. */
   lastKnownState: HonestState;
   stateDetail?: string;
-  /** Epoch ms the state was last updated. */
+  /** When this state was last written, in epoch ms. */
   stateObservedAt: number;
 }
 
-/**
- * A line in the JSONL. `record` is an initial write; `update` is a state transition keyed by
- * sessionId. The dual shape keeps the on-disk file append-only (fast + lock-free) while still
- * supporting state mutations without rewriting history.
- */
 type LedgerLine =
   | { v: 1; type: 'record'; record: LedgerRecord }
   | {
@@ -79,10 +66,7 @@ export interface Ledger {
   ): void;
   readAll(): LedgerRecord[];
   find(sessionId: string): LedgerRecord | undefined;
-  /**
-   * Rewrites the ledger with only the folded current state of each session. Not needed on the
-   * common path; exposed so a future `mocactl subagents --prune` or housekeeping job can call it.
-   */
+  /** Rewrites the file as folded records. Not called on the hot path. */
   compact(): void;
 }
 
@@ -115,8 +99,7 @@ export function openLedger(path: string, now: () => number = Date.now): Ledger {
       const body = current
         .map((r) => JSON.stringify({ v: 1, type: 'record', record: r } satisfies LedgerLine))
         .join('\n');
-      // write + chmod + rename: an in-flight reader never sees a half-written file, and the mode
-      // survives the rename on every POSIX fs.
+      // Atomic swap: readers never see a half-written file.
       writeFileSync(tmp, body + (body ? '\n' : ''), { mode: 0o600 });
       renameSync(tmp, path);
     },
@@ -126,8 +109,7 @@ export function openLedger(path: string, now: () => number = Date.now): Ledger {
 function writeLine(path: string, line: LedgerLine): void {
   const existed = existsSync(path);
   appendFileSync(path, JSON.stringify(line) + '\n', { mode: 0o600 });
-  // Freshly created: tighten the mode. appendFileSync honors the mode only on create, but a file
-  // that already existed might have a wider mode set elsewhere — leave the operator in control.
+  // Mode only applies on create; existing files keep whatever the operator set.
   if (!existed) chmodSync(path, 0o600);
 }
 
@@ -142,9 +124,7 @@ function readLines(path: string): LedgerLine[] {
     try {
       line = JSON.parse(raw);
     } catch {
-      // Skip a malformed line rather than hard-failing: a crashed-mid-append writer may have
-      // left a partial. The next compaction will clear it; readers stay available in the meantime.
-      continue;
+      continue; // crashed-mid-append partial; next compact clears it.
     }
     const l = line as LedgerLine;
     if (l?.v === 1 && (l.type === 'record' || l.type === 'update')) out.push(l);
@@ -159,9 +139,8 @@ function foldLines(lines: LedgerLine[]): LedgerRecord[] {
       byId.set(line.record.sessionId, { ...line.record });
     } else {
       const existing = byId.get(line.sessionId);
-      // Ignore orphaned updates: a `record` must have come first for the update to mean anything.
-      // This can happen if a reader starts between a crash and a compaction; next compaction cleans.
-      if (!existing) continue;
+      if (!existing) continue; // orphaned update — ignore until next compact
+
       existing.lastKnownState = line.lastKnownState;
       existing.stateObservedAt = line.stateObservedAt;
       if (line.stateDetail !== undefined) existing.stateDetail = line.stateDetail;
@@ -169,7 +148,7 @@ function foldLines(lines: LedgerLine[]): LedgerRecord[] {
       if (line.childPid !== undefined) existing.childPid = line.childPid;
     }
   }
-  // Order: by submittedAt so `subagents` shows oldest-first (= dispatch order on this ledger).
+  // Oldest-first by dispatch time.
   return [...byId.values()].sort((a, b) => a.submittedAt - b.submittedAt);
 }
 
@@ -180,7 +159,7 @@ function ensureParentDir(path: string): void {
   }
 }
 
-/** Touch the file so `readAll` on a fresh install does not error on a missing path. */
+/** Touch the file so `readAll` on a fresh install returns []. */
 export function initLedger(path: string): void {
   ensureParentDir(path);
   if (!existsSync(path)) {

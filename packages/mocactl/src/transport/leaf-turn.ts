@@ -1,20 +1,13 @@
 /**
- * Leaf-turn transport: client-side submit + status-read for data-plane `/runs`.
- *
- * Separate from HarnessClient's `streamTurn` / `attach` (which drive the interactive `/v1/turn`
- * path) because leaf dispatch is a different wire shape: a JSON POST to `/runs` with a
- * LeafEnvelope body, a sync JSON response, and `GET /runs/status?sessionId=` to read a stored
- * record (24h TTL). This module is the one place the leaf dispatch lives, so a later async-turn
- * transport can replace the backend without touching spawn/subagents/get.
+ * Client-side submit + status-read for data-plane `/runs`. One place for leaf dispatch, so a
+ * later async-turn transport can replace the backend without changing spawn/subagents/get.
  */
 import { ApiError, errorFromResponse, networkError } from '../api/errors.js';
 import { trimTrailingSlashes } from '../api/url.js';
 
 /**
- * Envelope posted to `POST /runs`. Mirrors harness/src/run-leaf.ts `LeafEnvelope`; this
- * client sends only `prompt` and `converge` kinds. `item` is required by the
- * verdict path even for prompt leaves — the harness ignores it on prompt but refuses an envelope
- * without `item` for converge. Kept flat so the submit function can serialize without reshaping.
+ * Mirrors harness/src/run-leaf.ts `LeafEnvelope`; this client sends `prompt` and `converge`
+ * kinds. `item` is required by the verdict path (converge); harness ignores it on prompt.
  */
 export interface LeafEnvelope {
   sessionId: string;
@@ -40,9 +33,8 @@ export interface LeafResultBody {
 }
 
 /**
- * Honest state — what spawn/subagents/get present to users. The server's
- * `queued` conflates "running on this pod", "never recorded", and "aged out" (server.ts:678-680);
- * this module resolves that ambiguity using child-pid liveness and a grace window.
+ * Honest state surfaced to users. Resolves the server's three-way `queued` (still running /
+ * never recorded / aged out) with child-pid liveness and a grace window.
  */
 export type HonestState = 'running' | 'done' | 'failed' | 'paused' | 'unknown';
 
@@ -54,17 +46,25 @@ export interface StateView {
   result?: LeafResultBody;
 }
 
-/**
- * Grace window after a child dies before the server's `queued` is honestly reported as
- * `unknown`. Covers two races: the child wrote the result record and exited but the write hasn't
- * propagated to `/runs/status` yet, and the child was still mid-POST when it was killed.
- */
+/** How long after a child dies we wait before reporting `unknown`, to cover result-write races. */
 export const DEFAULT_UNKNOWN_GRACE_MS = 60_000;
 
-/**
- * Minimum of the two surfaces the transport needs, so a test can inject a fake without
- * standing up a real HarnessClient.
- */
+export function isTerminalState(state: HonestState): boolean {
+  return state === 'done' || state === 'failed' || state === 'paused';
+}
+
+/** Map a terminal `/runs/status` body to a state view. */
+export function terminalFromBody(body: LeafResultBody): StateView {
+  if (body.status === 'responded' || body.status === 'done' || body.status === 'solved') {
+    return { state: 'done', result: body };
+  }
+  if (body.status === 'paused') return { state: 'paused', detail: 'gate requested', result: body };
+  if (body.status === 'failed')
+    return { state: 'failed', detail: body.reason ?? body.message, result: body };
+  return { state: 'unknown', detail: `server returned status '${body.status}'`, result: body };
+}
+
+/** Minimum interface so a test can inject a fake without a real HarnessClient. */
 export interface LeafHarness {
   baseUrl(): Promise<string>;
 }
@@ -104,11 +104,7 @@ export class LeafTransport {
     }
   }
 
-  /**
-   * GET /runs/status?sessionId=. Returns the result body or 'queued' (no record on the server
-   * side) or 'not_found' (session itself unknown). The caller resolves `queued` into a honest
-   * state using child liveness.
-   */
+  /** GET /runs/status. Returns the body, or 'queued' / 'not_found'. */
   async readLeafState(
     sessionId: string,
     sessionToken: string,
@@ -143,47 +139,26 @@ export class LeafTransport {
   }
 }
 
-/** Child-liveness probe sent to `mapHonestState`. */
 export interface ChildLiveness {
-  /** True if the detached worker pid is still alive (parent-side `kill -0` check). */
   alive: boolean;
-  /** Epoch ms when the child was last confirmed alive, or when it was observed to have died. */
+  /** When we last checked this child's liveness, in epoch ms. */
   observedAt: number;
 }
 
-/**
- * Map a raw status read + child-pid liveness into a HonestState. Grace lets a just-exited
- * child's result propagate before we declare `unknown`.
- */
+/** Map a raw status + child liveness into a HonestState. */
 export function mapHonestState(
   raw: LeafResultBody | 'queued' | 'not_found',
   live: ChildLiveness,
   now: number,
   graceMs: number = DEFAULT_UNKNOWN_GRACE_MS,
 ): StateView {
-  if (raw === 'not_found') {
-    // Session itself is gone (aged out or never created). Honest, not retryable.
-    return { state: 'unknown', detail: 'session not found' };
-  }
+  if (raw === 'not_found') return { state: 'unknown', detail: 'session not found' };
   if (raw === 'queued') {
     if (live.alive) return { state: 'running' };
-    // Child is gone; wait out the grace before calling it unknown to avoid a race with the
-    // child's result-write landing after we observed its death.
+    // Grace: a just-exited child's result write may still be propagating.
     if (now - live.observedAt < graceMs)
       return { state: 'running', detail: 'child exited; waiting for result' };
     return { state: 'unknown', detail: 'child exited and no result recorded' };
   }
-  // Server has a terminal record; honest-map by status.
-  if (raw.status === 'responded' || raw.status === 'done' || raw.status === 'solved') {
-    return { state: 'done', result: raw };
-  }
-  if (raw.status === 'paused') return { state: 'paused', detail: 'gate requested', result: raw };
-  if (raw.status === 'failed')
-    return { state: 'failed', detail: raw.reason ?? raw.message, result: raw };
-  // Server returned something we don't understand (future status). Honestly surface it.
-  return {
-    state: 'unknown',
-    detail: `server returned status '${(raw as LeafResultBody).status}'`,
-    result: raw,
-  };
+  return terminalFromBody(raw);
 }

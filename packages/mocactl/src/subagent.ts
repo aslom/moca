@@ -1,14 +1,6 @@
-/**
- * `mocactl spawn | subagents | get` — subagent command surface.
- *
- * These commands sit above the leaf-turn transport (src/transport/leaf-turn.ts) and the
- * subagent ledger (src/core/subagent-ledger.ts). The transport is the one place a leaf is
- * dispatched or read back; the ledger is the one place the caller remembers what it spawned.
- * Future subagent commands (watch, approve, follow-up) plug into these two primitives without
- * changing the three commands here.
- */
+/** `mocactl spawn | subagents | get`, built on the leaf-turn transport and subagent ledger. */
 import { spawn as spawnChild } from 'node:child_process';
-import { writeFileSync, mkdirSync, existsSync, openSync } from 'node:fs';
+import { writeFileSync, mkdirSync, existsSync, openSync, closeSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ApiError } from './api/errors.js';
 import type { ControlPlaneApi, CreateSessionRequest } from './api/types.js';
@@ -26,33 +18,23 @@ import type { Runtime } from './runtime.js';
 import {
   DEFAULT_UNKNOWN_GRACE_MS,
   LeafTransport,
+  isTerminalState,
   mapHonestState,
-  type HonestState,
+  terminalFromBody,
   type LeafEnvelope,
   type LeafResultBody,
   type StateView,
 } from './transport/leaf-turn.js';
 
-/* ----------------------------------------------------------------- *
- * Shared types + helpers                                             *
- * ----------------------------------------------------------------- */
-
 const BUNDLE_DIGEST = /^sha256:[0-9a-f]{64}$/;
-/**
- * Prompt size cap. The dispatch envelope is persisted to the ledger (so a future `approve`
- * command can resend it), and the ledger's append-only JSONL relies on POSIX atomic appends
- * under PIPE_BUF (4 KiB) for concurrent-write safety. A multi-MB prompt would overflow that
- * guarantee and could interleave with concurrent writers.
- */
+/** Cap keeps a ledger append under PIPE_BUF, which is what guarantees atomicity on POSIX. */
 const MAX_PROMPT_BYTES = 64 * 1024;
 
-/** Minted session + token enough for both the dispatch POST and later /runs/status reads. */
 interface SpawnedSession {
   sessionId: string;
   token: string;
 }
 
-/** False (with the reason on stderr) unless there's a logged-in control plane and a harness. */
 function requireReady(
   rt: Runtime,
   io: Io,
@@ -68,12 +50,10 @@ function requireReady(
   return true;
 }
 
-/** Session-id form the harness accepts for /runs envelopes (same alphabet as toSessionId). */
+/** Same alphabet toSessionId uses — the harness rejects anything else. */
 const SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]$/;
 
-/* ----------------------------------------------------------------- *
- * `mocactl spawn`                                                    *
- * ----------------------------------------------------------------- */
+// --- spawn ---
 
 export interface SpawnOptions {
   prompt: string;
@@ -83,18 +63,12 @@ export interface SpawnOptions {
   ref?: string;
   tag?: string;
   json: boolean;
-  /** Test-seam: inject a fork so unit tests can observe the detached-child wire without spawning. */
+  /** Test seams: fork + ledger injection. */
   forkFn?: (sessionId: string, token: string, envelope: LeafEnvelope, cwd: string) => number;
-  /** Test-seam: inject the ledger (unit tests use a tmp path). */
   ledger?: Ledger;
 }
 
-/**
- * Create a session, mint its token, write a ledger record BEFORE forking (so a crash between
- * fork and record-write never orphans a session), fork a detached worker that holds the sync
- * POST /runs, then return. The worker lives outside this process group, so quitting mocactl
- * does not kill it.
- */
+/** Create session, record it, fork a detached worker, return. Worker survives mocactl exit. */
 export async function cmdSpawn(rt: Runtime, io: Io, opts: SpawnOptions): Promise<number> {
   if (!requireReady(rt, io)) return 2;
   if (!opts.prompt.trim()) {
@@ -131,8 +105,7 @@ export async function cmdSpawn(rt: Runtime, io: Io, opts: SpawnOptions): Promise
 
   const envelope: LeafEnvelope = buildEnvelope(session.sessionId, opts);
   const ledger = opts.ledger ?? openLedger(rt.paths.subagentsFile);
-  // Record BEFORE fork: a crash between fork and record-write would otherwise leave a running
-  // worker with no caller-side record.
+  // Record before fork so a crash between the two never orphans a worker.
   const record: LedgerRecord = {
     sessionId: session.sessionId,
     ...(opts.tag ? { tag: opts.tag } : {}),
@@ -151,9 +124,7 @@ export async function cmdSpawn(rt: Runtime, io: Io, opts: SpawnOptions): Promise
   try {
     pid = forkFn(session.sessionId, session.token, envelope, rt.paths.stateDir);
   } catch (err) {
-    // A fork failure after a successful session create is the one state that would otherwise
-    // orphan a ledger row with no worker. Mark the row `failed` with the fork error so the
-    // operator sees the real cause via `mocactl subagents`.
+    // Fork failed after session was created — mark the ledger row failed with the fork error.
     ledger.updateState(session.sessionId, 'failed', {
       detail: err instanceof Error ? err.message : String(err),
       now: rt.now(),
@@ -179,10 +150,7 @@ async function createSession(cp: ControlPlaneApi, bundle?: string): Promise<Spaw
 }
 
 function buildEnvelope(sessionId: string, opts: SpawnOptions): LeafEnvelope {
-  // The verdict path requires an `item` even for prompt leaves; a synthetic one is harmless
-  // because the prompt kind only reads `prompt` (harness/src/run-leaf.ts). Converge reads item
-  // for the pattern + require_approval; spawn exposes neither flag, so a passthrough item is
-  // right here. Future expansions (gates, patterns) would add explicit flags.
+  // Converge requires `item`; prompt ignores it. One synthetic covers both.
   const item = { item_id: 'spawn', file: '-', pattern: '-' };
   return {
     sessionId,
@@ -205,12 +173,7 @@ function envelopeForLedger(opts: SpawnOptions): LedgerEnvelope {
   };
 }
 
-/**
- * Fork a detached worker that holds the sync `POST /runs` and exits once the response is in
- * the ledger. The worker needs the session token to call /runs; we pass it on stdin to the
- * worker so it never shows up in `ps` output. The worker body is `mocactl __spawn-worker`,
- * added to cli.ts.
- */
+/** Fork a detached worker (body: `mocactl __spawn-worker`) holding the sync POST /runs. */
 function defaultFork(
   sessionId: string,
   token: string,
@@ -218,32 +181,28 @@ function defaultFork(
   stateDir: string,
 ): number {
   if (!existsSync(stateDir)) mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-  // Logs on error (child cannot write stdout; this is the one place to find a crashed worker).
   const logPath = join(stateDir, `spawn-${sessionId}.log`);
   const logFd = openSync(logPath, 'a', 0o600);
-  const child = spawnChild(process.execPath, [process.argv[1]!, '__spawn-worker'], {
-    detached: true,
-    stdio: ['pipe', logFd, logFd],
-    env: { ...process.env },
-  });
-  // Pass the leaf-dispatch payload on stdin so no secret shows up in `ps`.
-  const payload = JSON.stringify({ sessionId, token, envelope });
-  child.stdin!.end(payload + '\n');
-  child.unref();
-  return child.pid!;
+  try {
+    const child = spawnChild(process.execPath, [process.argv[1]!, '__spawn-worker'], {
+      detached: true,
+      stdio: ['pipe', logFd, logFd],
+      env: { ...process.env },
+    });
+    // Pass the session token on stdin so it never appears in `ps`.
+    const payload = JSON.stringify({ sessionId, token, envelope });
+    child.stdin!.end(payload + '\n');
+    child.unref();
+    return child.pid!;
+  } catch (err) {
+    closeSync(logFd);
+    throw err;
+  }
 }
 
-/**
- * Entry point for the detached worker. Reads {sessionId, token, envelope} from stdin,
- * POSTs /runs, writes the result to the ledger, exits. Any throw is swallowed so an unhandled
- * rejection does not leave a confusing stack in the log; the ledger update is best-effort.
- */
+/** Detached-worker entry: read payload from stdin, POST /runs, record outcome, exit. */
 export async function runSpawnWorker(rt: Runtime): Promise<number> {
-  if (!rt.harness) {
-    // No harness URL — nothing to POST to. The parent already recorded a 'running' state, so
-    // the ledger shows that until the row ages into 'unknown' per the honest-state grace rule.
-    return 2;
-  }
+  if (!rt.harness) return 2;
   const payload = await readStdin();
   let parsed: { sessionId: string; token: string; envelope: LeafEnvelope };
   try {
@@ -255,12 +214,12 @@ export async function runSpawnWorker(rt: Runtime): Promise<number> {
   const ledger = openLedger(rt.paths.subagentsFile, rt.now);
   try {
     const body = await transport.submitLeafTurn(parsed.envelope, parsed.token);
-    const state = terminalFromBody(body);
-    ledger.updateState(parsed.sessionId, state.state, {
-      detail: state.detail,
+    const view = terminalFromBody(body);
+    ledger.updateState(parsed.sessionId, view.state, {
+      detail: view.detail,
       now: rt.now(),
     });
-    return state.state === 'done' ? 0 : 1;
+    return view.state === 'done' ? 0 : 1;
   } catch (err) {
     ledger.updateState(parsed.sessionId, 'failed', {
       detail: err instanceof Error ? err.message : String(err),
@@ -268,14 +227,6 @@ export async function runSpawnWorker(rt: Runtime): Promise<number> {
     });
     return 1;
   }
-}
-
-function terminalFromBody(body: LeafResultBody): { state: HonestState; detail?: string } {
-  if (body.status === 'responded' || body.status === 'done' || body.status === 'solved')
-    return { state: 'done' };
-  if (body.status === 'paused') return { state: 'paused', detail: 'gate requested' };
-  if (body.status === 'failed') return { state: 'failed', detail: body.reason ?? body.message };
-  return { state: 'unknown', detail: `server returned status '${body.status}'` };
 }
 
 function readStdin(): Promise<string> {
@@ -288,17 +239,14 @@ function readStdin(): Promise<string> {
   });
 }
 
-/* ----------------------------------------------------------------- *
- * `mocactl subagents`                                                *
- * ----------------------------------------------------------------- */
+// --- subagents ---
 
 export interface SubagentsOptions {
   tag?: string;
   json: boolean;
   signal?: AbortSignal;
-  /** Test seam: inject the ledger. */
+  /** Test seams. */
   ledger?: Ledger;
-  /** Test seam: inject the transport (so tests avoid real /runs/status). */
   transport?: LeafTransport;
 }
 
@@ -316,6 +264,12 @@ export async function cmdSubagents(rt: Runtime, io: Io, opts: SubagentsOptions):
   const now = rt.now();
   const views: Array<{ record: LedgerRecord; view: StateView }> = [];
   for (const r of records) {
+    // Ledger is authoritative past a terminal state — /runs/status has a 24h TTL, so re-reading
+    // would regress a durable `done` row to `unknown` once the server-side record ages out.
+    if (isTerminalState(r.lastKnownState)) {
+      views.push({ record: r, view: { state: r.lastKnownState, detail: r.stateDetail } });
+      continue;
+    }
     const alive = r.childPid !== undefined && isAlive(r.childPid);
     const observedAt = alive ? now : r.stateObservedAt;
     let raw: LeafResultBody | 'queued' | 'not_found';
@@ -323,8 +277,7 @@ export async function cmdSubagents(rt: Runtime, io: Io, opts: SubagentsOptions):
       const token = await rt.cp.mintSessionToken(r.sessionId);
       raw = await transport.readLeafState(r.sessionId, token.token, opts.signal);
     } catch (err) {
-      // Keep going on other rows: one session that aged out should not fail the whole list.
-      // The row shows the last known state from the ledger as its only honest answer.
+      // One row's failure doesn't fail the list.
       views.push({ record: r, view: { state: 'unknown', detail: describeError(err) } });
       continue;
     }
@@ -333,7 +286,7 @@ export async function cmdSubagents(rt: Runtime, io: Io, opts: SubagentsOptions):
       view: mapHonestState(raw, { alive, observedAt }, now, DEFAULT_UNKNOWN_GRACE_MS),
     });
   }
-  // Persist what we learned so a later `subagents` call starts closer to the truth.
+  // Persist any state changes so the next `subagents` call starts closer to the truth.
   for (const { record, view } of views) {
     if (view.state !== record.lastKnownState || view.detail !== record.stateDetail) {
       ledger.updateState(record.sessionId, view.state, { detail: view.detail, now });
@@ -355,7 +308,6 @@ export async function cmdSubagents(rt: Runtime, io: Io, opts: SubagentsOptions):
     );
     return 0;
   }
-  // Aligned table with a header row (matches cmdSessions' style).
   const header = ['SESSION', 'TAG', 'KIND', 'STATE', 'BUNDLE'];
   const rows = views.map(({ record, view }) => [
     sanitizeRemote(record.sessionId),
@@ -370,8 +322,7 @@ export async function cmdSubagents(rt: Runtime, io: Io, opts: SubagentsOptions):
 
 function isAlive(pid: number): boolean {
   try {
-    // kill 0 doesn't send a signal; it just checks whether the pid exists for this user.
-    process.kill(pid, 0);
+    process.kill(pid, 0); // signal 0 only probes; it does not deliver.
     return true;
   } catch {
     return false;
@@ -386,20 +337,16 @@ function renderTable(rows: string[][]): string {
   );
 }
 
-/* ----------------------------------------------------------------- *
- * `mocactl get <sessionId>`                                          *
- * ----------------------------------------------------------------- */
+// --- get ---
 
 export interface GetOptions {
   sessionId: string;
   outDir?: string;
   json: boolean;
   signal?: AbortSignal;
-  /** Test seam: inject the transport. */
   transport?: LeafTransport;
 }
 
-/** How many lines of text (or patch) show in the bounded summary when --json is off. */
 const GET_SUMMARY_LINES = 10;
 
 export async function cmdGet(rt: Runtime, io: Io, opts: GetOptions): Promise<number> {
@@ -430,7 +377,6 @@ export async function cmdGet(rt: Runtime, io: Io, opts: GetOptions): Promise<num
     if (opts.json) io.out(JSON.stringify({ sessionId: opts.sessionId, status: 'queued' }) + '\n');
     return 1;
   }
-  // Terminal body: write artifacts to the out dir (default cwd), then print a bounded summary.
   const outDir = resolve(opts.outDir ?? '.');
   if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
   const written: string[] = [];
@@ -449,11 +395,13 @@ export async function cmdGet(rt: Runtime, io: Io, opts: GetOptions): Promise<num
     writeFileSync(p, raw.patch.endsWith('\n') ? raw.patch : raw.patch + '\n', { mode: 0o644 });
     written.push(p);
   }
+  // Exit 0 only for a complete answer; `paused` is terminal but still awaiting a gate decision.
+  const completed = raw.status === 'responded' || raw.status === 'done' || raw.status === 'solved';
   if (opts.json) {
     io.out(
       JSON.stringify({ sessionId: opts.sessionId, status: raw.status, files: written }) + '\n',
     );
-    return raw.status === 'failed' ? 1 : 0;
+    return completed ? 0 : 1;
   }
   io.err(`status  ${raw.status}`);
   for (const p of written) io.err(`wrote   ${p}`);
@@ -462,5 +410,5 @@ export async function cmdGet(rt: Runtime, io: Io, opts: GetOptions): Promise<num
     const head = summaryBody.split('\n').slice(0, GET_SUMMARY_LINES).join('\n');
     io.out(sanitizeRemote(head) + (summaryBody.includes('\n') ? '\n' : ''));
   }
-  return raw.status === 'failed' ? 1 : 0;
+  return completed ? 0 : 1;
 }

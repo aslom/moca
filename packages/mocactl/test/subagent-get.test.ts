@@ -180,3 +180,33 @@ describe('cmdGet — ApiError translation', () => {
     expect(err.join('\n')).toContain("no session 'sess-abc'");
   });
 });
+
+describe('cmdGet — paused is not success', () => {
+  it('exits 1 for a paused body — a session waiting on a gate is terminal but not a finished result', async () => {
+    const { rt } = makeRt(scratch);
+    const { io } = makeIo();
+    const body = {
+      status: 'paused',
+      gateId: 1,
+      gate: { summary: 'approve this?', proposed_action: 'go' },
+    } as const;
+    const r = await cmdGet(rt, io, baseOpts({ transport: fakeTransport(body), outDir: scratch }));
+    expect(r).toBe(1);
+  });
+
+  it('--json on paused still emits the file list on stdout (so scripts can see which files were written)', async () => {
+    const { rt } = makeRt(scratch);
+    const { io, out } = makeIo();
+    const body = { status: 'paused', text: 'awaiting decision' } as const;
+    const r = await cmdGet(
+      rt,
+      io,
+      baseOpts({ json: true, transport: fakeTransport(body), outDir: scratch }),
+    );
+    expect(r).toBe(1);
+    const parsed = JSON.parse(out[0]!.trim());
+    expect(parsed.status).toBe('paused');
+    expect(parsed.files).toHaveLength(1);
+    expect(parsed.files[0]).toMatch(/sess-abc\.text$/);
+  });
+});

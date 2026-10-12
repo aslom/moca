@@ -165,3 +165,41 @@ describe('cmdSubagents — joined view', () => {
     expect(lines[1]).toContain('done');
   });
 });
+
+describe('cmdSubagents — terminal rows are not re-queried (24h TTL safety)', () => {
+  it("skips /runs/status for a row the ledger already shows as 'done'; preserves the ledger state", async () => {
+    const rt = makeRt(scratch);
+    const ledger = openLedger(rt.paths.subagentsFile, rt.now);
+    ledger.append(seedRecord({ sessionId: 'done-row', lastKnownState: 'done' }));
+    // readLeafState would REGRESS the row to 'unknown' if called (24h-aged session returns 404).
+    // Pin that we do not call it at all.
+    const readLeafState = vi.fn();
+    const transport = { readLeafState } as unknown as LeafTransport;
+    const { io, out } = makeIo();
+    await cmdSubagents(rt, io, base({ json: true, ledger, transport }));
+    expect(readLeafState).not.toHaveBeenCalled();
+    expect(rt.cp.mintSessionToken).not.toHaveBeenCalled();
+    expect(JSON.parse(out[0]!.trim()).subagents[0].state).toBe('done');
+  });
+
+  it("same guard applies to 'failed' and 'paused' rows (any terminal state)", async () => {
+    const rt = makeRt(scratch);
+    const ledger = openLedger(rt.paths.subagentsFile, rt.now);
+    ledger.append(seedRecord({ sessionId: 'f', lastKnownState: 'failed', stateDetail: 'boom' }));
+    ledger.append(seedRecord({ sessionId: 'p', submittedAt: 2, lastKnownState: 'paused' }));
+    const readLeafState = vi.fn();
+    const transport = { readLeafState } as unknown as LeafTransport;
+    const { io, out } = makeIo();
+    await cmdSubagents(rt, io, base({ json: true, ledger, transport }));
+    expect(readLeafState).not.toHaveBeenCalled();
+    const parsed = JSON.parse(out[0]!.trim());
+    expect(
+      parsed.subagents.map((s: { sessionId: string; state: string }) => [s.sessionId, s.state]),
+    ).toEqual([
+      ['f', 'failed'],
+      ['p', 'paused'],
+    ]);
+    // The 'failed' detail from the ledger must survive — this is the whole point of not re-querying.
+    expect(parsed.subagents[0].detail).toBe('boom');
+  });
+});
