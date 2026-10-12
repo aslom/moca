@@ -31,7 +31,8 @@ import {
 import { prepareServerProcess } from './server-process.js';
 import { adoptTurnSlot } from './turn-slot.js';
 import { resolveVersion } from './version.js';
-import { handleWorkloads } from './workloads.js';
+import { handleWorkloads, resolveWorkloadRun, workloadsEnabled } from './workloads.js';
+import { assertContextServiceSettings, downloadContextBundle } from './context-service.js';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
@@ -829,12 +830,57 @@ function getResultStore(): RedisResultStore {
   return resultStore;
 }
 
-/**
- * Running on a workload needs its frozen Context delivered to the sandbox, which is a later change.
- * Until then a run that names a workload is refused rather than run on the default pool.
- */
+/** Refuses a run that names a workload where one cannot run, rather than running it bare. */
 function rejectWorkloadRun(res: ServerResponse): void {
   res.writeHead(501, JSON_HEADERS).end(JSON.stringify({ error: 'workload_runs_unavailable' }));
+}
+
+/**
+ * Resolve the workload a synchronous run names into the trusted `internalContext` the harness
+ * delivers to the sandbox. The caller's session token must belong to the workload's owner. The
+ * bundle is downloaded lazily, only when the selected sandbox lacks the revision. Writes the
+ * refusal itself and resolves to `null` when the run must not proceed.
+ */
+async function resolveRunWorkload(
+  body: any,
+  auth: TurnAuth | null,
+  res: ServerResponse,
+): Promise<any | null> {
+  if (body.workloadId === undefined) return body;
+  if (!workloadsEnabled()) {
+    rejectWorkloadRun(res);
+    return null;
+  }
+  if (!auth) {
+    writeAuthError(res, new CpError('token_required', 'a workload run requires a session token'));
+    return null;
+  }
+  try {
+    assertContextServiceSettings();
+  } catch (err) {
+    console.error('workloads are misconfigured:', err);
+    res.writeHead(500, JSON_HEADERS).end(JSON.stringify({ error: 'workloads_misconfigured' }));
+    return null;
+  }
+  if (body.kind !== 'prompt') {
+    res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'workload_run_requires_prompt' }));
+    return null;
+  }
+  const owner = auth.subject;
+  const workload = await resolveWorkloadRun(getResultStore(), owner, body.workloadId);
+  if ('error' in workload) {
+    res.writeHead(workload.status, JSON_HEADERS).end(JSON.stringify({ error: workload.error }));
+    return null;
+  }
+  const { contextName, revision, ownerScope } = workload;
+  return {
+    ...body,
+    internalContext: {
+      revision,
+      ownerScope,
+      loadBundle: () => downloadContextBundle(contextName, revision, owner),
+    },
+  };
 }
 
 async function handleEnqueueLeafParsed(body: any, res: ServerResponse): Promise<void> {
@@ -863,7 +909,8 @@ async function handleRunLeafParsed(
     return;
   }
   if (rejectInvalidConfigRef(body, res)) return;
-  if (body.workloadId !== undefined) return rejectWorkloadRun(res);
+  body = await resolveRunWorkload(body, auth, res);
+  if (!body) return;
 
   // Spec §4.3: on pool saturation the sync path bounded-waits with backoff, then 503 Retry-After.
   // selectPoolSandbox throws before taking any lease or doing agent work, so re-running runLeaf on a
@@ -1030,9 +1077,12 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
       } catch {
         /* handled below */
       }
-      // Pool selection is internal routing state. Never accept a Kubernetes selector directly
-      // from an external run request.
-      if (parsed && typeof parsed === 'object') delete parsed.sandboxPoolSelector;
+      // Pool selection and context delivery are internal state. Never accept a Kubernetes selector
+      // or a context reference directly from an external run request.
+      if (parsed && typeof parsed === 'object') {
+        delete parsed.sandboxPoolSelector;
+        delete parsed.internalContext;
+      }
 
       // The same caller rules as /turn (MI1 §5 R7): required under SH_REQUIRE_AUTH, a bad token
       // refused in either mode, and the token must name this run's session.
