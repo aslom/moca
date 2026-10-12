@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
@@ -68,4 +69,31 @@ describe('server.ts wiring (ADR-0041)', () => {
   it('the P6 worker never imports the warning — supervisor-forked workers stay silent', () => {
     expect(workerSrc).not.toMatch(/deprecation\.js/);
   });
+});
+
+describe('the KEDA drainer warns at boot (ADR-0041)', () => {
+  const PKG_DIR = fileURLToPath(new URL('..', import.meta.url));
+  const TSX = fileURLToPath(new URL('../node_modules/.bin/tsx', import.meta.url));
+  const leafJobPath = fileURLToPath(new URL('../src/leaf-job.ts', import.meta.url));
+
+  it('prints the notice even when boot is refused, before it dials Redis', () => {
+    // The tenancy refusal is the deterministic fast-exit path: status 1, no Redis dialed. The
+    // notice must already be on stderr when it happens — KEDA pods are short-lived and their
+    // logs are the only channel a deprecated-path operator reads.
+    const r = spawnSync(TSX, [leafJobPath], {
+      cwd: PKG_DIR,
+      encoding: 'utf8',
+      timeout: 20_000,
+      env: {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        MOCA_TENANCY: 'multi',
+        // Nothing listens here: reaching the queue would be a connection error, not this refusal.
+        REDIS_URL: 'redis://127.0.0.1:1',
+      },
+    });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(KNATIVE_DEPRECATION_NOTICE);
+    expect(r.stderr).toMatch(/MOCA_TENANCY=multi requires SH_REQUIRE_AUTH=true/);
+  }, 30_000);
 });
