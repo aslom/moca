@@ -105,7 +105,7 @@ What that means for you:
   remaining users to migrate, and a dependency on A or C is exactly the case that moves the date.
 - **Interactive turns can move first.** The two deployments share only Redis and the session
   schema is the same, so running P6 for `/turn` traffic while async and cron stay on Knative is the
-  intended shape of "bring the P6 side up in parallel" above. The repo's smoke tests do not
+  intended shape of "bring the P6 side up in parallel" in [Bring-up](#bring-up) below. The repo's smoke tests do not
   exercise this mixed setup _(unverified)_; canary it before relying on it.
 - Archetype B (human gate) and sync `/turn` and `/runs` are not affected.
 
@@ -115,17 +115,16 @@ Only variables verified in the shipped manifests and env templates are listed. F
 listed, the destination README is authoritative (`deploy/vm/env/*.env.example`, `deploy/k8s/`,
 `deploy/compose/`).
 
-| Knative path (`deploy/knative/service.yaml`)                                                   | P6 path                                                                                                                                                                                                                                                    |
-| ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `REDIS_URL`                                                                                    | Unchanged (`supervisor.env.example`: "inherited unchanged"). Point it at the same Redis to keep sessions.                                                                                                                                                  |
-| `KAGENTI_SANDBOX_POD`                                                                          | Not used by the supervisor template. Sandboxes are discovered from relay records: `SH_SANDBOX_DISCOVERY=records` and `SH_REMOTE_SANDBOX=1`.                                                                                                                |
-| `KAGENTI_SANDBOX_POOL_SELECTOR`                                                                | Still present in the supervisor template (`app=sandbox`), together with `KAGENTI_SANDBOX_CAP`.                                                                                                                                                             |
-| `SH_REQUIRE_AUTH`, `SH_EXCHANGE_TOKEN`, `SH_SESSION_TOKEN_PUBLIC_KEYS`, `SH_CONTROL_PLANE_URL` | Same names. On a VM, `setup-vm.sh` generates the secrets (`SH_SESSION_TOKEN_PRIVATE_KEY`, `SH_CREDENTIAL_KEK`, `SH_EXCHANGE_TOKEN`) as systemd credentials; setting one in the env file as well makes the control plane refuse to boot.                    |
-| `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`                              | Inference credentials are per user, issued by the control plane. An operator-wide key is opt-in: `SH_ALLOW_OPERATOR_FALLBACK=true` with `SH_DEFAULT_INFERENCE_ENDPOINT` (`control-plane.env.example`; `deploy/vm/README.md`, "The operator-key fallback"). |
-| `LEAF_RESULT_TTL_SECONDS`                                                                      | Read only by the async entrypoints (`server.ts`, `leaf-job.ts`); no P6 counterpart while async has no P6 equivalent.                                                                                                                                       |
-| _(none)_                                                                                       | New and required on VM: `SH_TURNS_PER_WORKER` (no default), `SH_RELAY_ADDR`, `SH_RELAY_TOKEN`, `MOCA_RELAY_EXEC_TOKEN`, `SH_GITHUB_CLIENT_ID`, `SH_PUBLIC_HARNESS_URL`. Optional: `SH_WORKERS`, `SH_ROUTING_POLICY`.                                       |
-
-`SH_MODEL` has no mapping verified here; check the destination README before assuming it carries over.
+| Knative path (`deploy/knative/service.yaml`)                                                   | P6 path                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `REDIS_URL`                                                                                    | Unchanged (`supervisor.env.example`: "inherited unchanged"). Point it at the same Redis to keep sessions.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `KAGENTI_SANDBOX_POD`                                                                          | Not used by the supervisor template. Sandboxes are discovered from relay records: `SH_SANDBOX_DISCOVERY=records` and `SH_REMOTE_SANDBOX=1`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `KAGENTI_SANDBOX_POOL_SELECTOR`                                                                | Still present in the supervisor template (`app=sandbox`), together with `KAGENTI_SANDBOX_CAP`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `SH_REQUIRE_AUTH`, `SH_EXCHANGE_TOKEN`, `SH_SESSION_TOKEN_PUBLIC_KEYS`, `SH_CONTROL_PLANE_URL` | Same names, mostly not set by hand on a VM. `setup-vm.sh` generates the secrets (`SH_SESSION_TOKEN_PRIVATE_KEY`, `SH_CREDENTIAL_KEK`, `SH_EXCHANGE_TOKEN`) as systemd credentials, writes `SH_SESSION_TOKEN_PUBLIC_KEYS` into `supervisor.env`, and the template presets `SH_CONTROL_PLANE_URL=http://127.0.0.1:8090`. Setting a credential in an env file as well makes its consumer refuse to boot: the control plane for its own env file, the workers for `SH_EXCHANGE_TOKEN` in `supervisor.env`.                                                                                                                                                                                                       |
+| `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`                              | Inference credentials are per user, issued by the control plane. To keep an operator-wide key, opt in with `SH_ALLOW_OPERATOR_FALLBACK=true`. The key itself is never an env line: it becomes the `operator-inference-token` credential file (`SH_OPERATOR_INFERENCE_TOKEN`, mode 0600, loaded via `LoadCredential=`). An Anthropic API key also needs `SH_DEFAULT_INFERENCE_ENDPOINT=https://api.anthropic.com` and `SH_OPERATOR_INFERENCE_HEADER=x-api-key`, or the control plane refuses to boot. `ANTHROPIC_BASE_URL` has no single equivalent: it maps to `SH_DEFAULT_INFERENCE_ENDPOINT` for the fallback and to per-user endpoints otherwise. See `deploy/vm/README.md`, "The operator-key fallback". |
+| `LEAF_RESULT_TTL_SECONDS`                                                                      | Read only by the async entrypoints (`server.ts`, `leaf-job.ts`); no P6 counterpart while async has no P6 equivalent.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `SH_MODEL`, `SH_MODEL_PROVIDER`                                                                | Same names, set on the supervisor (`harness/src/run-turn.ts` reads `config?.model ?? env.SH_MODEL`); a session's config bundle overrides them. Compose passes them to the supervisor.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| _(none)_                                                                                       | New on VM. Required in `supervisor.env`: `SH_TURNS_PER_WORKER` (no default) and `SH_RELAY_ADDR`. Required in `relay.env`: `SH_RELAY_TOKEN`, which must match each sandbox worker's `SANDBOX_TOKEN`. `MOCA_RELAY_EXEC_TOKEN` is also required but `setup-vm.sh` generates it into both `relay.env` and `supervisor.env`, so you do not set it. Required in `control-plane.env`: `SH_GITHUB_CLIENT_ID` and `SH_PUBLIC_HARNESS_URL`. Optional: `SH_WORKERS`, `SH_ROUTING_POLICY`.                                                                                                                                                                                                                               |
 
 ## Clients: `mocactl`
 
@@ -141,25 +140,6 @@ the control plane's URL, not at the harness. See [`packages/mocactl/README.md`](
   deprecated along with the rest of `deploy/knative/`. The P6 equivalents are the Compose and VM
   READMEs above.
 
-## Rolling back
-
-Bring-up runs the P6 side next to the Knative deployment, so rollback is a client change while you
-have not yet done step 4 of Bring-up:
-
-1. Repoint clients at the Knative endpoint.
-2. Sessions written by P6 resume there: both paths use `@moca/session-backend` with the same schema.
-3. Sandbox filesystems do not carry in either direction; the next turn re-derives its workspace.
-
-Keep the Knative Service and ScaledJobs in place until you are satisfied; step 4 is the point of no
-easy return. After removal lands, the deprecated path will not be there to roll back to.
-
-## Status log
-
-| Date       | Change                                                                                                                                                                             |
-| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 2026-10-11 | Knative/KEDA deployment path deprecated ([ADR-0041](adrs/0041-deprecate-knative-keda-deployment.md)). Removal: no earlier than end of October 2026, after remaining users migrate. |
-| 2026-10-12 | Added the async/cron section, configuration mapping, `mocactl` guidance and rollback.                                                                                              |
-
 ## Bring-up
 
 1. Pick a destination above and follow its README end to end (`deploy/vm/setup-vm.sh`,
@@ -172,6 +152,18 @@ easy return. After removal lands, the deprecated path will not be there to roll 
 4. Verify with a canary session that resumes a pre-migration transcript, then decommission the
    Knative Service, the KEDA ScaledJobs and their RBAC.
 
+## Rolling back
+
+Bring-up runs the P6 side next to the Knative deployment, so rollback is a client change while you
+have not yet done step 4 of [Bring-up](#bring-up) above:
+
+1. Repoint clients at the Knative endpoint.
+2. Sessions written by P6 resume there: both paths use `@moca/session-backend` with the same schema.
+3. Sandbox filesystems do not carry in either direction; the next turn re-derives its workspace.
+
+Keep the Knative Service and ScaledJobs in place until you are satisfied; step 4 is the point of no
+easy return. After removal lands, the deprecated path will not be there to roll back to.
+
 ## During the window
 
 - The deprecated path keeps working and receives security and breakage fixes. It gets no new
@@ -181,3 +173,10 @@ easy return. After removal lands, the deprecated path will not be there to roll 
 - Removal happens no earlier than end of October 2026 and only once the remaining users have
   migrated. [Tell us when you have moved](https://github.com/rossoctl/moca/discussions) — the
   condition is users, not the calendar alone.
+
+## Status log
+
+| Date       | Change                                                                                                                                                                             |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-10-11 | Knative/KEDA deployment path deprecated ([ADR-0041](adrs/0041-deprecate-knative-keda-deployment.md)). Removal: no earlier than end of October 2026, after remaining users migrate. |
+| 2026-10-12 | Added the async/cron section, configuration mapping, `mocactl` guidance and rollback.                                                                                              |
