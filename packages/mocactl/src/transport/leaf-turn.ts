@@ -20,7 +20,7 @@ export interface LeafEnvelope {
 }
 
 /**
- * Shape returned by `POST /v1/runs` (sync) and `GET /v1/runs/status`, flattened across result
+ * Shape returned by `POST /v1/runs` (sync) and `GET /runs/status`, flattened across result
  * kinds. `aborted` is persisted by the server; `queued` is the server's "no record yet" shape.
  */
 export interface LeafResultBody {
@@ -56,7 +56,7 @@ export function isTerminalState(state: HonestState): boolean {
   return state === 'done' || state === 'failed' || state === 'paused';
 }
 
-/** Map a terminal `/v1/runs/status` body to a state view. */
+/** Map a terminal `/runs/status` body to a state view. */
 export function terminalFromBody(body: LeafResultBody): StateView {
   if (body.status === 'responded' || body.status === 'done' || body.status === 'solved') {
     return { state: 'done', result: body };
@@ -113,14 +113,14 @@ export class LeafTransport {
     }
   }
 
-  /** GET /v1/runs/status. Returns the body or 'queued' (the server's no-record shape). */
+  /** GET /runs/status. Returns the body or 'queued' (the server's no-record shape). */
   async readLeafState(
     sessionId: string,
     sessionToken: string,
     signal?: AbortSignal,
   ): Promise<LeafResultBody | 'queued'> {
     const base = trimTrailingSlashes(await this.harness.baseUrl());
-    const url = `${base}/v1/runs/status?sessionId=${encodeURIComponent(sessionId)}`;
+    const url = `${base}/runs/status?sessionId=${encodeURIComponent(sessionId)}`;
     let res: Response;
     try {
       res = await this.fetchImpl(url, {
@@ -140,7 +140,7 @@ export class LeafTransport {
         'harness',
         0,
         'invalid_body',
-        'the harness returned non-JSON for /v1/runs/status',
+        'the harness returned non-JSON for /runs/status',
       );
     }
     return body.status === 'queued' ? 'queued' : body;

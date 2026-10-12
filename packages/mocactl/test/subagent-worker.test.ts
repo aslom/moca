@@ -25,13 +25,20 @@ const ENV: LeafEnvelope = {
 };
 
 function makeRt(scratch: string, over: Partial<any> = {}): any {
+  // `now` is monotonic across the retry loop so the wall budget actually advances with each
+  // iteration. Default `sleep` is a no-op (tests don't wait for real seconds); override per test
+  // when a saturated-retry case needs the wall clock to move.
+  let t = 10_000;
   return {
     cp: {},
     harness: { baseUrl: async () => 'https://harness.test' },
     auth: { subject: 'alice', apiToken: 'x', expiresAt: 999 },
     paths: { stateDir: scratch, subagentsFile: join(scratch, 'subagents.jsonl') },
     endpoints: { controlPlaneUrl: undefined, harnessUrl: undefined },
-    now: () => 10_000,
+    now: () => t,
+    sleep: async (ms: number) => {
+      t += ms;
+    },
     fetchImpl: fetch,
     config: {},
     ...over,
@@ -139,26 +146,84 @@ describe('runSpawnWorker — terminal ledger writes on every non-retry exit', ()
   });
 });
 
-/* --- retryable path: saturation stays non-terminal --- */
+/* --- retryable path: saturation retries then records a terminal row --- */
 
-describe('runSpawnWorker — sync 503 saturated is retryable, not terminal', () => {
-  it("leaves the ledger row 'running' and exits 1 so the parent can be re-driven from /v1/runs/status", async () => {
+describe('runSpawnWorker — sync 503 saturated retries with bounded budget', () => {
+  // The transport surfaces 503 as a thrown ApiError (that is where errorFromResponse maps it);
+  // import ApiError locally so each test matches the shape the worker's catch block checks.
+  it('retries up to 3 times honoring Retry-After, then records failed with the saturated detail', async () => {
+    const { ApiError } = await import('../src/api/errors.js');
     const rt = makeRt(scratch);
     seedLedgerRow(rt.paths.subagentsFile);
     const transport = {
-      submitLeafTurn: vi.fn(
-        async () =>
-          ({ status: 'failed', reason: 'saturated', message: 'pool full' }) as LeafResultBody,
-      ),
+      submitLeafTurn: vi.fn(async () => {
+        throw new ApiError('harness', 503, 'saturated', 'pool full', 1);
+      }),
     } as unknown as LeafTransport;
     const r = await runSpawnWorker(rt, {
       readStdin: payloadStdin({ sessionId: 'sess-abc', token: 'tok', envelope: ENV }),
       transport,
     });
     expect(r).toBe(1);
+    // Three attempts: initial + 2 retries. The fourth would exceed the attempt budget.
+    expect((transport.submitLeafTurn as any).mock.calls.length).toBe(3);
     const row = openLedger(rt.paths.subagentsFile).readAll()[0]!;
-    // Row stays `running` so `subagents` re-queries /v1/runs/status next tick.
-    expect(row.lastKnownState).toBe('running');
+    expect(row.lastKnownState).toBe('failed');
+    expect(row.stateDetail).toBe('saturated — exhausted retries');
+  });
+
+  it('succeeds on a retry if the pool frees up (no terminal failed row recorded)', async () => {
+    const { ApiError } = await import('../src/api/errors.js');
+    const rt = makeRt(scratch);
+    seedLedgerRow(rt.paths.subagentsFile);
+    let calls = 0;
+    const transport = {
+      submitLeafTurn: vi.fn(async () => {
+        calls += 1;
+        if (calls === 1) throw new ApiError('harness', 503, 'saturated', 'pool full', 0);
+        return { status: 'responded', text: 'ok' } as LeafResultBody;
+      }),
+    } as unknown as LeafTransport;
+    const r = await runSpawnWorker(rt, {
+      readStdin: payloadStdin({ sessionId: 'sess-abc', token: 'tok', envelope: ENV }),
+      transport,
+    });
+    expect(r).toBe(0);
+    const row = openLedger(rt.paths.subagentsFile).readAll()[0]!;
+    expect(row.lastKnownState).toBe('done');
+  });
+
+  // End-to-end: drive through the real LeafTransport + errorFromResponse so a server-shaped 503
+  // body `{status:'failed', reason:'saturated'}` becomes an ApiError the retry loop recognizes.
+  // This is what guards against the "retry loop silently never fires in production" failure mode:
+  // if errorFromResponse ever stops folding `body.reason` into `code`, this test fails.
+  it('end-to-end: a real 503 body drives the retry loop (not just a hand-built ApiError)', async () => {
+    let hits = 0;
+    const fakeFetch = vi.fn(async (url: string | URL) => {
+      hits += 1;
+      if (hits <= 1) {
+        return new Response(JSON.stringify({ status: 'failed', reason: 'saturated' }), {
+          status: 503,
+          headers: { 'content-type': 'application/json', 'retry-after': '0' },
+        });
+      }
+      return new Response(JSON.stringify({ status: 'responded', text: 'ok' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const rt = makeRt(scratch, { fetchImpl: fakeFetch as unknown as typeof fetch });
+    seedLedgerRow(rt.paths.subagentsFile);
+    const { LeafTransport: LT } = await import('../src/transport/leaf-turn.js');
+    const transport = new LT(rt.harness, rt.fetchImpl);
+    const r = await runSpawnWorker(rt, {
+      readStdin: payloadStdin({ sessionId: 'sess-abc', token: 'tok', envelope: ENV }),
+      transport,
+    });
+    expect(r).toBe(0);
+    expect(hits).toBe(2);
+    const row = openLedger(rt.paths.subagentsFile).readAll()[0]!;
+    expect(row.lastKnownState).toBe('done');
   });
 });
 
@@ -219,5 +284,38 @@ describe('runSpawnWorker — endpoint forwarding', () => {
     expect(fetchCalls[0]).toBe('https://harness.test/v1/runs');
     const row = openLedger(rt.paths.subagentsFile).readAll()[0]!;
     expect(row.lastKnownState).toBe('done');
+  });
+
+  it("overrides a child-side DiscoveringHarness so the parent's resolved URL wins", async () => {
+    // The failure mode this pins: the child's own env/config.json points buildRuntime at a
+    // DIFFERENT control plane, so wire() built a DiscoveringHarness that would resolve to the
+    // wrong harness. The forwarded `harnessUrl` must still be applied — not skipped on the
+    // "rt.harness is already truthy" branch, which was the earlier bug.
+    const fetchCalls: string[] = [];
+    const fakeFetch = vi.fn(async (url: string | URL) => {
+      fetchCalls.push(String(url));
+      return new Response(JSON.stringify({ status: 'responded', text: 'ok' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const rt = makeRt(scratch, {
+      // Pre-wired to a stale harness — this is what the child's buildRuntime would have produced.
+      harness: { baseUrl: async () => 'https://stale.test' },
+      endpoints: { controlPlaneUrl: 'https://cp.test', harnessUrl: undefined },
+      fetchImpl: fakeFetch as unknown as typeof fetch,
+    });
+    seedLedgerRow(rt.paths.subagentsFile);
+    const r = await runSpawnWorker(rt, {
+      readStdin: payloadStdin({
+        sessionId: 'sess-abc',
+        token: 'tok',
+        envelope: ENV,
+        harnessUrl: 'https://harness.correct',
+      }),
+    });
+    expect(r).toBe(0);
+    // The POST landed on the forwarded URL, not the pre-wired stale one.
+    expect(fetchCalls[0]).toBe('https://harness.correct/v1/runs');
   });
 });

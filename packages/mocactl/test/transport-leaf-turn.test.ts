@@ -150,7 +150,7 @@ describe('LeafTransport.readLeafState', () => {
     const t = new LeafTransport(harness, fetchImpl as unknown as typeof fetch);
     await t.readLeafState('run.1', 'tok');
     const [url] = fetchImpl.mock.calls[0]!;
-    expect(url).toBe('https://harness.test/v1/runs/status?sessionId=run.1');
+    expect(url).toBe('https://harness.test/runs/status?sessionId=run.1');
   });
   it('surfaces a 404 as an ApiError so the caller can distinguish auth refusal from queued', async () => {
     const fetchImpl = vi.fn(async () => new Response('', { status: 404 }));

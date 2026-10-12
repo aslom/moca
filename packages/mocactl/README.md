@@ -108,7 +108,7 @@ both `--repo URL` and `--ref REF`; `--kind prompt` refuses them. The optional `-
 related spawns (e.g. a parent agent's own subagents under one tag) so `mocactl subagents --tag T`
 can list them in isolation.
 
-`mocactl subagents` reads the ledger and joins it with `/v1/runs/status`, resolving the server's
+`mocactl subagents` reads the ledger and joins it with `/runs/status`, resolving the server's
 `queued` ambiguity with child-pid liveness and a 60-second grace: a `queued` row with a live
 child is `running`; past the grace with a dead child it is `unknown`. Without `--tag`, every
 spawn you own is listed, oldest first by dispatch time.

@@ -25,8 +25,12 @@ export async function errorFromResponse(source: ErrorSource, res: Response): Pro
   let code = `http_${res.status}`;
   let message: string | undefined;
   try {
-    const body = JSON.parse(text) as { error?: unknown; message?: unknown };
+    // `/runs` reports failures as `{status:'failed', reason:'<code>'}` while most other routes use
+    // `{error:'<code>'}`. Fall back to `reason` when `error` is absent so a client-side `err.code`
+    // check sees the server's semantic code (e.g. `saturated`) regardless of which shape it took.
+    const body = JSON.parse(text) as { error?: unknown; message?: unknown; reason?: unknown };
     if (typeof body.error === 'string') code = body.error;
+    else if (typeof body.reason === 'string') code = body.reason;
     if (typeof body.message === 'string') message = body.message;
   } catch {
     // Non-JSON error body (a proxy's HTML page, say): keep the status-derived code.

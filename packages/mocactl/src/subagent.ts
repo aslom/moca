@@ -143,7 +143,18 @@ export async function cmdSpawn(rt: Runtime, io: Io, opts: SpawnOptions): Promise
   };
   ledger.append(record);
 
-  const forkFn = opts.forkFn ?? ((sid, tok, env, cwd) => defaultFork(sid, tok, env, cwd, rt));
+  // Resolve the harness URL here (while the parent is still running) so a child without flags
+  // or SH_* env never has to re-discover and never silently falls back to a different harness.
+  let resolvedHarnessUrl: string | undefined;
+  try {
+    resolvedHarnessUrl = await rt.harness.baseUrl();
+  } catch {
+    // Discovery failed in the parent; fall back to whatever the child can resolve itself.
+    resolvedHarnessUrl = rt.endpoints.harnessUrl;
+  }
+  const forkFn =
+    opts.forkFn ??
+    ((sid, tok, env, cwd) => defaultFork(sid, tok, env, cwd, rt, resolvedHarnessUrl));
   let pid: number;
   try {
     pid = await forkFn(session.sessionId, session.token, envelope, rt.paths.stateDir);
@@ -200,39 +211,61 @@ async function defaultFork(
   envelope: LeafEnvelope,
   stateDir: string,
   rt: Runtime,
+  harnessUrl?: string,
 ): Promise<number> {
   if (!existsSync(stateDir)) mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   const logPath = join(stateDir, `spawn-${sessionId}.log`);
   const logFd = openSync(logPath, 'a', 0o600);
+  const spawned = spawnChild(process.execPath, [process.argv[1]!, '__spawn-worker'], {
+    detached: true,
+    stdio: ['pipe', logFd, logFd],
+    env: { ...process.env },
+  });
   try {
-    const child = spawnChild(process.execPath, [process.argv[1]!, '__spawn-worker'], {
-      detached: true,
-      stdio: ['pipe', logFd, logFd],
-      env: { ...process.env },
-    });
     // ENOENT/EACCES on execPath land as an async 'error' event rather than a sync throw. Wait
     // for whichever event fires first — 'spawn' (the child successfully started) or 'error' —
     // before telling the caller the pid is valid. Without this, the parent would report success
-    // for a worker that never actually ran.
+    // for a worker that never actually ran. Clean up the losing listener so the ChildProcess
+    // isn't left with a stray handler attached under --trace-warnings.
     await new Promise<void>((resolveStart, rejectStart) => {
-      child.once('spawn', () => resolveStart());
-      child.once('error', (err) => rejectStart(err));
+      const onSpawn = () => {
+        spawned.off('error', onError);
+        resolveStart();
+      };
+      const onError = (err: Error) => {
+        spawned.off('spawn', onSpawn);
+        rejectStart(err);
+      };
+      spawned.once('spawn', onSpawn);
+      spawned.once('error', onError);
     });
     // Pass the session token on stdin so it stays out of argv (visible to `ps`). Forward the
     // resolved endpoints the same way so the child rebuilds its runtime from a single source.
+    // Forward the parent's resolved harness URL (post-discovery when applicable, raw flag/env
+    // otherwise) so the child uses the same harness the parent did without re-discovering.
     const payload: SpawnWorkerPayload = {
       sessionId,
       token,
       envelope,
       ...(rt.endpoints.controlPlaneUrl ? { controlPlaneUrl: rt.endpoints.controlPlaneUrl } : {}),
-      ...(rt.endpoints.harnessUrl ? { harnessUrl: rt.endpoints.harnessUrl } : {}),
+      ...(harnessUrl ? { harnessUrl } : {}),
     };
-    child.stdin!.end(JSON.stringify(payload) + '\n');
-    child.unref();
-    if (child.pid === undefined) throw new Error('spawn produced no pid');
-    return child.pid;
+    // Swallow a late stdin error (child exited before reading its payload — EPIPE). The ledger
+    // row is driven by the worker's own writes or, if the worker never ran, by the parent's row.
+    spawned.stdin!.on('error', () => {});
+    spawned.stdin!.end(JSON.stringify(payload) + '\n');
+    spawned.unref();
+    if (spawned.pid === undefined) throw new Error('spawn produced no pid');
+    return spawned.pid;
   } catch (err) {
     closeSync(logFd);
+    // Defense-in-depth: if an error raced in after 'spawn' resolved, the detached unref'd child
+    // would survive this throw. kill() is a no-op if the child never started or already exited.
+    try {
+      spawned.kill();
+    } catch {
+      /* ignore */
+    }
     throw err;
   }
 }
@@ -250,7 +283,7 @@ export interface SpawnWorkerDeps {
  * Detached-worker entry: read payload from stdin, POST /v1/runs, record outcome, exit.
  * Every exit path that has a sessionId writes a ledger update (terminal, or a running-ping on
  * saturated). The malformed-stdin branch has no sessionId to anchor an update; the parent's
- * `record` row stays authoritative, and `subagents` reconciles it from `/v1/runs/status`.
+ * `record` row stays authoritative, and `subagents` reconciles it from `/runs/status`.
  */
 export async function runSpawnWorker(rt: Runtime, deps: SpawnWorkerDeps = {}): Promise<number> {
   const ledger = deps.ledger ?? openLedger(rt.paths.subagentsFile, rt.now);
@@ -265,11 +298,13 @@ export async function runSpawnWorker(rt: Runtime, deps: SpawnWorkerDeps = {}): P
   } catch {
     // Malformed stdin: no sessionId to anchor a ledger update. The parent printed the sessionId
     // on stdout before forking, so the row the parent appended at spawn time is what `subagents`
-    // sees; it will drive it from `/v1/runs/status` on the next call.
+    // sees; it will drive it from `/runs/status` on the next call.
     return 2;
   }
-  // Rebuild runtime endpoints if the parent forwarded them (the child's env/flags are empty).
-  if (!rt.harness && (payload.harnessUrl || payload.controlPlaneUrl)) {
+  // The payload is the parent's resolved endpoints — single source of truth. Apply it whenever
+  // present, not only when rt.harness is empty: the child's own env/config.json may already have
+  // produced a DiscoveringHarness that would silently ignore the --harness-url the user passed.
+  if (payload.harnessUrl || payload.controlPlaneUrl) {
     const { applyEndpoints } = await import('./runtime.js');
     applyEndpoints(rt, {
       controlPlaneUrl: payload.controlPlaneUrl,
@@ -284,31 +319,49 @@ export async function runSpawnWorker(rt: Runtime, deps: SpawnWorkerDeps = {}): P
     return 2;
   }
   const transport = deps.transport ?? new LeafTransport(rt.harness, rt.fetchImpl);
-  try {
-    const body = await transport.submitLeafTurn(payload.envelope, payload.token);
-    // Sync 503 saturated is a retry-later signal (`run-leaf.ts`: "a 503 is 'retry', not a
-    // terminal failure, and /v1/runs/status must not report it as one"). Keep the row running
-    // but bump stateObservedAt so the 60s grace restarts from exit instead of from spawn.
-    if (body.status === 'failed' && body.reason === 'saturated') {
-      ledger.updateState(payload.sessionId, 'running', {
-        detail: 'saturated — retry',
+  // 503 `saturated` is a retry-later signal — the server does its own in-band retry inside its
+  // bounded window and only 503s if the pool is still full. The worker's retry budget covers a
+  // second burst beyond that window; without it, saturation reaches the user as a terminal
+  // failure. Bounded by both attempts and total wall time so the worker never hangs.
+  const MAX_SATURATED_ATTEMPTS = 3;
+  const MAX_RETRY_WALL_MS = 5 * 60_000;
+  const DEFAULT_RETRY_AFTER_S = 5;
+  const retryStart = rt.now();
+  for (let attempt = 1; attempt <= MAX_SATURATED_ATTEMPTS; attempt++) {
+    try {
+      const body = await transport.submitLeafTurn(payload.envelope, payload.token);
+      const view = terminalFromBody(body);
+      ledger.updateState(payload.sessionId, view.state, {
+        detail: view.detail,
         now: rt.now(),
       });
-      return 1;
+      return view.state === 'done' ? 0 : 1;
+    } catch (err) {
+      // Saturated reaches here as ApiError(status: 503, code: 'saturated') once errorFromResponse
+      // folds in `body.reason` as the code (see api/errors.ts). Any other error → terminal failed.
+      const saturated = err instanceof ApiError && err.status === 503 && err.code === 'saturated';
+      if (!saturated) {
+        ledger.updateState(payload.sessionId, 'failed', {
+          detail: err instanceof Error ? err.message : String(err),
+          now: rt.now(),
+        });
+        return 1;
+      }
+      if (attempt >= MAX_SATURATED_ATTEMPTS) break;
+      // Sleep until the server's Retry-After, but never past the wall budget — otherwise a
+      // misconfigured `Retry-After: 999999` would wedge the worker for days.
+      const remainingMs = MAX_RETRY_WALL_MS - (rt.now() - retryStart);
+      if (remainingMs <= 0) break;
+      const requestedMs = (err.retryAfterS ?? DEFAULT_RETRY_AFTER_S) * 1000;
+      await rt.sleep(Math.max(0, Math.min(requestedMs, remainingMs)));
     }
-    const view = terminalFromBody(body);
-    ledger.updateState(payload.sessionId, view.state, {
-      detail: view.detail,
-      now: rt.now(),
-    });
-    return view.state === 'done' ? 0 : 1;
-  } catch (err) {
-    ledger.updateState(payload.sessionId, 'failed', {
-      detail: err instanceof Error ? err.message : String(err),
-      now: rt.now(),
-    });
-    return 1;
   }
+  // Attempts or wall budget exhausted while still saturated.
+  ledger.updateState(payload.sessionId, 'failed', {
+    detail: 'saturated — exhausted retries',
+    now: rt.now(),
+  });
+  return 1;
 }
 
 function readStdin(): Promise<string> {
@@ -346,7 +399,7 @@ export async function cmdSubagents(rt: Runtime, io: Io, opts: SubagentsOptions):
   const now = rt.now();
   const views: Array<{ record: LedgerRecord; view: StateView }> = [];
   for (const r of records) {
-    // Ledger is authoritative past a terminal state — /v1/runs/status has a 24h TTL, so re-reading
+    // Ledger is authoritative past a terminal state — /runs/status has a 24h TTL, so re-reading
     // would regress a durable `done` row to `unknown` once the server-side record ages out.
     if (isTerminalState(r.lastKnownState)) {
       views.push({ record: r, view: { state: r.lastKnownState, detail: r.stateDetail } });
@@ -394,7 +447,7 @@ export async function cmdSubagents(rt: Runtime, io: Io, opts: SubagentsOptions):
   const rows = views.map(({ record, view }) => [
     sanitizeRemote(record.sessionId),
     sanitizeRemote(record.tag ?? '-'),
-    record.envelope.kind,
+    sanitizeRemote(record.envelope.kind),
     view.state + (view.detail ? ` (${sanitizeRemote(view.detail)})` : ''),
     sanitizeRemote(record.bundle ?? '-'),
   ]);
@@ -504,7 +557,7 @@ export async function cmdGet(rt: Runtime, io: Io, opts: GetOptions): Promise<num
   const summaryBody = raw.text ?? raw.patch ?? '';
   if (summaryBody) {
     const head = summaryBody.split('\n').slice(0, GET_SUMMARY_LINES).join('\n');
-    io.out(sanitizeRemote(head) + (summaryBody.includes('\n') ? '\n' : ''));
+    io.out(sanitizeRemote(head) + (head.includes('\n') ? '\n' : ''));
   }
   return completed ? 0 : 1;
 }
