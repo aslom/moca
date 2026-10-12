@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import {
   KNATIVE_DEPRECATION_NOTICE,
@@ -40,5 +42,30 @@ describe('KNATIVE_DEPRECATION_NOTICE carries the ADR-0041 policy verbatim', () =
     expect(KNATIVE_DEPRECATION_NOTICE).toContain('ADR-0041');
     expect(KNATIVE_DEPRECATION_NOTICE).toContain('end of October 2026');
     expect(KNATIVE_DEPRECATION_NOTICE).toContain('docs/migrating-from-knative.md');
+  });
+});
+
+describe('server.ts wiring (ADR-0041)', () => {
+  const serverSrc = readFileSync(
+    fileURLToPath(new URL('../src/server.ts', import.meta.url)),
+    'utf8',
+  );
+  const workerSrc = readFileSync(
+    fileURLToPath(new URL('../src/worker.ts', import.meta.url)),
+    'utf8',
+  );
+
+  it('startServer warns under Knative, before the shared boot call', () => {
+    // Anchored to start-of-line, as worker-boot.test.ts does for prepareServerProcess: server.ts
+    // must not be able to satisfy this with a comment that names the call.
+    const warn = /^\s*warnKnativeDeprecation\(process\.env\);/m.exec(serverSrc);
+    const boot = serverSrc.indexOf('prepareServerProcess(process.env)');
+    expect(warn).not.toBeNull();
+    expect(boot).toBeGreaterThan(-1);
+    expect(warn!.index).toBeLessThan(boot);
+  });
+
+  it('the P6 worker never imports the warning — supervisor-forked workers stay silent', () => {
+    expect(workerSrc).not.toMatch(/deprecation\.js/);
   });
 });

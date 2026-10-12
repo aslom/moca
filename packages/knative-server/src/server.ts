@@ -28,6 +28,7 @@ import {
   type TurnAuth,
   type TurnAuthDeps,
 } from './turn-auth.js';
+import { warnKnativeDeprecation } from './deprecation.js';
 import { prepareServerProcess } from './server-process.js';
 import { adoptTurnSlot } from './turn-slot.js';
 import { resolveVersion } from './version.js';
@@ -1096,6 +1097,10 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
 }
 
 export function startServer(port = PORT): ReturnType<typeof createServer> {
+  // ADR-0041 (2026-10-11): under Knative Serving, say so once at boot. The env vars are the
+  // guard, not the entrypoint: the P6 supervisor forks worker.ts, which imports this module's
+  // handler without ever calling startServer, and must stay silent.
+  warnKnativeDeprecation(process.env);
   // Before anything binds: the shared boot function refuses a malformed keyset and an inconsistent
   // tenancy configuration, and scrubs ambient credentials under multi tenancy (MI1 §5 R2).
   prepareServerProcess(process.env);
