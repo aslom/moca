@@ -6,15 +6,15 @@
  * `.tmp` + rename.
  */
 import {
-  appendFileSync,
-  chmodSync,
   closeSync,
+  constants as fsConst,
   existsSync,
   mkdirSync,
   openSync,
   readFileSync,
   renameSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
 import type { HonestState } from '../transport/leaf-turn.js';
@@ -107,10 +107,15 @@ export function openLedger(path: string, now: () => number = Date.now): Ledger {
 }
 
 function writeLine(path: string, line: LedgerLine): void {
-  const existed = existsSync(path);
-  appendFileSync(path, JSON.stringify(line) + '\n', { mode: 0o600 });
-  // Mode only applies on create; existing files keep whatever the operator set.
-  if (!existed) chmodSync(path, 0o600);
+  // O_NOFOLLOW + the mode on the syscall itself is the TOCTOU-free equivalent of
+  // existsSync→append→chmod: a symlink races to ELOOP instead of being followed.
+  const flags = fsConst.O_WRONLY | fsConst.O_CREAT | fsConst.O_APPEND | fsConst.O_NOFOLLOW;
+  const fd = openSync(path, flags, 0o600);
+  try {
+    writeSync(fd, JSON.stringify(line) + '\n');
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function readLines(path: string): LedgerLine[] {
@@ -162,9 +167,8 @@ function ensureParentDir(path: string): void {
 /** Touch the file so `readAll` on a fresh install returns []. */
 export function initLedger(path: string): void {
   ensureParentDir(path);
-  if (!existsSync(path)) {
-    const fd = openSync(path, 'a', 0o600);
-    closeSync(fd);
-    chmodSync(path, 0o600);
-  }
+  // O_CREAT with the mode on the syscall; O_NOFOLLOW refuses a symlinked state file.
+  const flags = fsConst.O_WRONLY | fsConst.O_CREAT | fsConst.O_APPEND | fsConst.O_NOFOLLOW;
+  const fd = openSync(path, flags, 0o600);
+  closeSync(fd);
 }
