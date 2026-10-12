@@ -44,11 +44,12 @@ leaf dispatching a child leaf), it should be named `parentSessionId`, not `runId
 
 One unit of agent work dispatched by an external orchestrator over `POST /runs`: parameterized, run
 to completion in a tooled sandbox, returning a structured result. A leaf is addressed by a
-`session_id` like any other session and is re-entrant (resuming it continues the same session). See
+`session_id` like any other session. The contract is _re-entrant_ in the sense that a leaf can dispatch a
+child leaf through `/runs`; re-invoking the same `session_id` re-runs and overwrites. See
 the [leaf-session contract](specs/2026-06-26-mvp-leaf-session-contract-design.md). Contrast `turn`,
-which is one interactive exchange on `POST /turn`. Under P6 the supervisor's `--role=leaf` workers
-are the process role reserved for queued leaf work; async leaf dispatch itself has no P6 equivalent
-yet ([migration guide](migrating-from-knative.md#if-you-depend-on-async-fan-out-or-the-cronjob)).
+which is one interactive exchange on `POST /turn`. Under P6 a `--role=leaf` worker role is reserved for queued leaf work, but it is not
+implemented yet (the worker exits 2 for any role but `turn`), and async leaf dispatch has no P6
+equivalent ([migration guide](migrating-from-knative.md#if-you-depend-on-async-fan-out-or-the-cronjob)).
 
 ## archetype
 
@@ -89,7 +90,8 @@ the single pod reached with `kubectl exec` (`sandbox-0`).
 
 The sandbox relay (`packages/sandbox-relay`) bridges a worker's `Exec` calls to the sandbox's
 outbound `Attach` gRPC stream and mirrors connected sandboxes into the Redis pool. Sandboxes attach
-to one port; the harness's workers call `SandboxExec` on a separate loopback listener.
+to one port; the harness's workers call `SandboxExec` on a separate listener (loopback on a VM, the
+brain network in Compose, a cluster service on Kubernetes).
 
 ## tier and affinity
 
@@ -108,11 +110,20 @@ exchanges a user's session token for the credentials a turn needs. `mocactl` is 
 
 ## config bundle
 
-A content-addressed tar of a user's `.claude/skills` and `.claude/commands` that a session or leaf
-runs with, referenced by digest (`configRef: sha256:…`). Built and credential-scanned client-side;
+A content-addressed tar built by `@moca/config-bundle` from a user's `.claude` skills and commands,
+the `CLAUDE.md` chain and the memory index and files (under `context/`), that a session or leaf runs
+with, referenced by digest (`configRef: sha256:…`). Built and credential-scanned client-side;
 see [Promoting a local Claude Code workflow](guides/promote-claude-workflow.md).
 
 ## human gate
 
-A pause point: a leaf or turn stops with `awaiting_approval` and resumes or terminates on
-an external approve, reject or abort verdict. Archetype B.
+A pause point in a leaf: it stops (wire status `paused` on a sync `/runs`, with an `awaiting_approval`
+marker) and resumes or terminates on an external approve, reject or abort verdict
+([human-gate design](specs/2026-06-28-human-gate-design.md)). Archetype B. The early archetypes
+requirements doc describes B as an iterative role-based loop; this glossary follows the README and
+the human-gate design. There is no human-gate path on `/turn`.
+
+## handler
+
+The HTTP request handler in `packages/knative-server/src/server.ts` that serves `/turn`, `/runs` and
+the other routes. The P6 worker serves the same handler, which is why the package name is historical.

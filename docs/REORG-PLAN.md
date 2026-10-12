@@ -128,7 +128,7 @@ P4 limits documented in `P4-ON-P6.md`: guest has no network (#277), no grant bin
 
 ### 3.6 Terms under P6/P4
 
-`session`, `turn` unchanged in meaning (P6.3 adds tier + affinity as session properties). `sandbox`: boundary changes (pod, then microVM per Exec), contract (`Attach`) unchanged; "sandbox-0" is a Knative-path name. `leaf`: undefined in glossary; used as batch/queued work and `--role=leaf`; whether it changes is unknown. Glossary defines only session, turn, run.
+`session`, `turn` unchanged in meaning (P6.3 adds tier + affinity as session properties). `sandbox`: boundary changes (pod, then microVM per Exec), contract (`Attach`) unchanged; "sandbox-0" is a Knative-path name. `leaf`: used as batch/queued work; its meaning does not change under P6. The `--role=leaf` worker role is reserved by the P6 spec (§3.3) but not implemented (the worker exits 2 for any role but `turn`). The glossary now defines leaf and the other runtime terms (PR 5a).
 
 ## 4. Current-state audit
 
@@ -467,7 +467,7 @@ Order note: PRs 1-2 are independent and can run in parallel; the removal PR may 
 5. **Archetypes A (async fan-out) and C (scheduled)** have no P6 equivalent: what should docs say to users who depend on them (stay on Knative until round two? use external schedulers? is there a tracking issue)? ADR-0041/0034 give no design or issue.
 6. **Which demos/experiments survive:** the three Knative demos, `make demo-*` targets, and `deploy/knative` files consumed by non-Knative paths (`control-plane.yaml`, `ibac-stub.yaml`, `mocactl-quickstart.sh`, `demo-multiuser.sh`); where should they live before `deploy/knative` is deleted?
 7. **`knative-server` rename** and `sandbox-transport` extraction: out of ADR-0041 scope; should the removal checklist include them, and what do docs call the package meanwhile?
-8. **Does `leaf` change meaning under P6** (`--role=leaf`, queued work) and should it be defined in the glossary now?
+8. ~~Does `leaf` change meaning under P6?~~ Answered in review of PR 5a: no. `--role=leaf` is reserved for queued leaf work but not implemented; the glossary defines `leaf` now.
 9. **`docs/research/`** (20 broken links): vendor into the repo, link to the parent monorepo, or drop the links?
 10. **Docs owner** for CODEOWNERS and the removal-PR docs checklist.
 11. **Naming cleanup scope:** rename `SH_*`/`KAGENTI_*` env vars (code change) or document legacy prefixes only?
