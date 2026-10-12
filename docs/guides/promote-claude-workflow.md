@@ -80,4 +80,7 @@ Before ADR-0038 the only uploader was a Claude Code slash command
 ([`deploy/claude/commands/promote.md`](../../deploy/claude/commands/promote.md)) that runs
 `pnpm --dir <harness> promote` and writes straight to Redis over a tunnel you hold open. It needs
 cluster access, so it does not fit a multi-user control plane, and this guide does not cover it. The
-command and CLI remain in the repository; see ADR-0030 for how they work.
+command and CLI remain in the repository. How they work is documented in
+[`deploy/claude/commands/promote.md`](../../deploy/claude/commands/promote.md) and, for the Knative
+path, [`docs/demos/promoted-workflow-demo.md`](../demos/promoted-workflow-demo.md) (deprecated);
+ADR-0030 only mentions the slash command.

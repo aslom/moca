@@ -134,9 +134,8 @@ and a sandbox on one machine.
 > Anthropic-compatible model credential.
 
 ```bash
-git clone --recurse-submodules https://github.com/rossoctl/moca.git
-cd moca
-ANTHROPIC_API_KEY=sk-ant-... ./deploy/compose/install.sh
+curl -fsSL https://raw.githubusercontent.com/rossoctl/moca/main/deploy/compose/install.sh \
+  | ANTHROPIC_API_KEY=sk-ant-... sh
 ```
 
 Verify it works, then stop it (Redis state goes with it):
@@ -273,16 +272,16 @@ questions and planned documentation work are in [`docs/REORG-PLAN.md`](docs/REOR
 
 Start at the [documentation map](docs/index.md).
 
-| I want to...                      | Go to                                                                                                                         |
-| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| Pick an install path              | [Get started](docs/get-started/index.md)                                                                                      |
-| Leave the Knative/KEDA deployment | [Migration guide](docs/migrating-from-knative.md)                                                                             |
-| Promote a Claude Code workflow    | [Guide](docs/guides/promote-claude-workflow.md)                                                                               |
-| Look up a term                    | [Glossary](docs/glossary.md)                                                                                                  |
-| Call the HTTP API                 | [`docs/api/openapi.yaml`](docs/api/openapi.yaml), [Context service](docs/context-service.md)                                  |
-| Follow a guided walkthrough       | [Demos](docs/demos/README.md)                                                                                                 |
-| See why a decision was made       | [ADRs](docs/adrs/README.md), [milestone registry](docs/specs/README.md)                                                       |
-| Build or contribute               | [`CONTRIBUTING.md`](CONTRIBUTING.md), [`harness/README.md`](harness/README.md), [docs conventions](docs/CONTRIBUTING-DOCS.md) |
+| I want to...                      | Go to                                                                                                                                                          |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Pick an install path              | [Get started](docs/get-started/index.md)                                                                                                                       |
+| Leave the Knative/KEDA deployment | [Migration guide](docs/migrating-from-knative.md)                                                                                                              |
+| Promote a Claude Code workflow    | [Guide](docs/guides/promote-claude-workflow.md)                                                                                                                |
+| Look up a term                    | [Glossary](docs/glossary.md)                                                                                                                                   |
+| Call the HTTP API                 | [`docs/api/openapi.yaml`](docs/api/openapi.yaml), [`docs/api/harness-openapi.yaml`](docs/api/harness-openapi.yaml), [Context service](docs/context-service.md) |
+| Follow a guided walkthrough       | [Demos](docs/demos/README.md)                                                                                                                                  |
+| See why a decision was made       | [ADRs](docs/adrs/README.md), [milestone registry](docs/specs/README.md)                                                                                        |
+| Build or contribute               | [`CONTRIBUTING.md`](CONTRIBUTING.md), [`harness/README.md`](harness/README.md), [docs conventions](docs/CONTRIBUTING-DOCS.md)                                  |
 
 ---
 
