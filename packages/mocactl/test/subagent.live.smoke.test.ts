@@ -2,11 +2,10 @@ import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 
 /**
- * End-to-end smoke: spawn two subagents (one prompt + bundle, one converge + repo),
+ * End-to-end smoke: spawn two subagents (one prompt + bundle, one solve + repo),
  * verify `subagents` reports both terminal and `get` returns their results.
  *
- * Needs: a reachable control plane + harness, a prior `mocactl login`, optionally
- * `MOCACTL_SMOKE_CREDENTIAL` to pick an inference credential. Opt-in with
+ * Needs: a reachable control plane + harness, a prior `mocactl login`. Opt-in with
  * MOCACTL_LIVE_SMOKE=1, same as the other live smokes.
  *
  * Writes to `$XDG_STATE_HOME/mocactl/subagents.jsonl` on this machine (same file
@@ -21,7 +20,6 @@ const run = (args: string[], timeout: number) =>
 describe.skipIf(!live)('mocactl subagent live smoke (MOCACTL_LIVE_SMOKE=1)', () => {
   it('spawn → subagents → get round-trips two subagents under a unique tag', async () => {
     const tag = `smoke-${Date.now()}`;
-    const credential = process.env.MOCACTL_SMOKE_CREDENTIAL;
     // Promote a tiny bundle so the prompt subagent gets a configRef, exercising the full
     // session-bound-bundle path (not just an unconfigured prompt turn).
     const fixture = new URL('./fixtures/promote-skills', import.meta.url).pathname;
@@ -36,26 +34,25 @@ describe.skipIf(!live)('mocactl subagent live smoke (MOCACTL_LIVE_SMOKE=1)', () 
         'Reply with the single word: ack',
         '--kind',
         'prompt',
-        '--bundle',
+        '--config',
         digest,
         '--tag',
         tag,
         '--json',
-        ...(credential ? [] : []),
       ],
       30_000,
     );
     expect(spawnA.status, spawnA.stderr).toBe(0);
     const a = JSON.parse(spawnA.stdout) as { sessionId: string; pid: number };
 
-    // Subagent B: converge against a tiny public repo. The sync /runs call returns a verdict.
+    // Subagent B: solve against a tiny public repo. The sync /v1/runs call returns a patch body.
     const spawnB = run(
       [
         'spawn',
-        'Report any obvious issues; return UNFLAGGED if the code looks fine.',
+        'Add a one-line README note that says "smoke-test".',
         '--kind',
-        'converge',
-        '--bundle',
+        'solve',
+        '--config',
         digest,
         '--repo',
         'https://github.com/octocat/Hello-World.git',
@@ -86,11 +83,11 @@ describe.skipIf(!live)('mocactl subagent live smoke (MOCACTL_LIVE_SMOKE=1)', () 
     expect(final.subagents.map((s) => s.sessionId).sort()).toEqual(
       [a.sessionId, b.sessionId].sort(),
     );
-    for (const s of final.subagents) expect(['done', 'paused', 'failed']).toContain(s.state);
+    // A smoke that passes with `failed` can't catch regressions in the dispatch path (bundle
+    // not applied, worker loses endpoints, …). At least one row must land in a happy terminal.
+    const happy = final.subagents.filter((s) => s.state === 'done' || s.state === 'paused');
+    expect(happy.length).toBeGreaterThan(0);
 
-    // `get` returns something for each terminal subagent (text or verdict). This asserts the
-    // happy-path shape; a failed subagent is also acceptable, we only pin that `get` succeeds
-    // when its row is terminal.
     for (const s of final.subagents) {
       const g = run(
         ['get', s.sessionId, '--out', `/tmp/mocactl-smoke-${s.sessionId}`, '--json'],

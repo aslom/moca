@@ -33,11 +33,15 @@ function makeIo(): { io: any; out: string[]; err: string[] } {
   return { io: { out: (s: string) => out.push(s), err: (s: string) => err.push(s) }, out, err };
 }
 
-function fakeTransport(
-  resp: Parameters<LeafTransport['readLeafState']> extends unknown ? any : never,
-) {
-  // Minimal shape: readLeafState resolves to `resp`. Use `unknown` sentinel for 'not_found' / 'queued'.
-  return { readLeafState: vi.fn(async () => resp) } as unknown as LeafTransport;
+function fakeTransport(resp: unknown): LeafTransport {
+  // Minimal shape: readLeafState resolves to `resp`. Pass 'queued' or a body; a thrown ApiError
+  // models an auth refusal / 404.
+  return {
+    readLeafState: vi.fn(async () => {
+      if (resp instanceof Error) throw resp;
+      return resp;
+    }),
+  } as unknown as LeafTransport;
 }
 
 let scratch: string;
@@ -80,13 +84,17 @@ describe('cmdGet — not-yet-terminal and not-found', () => {
     expect(err.join('\n')).toContain('has not finished yet');
   });
 
-  it("reports 'no session' and exits 1 for 404 / not_found (never partial)", async () => {
+  it("reports 'no session' and exits 1 when the server refuses the sessionId with 404", async () => {
     const { rt } = makeRt(scratch);
     const { io, err } = makeIo();
+    const { ApiError } = await import('../src/api/errors.js');
     const r = await cmdGet(
       rt,
       io,
-      baseOpts({ transport: fakeTransport('not_found'), outDir: scratch }),
+      baseOpts({
+        transport: fakeTransport(new ApiError('harness', 404, 'session_not_found')),
+        outDir: scratch,
+      }),
     );
     expect(r).toBe(1);
     expect(err.join('\n')).toContain("no session 'sess-abc'");

@@ -6,22 +6,25 @@ import { ApiError, errorFromResponse, networkError } from '../api/errors.js';
 import { trimTrailingSlashes } from '../api/url.js';
 
 /**
- * Mirrors harness/src/run-leaf.ts `LeafEnvelope`; this client sends `prompt` and `converge`
- * kinds. `item` is required by the verdict path (converge); harness ignores it on prompt.
+ * Mirrors harness/src/run-leaf.ts `LeafEnvelope` for the two kinds this client sends. A solve
+ * envelope carries the user's intent as `problemStatement` and the server returns a patch.
  */
 export interface LeafEnvelope {
   sessionId: string;
-  kind: 'prompt' | 'converge';
+  kind: 'prompt' | 'solve';
   prompt?: string;
-  item?: { item_id: string; file: string; pattern: string; require_approval?: boolean };
+  problemStatement?: string;
   repoUrl?: string;
   ref?: string;
   configRef?: string;
 }
 
-/** Shape returned by `POST /runs` (sync) and `GET /runs/status`, flattened across result kinds. */
+/**
+ * Shape returned by `POST /v1/runs` (sync) and `GET /v1/runs/status`, flattened across result
+ * kinds. `aborted` is persisted by the server; `queued` is the server's "no record yet" shape.
+ */
 export interface LeafResultBody {
-  status: 'responded' | 'done' | 'solved' | 'paused' | 'failed' | 'queued';
+  status: 'responded' | 'done' | 'solved' | 'paused' | 'failed' | 'aborted' | 'queued';
   text?: string;
   verdict?: unknown;
   patch?: string;
@@ -53,7 +56,7 @@ export function isTerminalState(state: HonestState): boolean {
   return state === 'done' || state === 'failed' || state === 'paused';
 }
 
-/** Map a terminal `/runs/status` body to a state view. */
+/** Map a terminal `/v1/runs/status` body to a state view. */
 export function terminalFromBody(body: LeafResultBody): StateView {
   if (body.status === 'responded' || body.status === 'done' || body.status === 'solved') {
     return { state: 'done', result: body };
@@ -61,6 +64,7 @@ export function terminalFromBody(body: LeafResultBody): StateView {
   if (body.status === 'paused') return { state: 'paused', detail: 'gate requested', result: body };
   if (body.status === 'failed')
     return { state: 'failed', detail: body.reason ?? body.message, result: body };
+  if (body.status === 'aborted') return { state: 'failed', detail: 'aborted', result: body };
   return { state: 'unknown', detail: `server returned status '${body.status}'`, result: body };
 }
 
@@ -75,7 +79,7 @@ export class LeafTransport {
     private readonly fetchImpl: typeof fetch = fetch,
   ) {}
 
-  /** POST /runs with the session's token. Returns the sync-path result body. */
+  /** POST /v1/runs with the session's token. Returns the sync-path result body. */
   async submitLeafTurn(
     envelope: LeafEnvelope,
     sessionToken: string,
@@ -84,7 +88,7 @@ export class LeafTransport {
     const base = trimTrailingSlashes(await this.harness.baseUrl());
     let res: Response;
     try {
-      res = await this.fetchImpl(`${base}/runs`, {
+      res = await this.fetchImpl(`${base}/v1/runs`, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
@@ -100,18 +104,23 @@ export class LeafTransport {
     try {
       return (await res.json()) as LeafResultBody;
     } catch (err) {
-      throw new ApiError('harness', 0, 'invalid_body', 'the harness returned non-JSON for /runs');
+      throw new ApiError(
+        'harness',
+        0,
+        'invalid_body',
+        'the harness returned non-JSON for /v1/runs',
+      );
     }
   }
 
-  /** GET /runs/status. Returns the body, or 'queued' / 'not_found'. */
+  /** GET /v1/runs/status. Returns the body or 'queued' (the server's no-record shape). */
   async readLeafState(
     sessionId: string,
     sessionToken: string,
     signal?: AbortSignal,
-  ): Promise<LeafResultBody | 'queued' | 'not_found'> {
+  ): Promise<LeafResultBody | 'queued'> {
     const base = trimTrailingSlashes(await this.harness.baseUrl());
-    const url = `${base}/runs/status?sessionId=${encodeURIComponent(sessionId)}`;
+    const url = `${base}/v1/runs/status?sessionId=${encodeURIComponent(sessionId)}`;
     let res: Response;
     try {
       res = await this.fetchImpl(url, {
@@ -122,7 +131,6 @@ export class LeafTransport {
     } catch (err) {
       throw networkError('harness', err);
     }
-    if (res.status === 404) return 'not_found';
     if (!res.ok) throw await errorFromResponse('harness', res);
     let body: LeafResultBody;
     try {
@@ -132,7 +140,7 @@ export class LeafTransport {
         'harness',
         0,
         'invalid_body',
-        'the harness returned non-JSON for /runs/status',
+        'the harness returned non-JSON for /v1/runs/status',
       );
     }
     return body.status === 'queued' ? 'queued' : body;
@@ -147,12 +155,11 @@ export interface ChildLiveness {
 
 /** Map a raw status + child liveness into a HonestState. */
 export function mapHonestState(
-  raw: LeafResultBody | 'queued' | 'not_found',
+  raw: LeafResultBody | 'queued',
   live: ChildLiveness,
   now: number,
   graceMs: number = DEFAULT_UNKNOWN_GRACE_MS,
 ): StateView {
-  if (raw === 'not_found') return { state: 'unknown', detail: 'session not found' };
   if (raw === 'queued') {
     if (live.alive) return { state: 'running' };
     // Grace: a just-exited child's result write may still be propagating.

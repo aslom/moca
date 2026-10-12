@@ -348,7 +348,7 @@ describe('B14 commands', () => {
 /* ---------------- spawn / subagents / get ---------------- */
 
 describe('spawn / subagents / get', () => {
-  it('spawn routes --bundle, --kind, --repo, --ref, --tag through to cmdSpawn', async () => {
+  it('spawn routes --config, --kind, --repo, --ref, --tag through to cmdSpawn', async () => {
     const stub = vi.fn(async (..._a: unknown[]) => 0);
     const mod = await import('../src/subagent.js');
     const spy = vi.spyOn(mod, 'cmdSpawn').mockImplementation(stub);
@@ -359,10 +359,10 @@ describe('spawn / subagents / get', () => {
         [
           'spawn',
           'do a thing',
-          '--bundle',
+          '--config',
           DIGEST,
           '--kind',
-          'converge',
+          'solve',
           '--repo',
           'https://x',
           '--ref',
@@ -378,8 +378,8 @@ describe('spawn / subagents / get', () => {
     expect(stub).toHaveBeenCalledTimes(1);
     expect(stub.mock.calls[0][2]).toMatchObject({
       prompt: 'do a thing',
-      kind: 'converge',
-      bundle: DIGEST,
+      kind: 'solve',
+      configRef: DIGEST,
       repoUrl: 'https://x',
       ref: 'main',
       tag: 'parent-1',
@@ -391,27 +391,47 @@ describe('spawn / subagents / get', () => {
     const spy = vi.spyOn(mod, 'cmdSpawn');
     onTestFinished(() => spy.mockRestore());
     const o = io();
-    expect(await main(['spawn', 'p', '--kind', 'solve'], {}, o, { buildRuntime: fakeBuild })).toBe(
-      2,
-    );
+    expect(
+      await main(['spawn', 'p', '--kind', 'converge'], {}, o, { buildRuntime: fakeBuild }),
+    ).toBe(2);
     expect(spy).not.toHaveBeenCalled();
-    expect(o.errs.join('\n')).toContain('--kind must be prompt or converge');
+    expect(o.errs.join('\n')).toContain('--kind must be prompt or solve');
   });
 
-  it('rejects --bundle / --repo / --ref outside spawn, and --tag outside spawn/subagents', async () => {
+  it('rejects --repo / --ref outside spawn, and --tag outside spawn/subagents', async () => {
     for (const extra of [
-      ['--bundle', 'sha256:x'],
       ['--repo', 'u'],
       ['--ref', 'r'],
     ]) {
       expect(await main(['sessions', ...extra], {}, io(), { buildRuntime: fakeBuild })).toBe(2);
     }
     expect(await main(['run', 'p', '--tag', 't'], {}, io(), { buildRuntime: fakeBuild })).toBe(2);
-    // But --tag on subagents is allowed.
+    // --tag on subagents is allowed.
     const sub = await import('../src/subagent.js');
     const spy = vi.spyOn(sub, 'cmdSubagents').mockImplementation(async () => 0);
     onTestFinished(() => spy.mockRestore());
     expect(await main(['subagents', '--tag', 't'], {}, io(), { buildRuntime: fakeBuild })).toBe(0);
+  });
+
+  it('--config is accepted on both run and spawn, rejected elsewhere', async () => {
+    const sub = await import('../src/subagent.js');
+    const spawnStub = vi.spyOn(sub, 'cmdSpawn').mockImplementation(async () => 0);
+    onTestFinished(() => spawnStub.mockRestore());
+    const run = await import('../src/headless.js');
+    const runStub = vi.spyOn(run, 'cmdRun').mockImplementation(async () => 0);
+    onTestFinished(() => runStub.mockRestore());
+    const DIGEST = 'sha256:' + 'b'.repeat(64);
+    expect(
+      await main(['spawn', 'p', '--config', DIGEST, '--kind', 'prompt'], {}, io(), {
+        buildRuntime: fakeBuild,
+      }),
+    ).toBe(0);
+    expect(
+      await main(['run', 'p', '--config', DIGEST], {}, io(), { buildRuntime: fakeBuild }),
+    ).toBe(0);
+    expect(
+      await main(['sessions', '--config', DIGEST], {}, io(), { buildRuntime: fakeBuild }),
+    ).toBe(2);
   });
 
   it('subagents refuses extra positionals and routes --json through', async () => {

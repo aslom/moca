@@ -1,9 +1,11 @@
 /**
  * Client-side ledger of spawned subagents. Stored at $XDG_STATE_HOME/mocactl/subagents.jsonl
  * (mode 0600). Each line is a `record` (initial write) or an `update` (state delta); `readAll`
- * folds updates onto records by sessionId. Concurrent appends stay atomic under POSIX
- * PIPE_BUF (4 KiB) without an explicit lock. `compact` is the one whole-file write and uses
- * `.tmp` + rename.
+ * folds updates onto records by sessionId. Concurrent appends stay atomic because each line
+ * is written with a single `O_APPEND` write on a local filesystem — no explicit lock. The
+ * 64 KiB prompt cap keeps every line short enough to fit one write. `compact` is a whole-file
+ * rewrite via `.tmp` + rename and is not called automatically today; a future trigger is
+ * tracked under the subagent-commands spec's Scope section.
  */
 import {
   closeSync,
@@ -20,10 +22,14 @@ import { dirname } from 'node:path';
 import type { HonestState } from '../transport/leaf-turn.js';
 
 export interface LedgerEnvelope {
-  /** Full dispatch envelope — needed for a future `approve/reject` to resend with a decision. */
-  kind: 'prompt' | 'converge';
+  /**
+   * Full dispatch envelope — needed for a future `approve/reject` to resend with a decision.
+   * `kind` is widened to `string` on read so a ledger line written by an older binary (e.g.
+   * `kind: 'converge'`) still deserializes without a type lie; new writes stay within the
+   * narrower `'prompt' | 'solve'` set.
+   */
+  kind: string;
   prompt?: string;
-  item?: unknown;
   repoUrl?: string;
   ref?: string;
   configRef?: string;
@@ -99,7 +105,7 @@ export function openLedger(path: string, now: () => number = Date.now): Ledger {
       const body = current
         .map((r) => JSON.stringify({ v: 1, type: 'record', record: r } satisfies LedgerLine))
         .join('\n');
-      // Atomic swap: readers never see a half-written file.
+      // Atomic swap via rename: a reader opens either the old file or the new one.
       writeFileSync(tmp, body + (body ? '\n' : ''), { mode: 0o600 });
       renameSync(tmp, path);
     },
@@ -129,7 +135,7 @@ function readLines(path: string): LedgerLine[] {
     try {
       line = JSON.parse(raw);
     } catch {
-      continue; // crashed-mid-append partial; next compact clears it.
+      continue; // crashed-mid-append partial; a later `compact` would clear it.
     }
     const l = line as LedgerLine;
     if (l?.v === 1 && (l.type === 'record' || l.type === 'update')) out.push(l);
@@ -144,7 +150,7 @@ function foldLines(lines: LedgerLine[]): LedgerRecord[] {
       byId.set(line.record.sessionId, { ...line.record });
     } else {
       const existing = byId.get(line.sessionId);
-      if (!existing) continue; // orphaned update — ignore until next compact
+      if (!existing) continue; // orphaned update — ignore (a later `compact` would drop it).
 
       existing.lastKnownState = line.lastKnownState;
       existing.stateObservedAt = line.stateObservedAt;

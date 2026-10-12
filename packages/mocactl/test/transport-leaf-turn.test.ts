@@ -81,10 +81,11 @@ describe("mapHonestState — the 'queued' ambiguity", () => {
   });
 });
 
-describe('mapHonestState — session-side 404', () => {
-  it("not_found is never conflated with 'running'; the session is gone and honest-state says so", () => {
-    const v = mapHonestState('not_found', { alive: true, observedAt: 0 }, 1_000_000);
-    expect(v).toEqual({ state: 'unknown', detail: 'session not found' });
+describe('mapHonestState — terminal aborted', () => {
+  it('maps aborted → failed with detail "aborted" so the row has a clear reason', () => {
+    const r = { status: 'aborted' } as const;
+    const v = mapHonestState(r, { alive: false, observedAt: 0 }, 1_000_000);
+    expect(v).toEqual({ state: 'failed', detail: 'aborted', result: r });
   });
 });
 
@@ -97,7 +98,7 @@ const okJson = (body: unknown, status = 200): Response =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
 describe('LeafTransport.submitLeafTurn', () => {
-  it('POSTs /runs with the session token, envelope body, and content-type', async () => {
+  it('POSTs /v1/runs with the session token, envelope body, and content-type', async () => {
     const fetchImpl = vi.fn(async (_url: string, _init?: RequestInit) =>
       okJson({ status: 'responded', text: 'ok' }),
     );
@@ -111,7 +112,7 @@ describe('LeafTransport.submitLeafTurn', () => {
     const r = await t.submitLeafTurn(env, 'tok-xyz');
     expect(r).toEqual({ status: 'responded', text: 'ok' });
     const [url, init] = fetchImpl.mock.calls[0]!;
-    expect(url).toBe('https://harness.test/runs');
+    expect(url).toBe('https://harness.test/v1/runs');
     expect(init!.method).toBe('POST');
     const headers = init!.headers as Record<string, string>;
     expect(headers.authorization).toBe('Bearer tok-xyz');
@@ -149,12 +150,12 @@ describe('LeafTransport.readLeafState', () => {
     const t = new LeafTransport(harness, fetchImpl as unknown as typeof fetch);
     await t.readLeafState('run.1', 'tok');
     const [url] = fetchImpl.mock.calls[0]!;
-    expect(url).toBe('https://harness.test/runs/status?sessionId=run.1');
+    expect(url).toBe('https://harness.test/v1/runs/status?sessionId=run.1');
   });
-  it('maps a 404 to not_found rather than throwing', async () => {
+  it('surfaces a 404 as an ApiError so the caller can distinguish auth refusal from queued', async () => {
     const fetchImpl = vi.fn(async () => new Response('', { status: 404 }));
     const t = new LeafTransport(harness, fetchImpl as unknown as typeof fetch);
-    expect(await t.readLeafState('s', 'tok')).toBe('not_found');
+    await expect(t.readLeafState('s', 'tok')).rejects.toMatchObject({ status: 404 });
   });
   it("returns 'queued' as the sentinel string so mapHonestState can resolve it with liveness", async () => {
     const fetchImpl = vi.fn(async () => okJson({ status: 'queued' }));

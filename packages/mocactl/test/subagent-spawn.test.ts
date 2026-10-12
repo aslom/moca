@@ -78,24 +78,24 @@ describe('cmdSpawn — flag validation refuses before any session is created', (
     const r = await cmdSpawn(
       rt,
       io,
-      baseOpts({ bundle: 'not-a-digest', forkFn: () => 1, ledger: withLedger(rt) }),
+      baseOpts({ configRef: 'not-a-digest', forkFn: () => 1, ledger: withLedger(rt) }),
     );
     expect(r).toBe(2);
     expect(cp.createSession).not.toHaveBeenCalled();
     expect(err.join('\n')).toContain('bundle digest is sha256:');
   });
 
-  it('refuses converge without --repo and --ref (both required)', async () => {
+  it('refuses solve without --repo and --ref (both required)', async () => {
     const { rt, cp } = makeRt();
     const { io, err } = makeIo();
     const r = await cmdSpawn(
       rt,
       io,
-      baseOpts({ kind: 'converge', repoUrl: 'https://x', forkFn: () => 1, ledger: withLedger(rt) }),
+      baseOpts({ kind: 'solve', repoUrl: 'https://x', forkFn: () => 1, ledger: withLedger(rt) }),
     );
     expect(r).toBe(2);
     expect(cp.createSession).not.toHaveBeenCalled();
-    expect(err.join('\n')).toContain('--kind converge needs both');
+    expect(err.join('\n')).toContain('--kind solve needs both');
   });
 
   it('refuses --repo/--ref on prompt kind (would be silently ignored otherwise)', async () => {
@@ -127,7 +127,7 @@ describe('cmdSpawn — flag validation refuses before any session is created', (
 /* --- happy path --- */
 
 describe('cmdSpawn — happy path', () => {
-  it('creates the session with configRef when --bundle is given, writes a ledger record before fork, forks, then updates pid', async () => {
+  it('creates the session with configRef when --config is given, writes a ledger record before fork, forks, then updates pid', async () => {
     const { rt, cp, createdSessions } = makeRt();
     const ledger = withLedger(rt);
     const { io, out, err } = makeIo();
@@ -144,7 +144,7 @@ describe('cmdSpawn — happy path', () => {
     const r = await cmdSpawn(
       rt,
       io,
-      baseOpts({ bundle: DIGEST, forkFn, ledger, tag: 'parent-xyz' }),
+      baseOpts({ configRef: DIGEST, forkFn, ledger, tag: 'parent-xyz' }),
     );
 
     expect(r).toBe(0);
@@ -157,6 +157,8 @@ describe('cmdSpawn — happy path', () => {
       sessionId: 'sess-abc',
       kind: 'prompt',
       prompt: 'summarize the repo',
+      // Envelope carries configRef so `/v1/runs` resolves the bundle for this leaf (M1).
+      configRef: DIGEST,
     });
     // Final ledger state has the pid filled in.
     const final = openLedger(ledgerPath).readAll();
@@ -169,21 +171,20 @@ describe('cmdSpawn — happy path', () => {
     expect(err.join('\n')).toMatch(/spawned sess-abc.*pid 4242/);
   });
 
-  it('emits a JSON line to stdout with --json; the human message stays on stderr', async () => {
+  it('omits configRef from the envelope when --config is not given (unbundled run)', async () => {
     const { rt } = makeRt();
-    const { io, out, err } = makeIo();
-    const r = await cmdSpawn(
-      rt,
-      io,
-      baseOpts({ bundle: DIGEST, json: true, forkFn: () => 1234, ledger: withLedger(rt) }),
-    );
+    const { io } = makeIo();
+    let seenEnvelope: LeafEnvelope | undefined;
+    const forkFn: SpawnOptions['forkFn'] = (_sid, _tok, env) => {
+      seenEnvelope = env;
+      return 1;
+    };
+    const r = await cmdSpawn(rt, io, baseOpts({ forkFn, ledger: withLedger(rt) }));
     expect(r).toBe(0);
-    expect(JSON.parse(out[0]!)).toEqual({ type: 'session', sessionId: 'sess-abc', pid: 1234 });
-    // Human-readable 'spawned' line never pollutes --json stdout.
-    for (const line of out) expect(line).not.toMatch(/^spawned/);
+    expect(seenEnvelope?.configRef).toBeUndefined();
   });
 
-  it('builds a converge envelope that carries both repoUrl and ref through to the fork', async () => {
+  it('solve envelope carries problemStatement, not prompt (the server-side solve path reads problemStatement)', async () => {
     const { rt } = makeRt();
     const { io } = makeIo();
     let seenEnvelope: LeafEnvelope | undefined;
@@ -195,7 +196,47 @@ describe('cmdSpawn — happy path', () => {
       rt,
       io,
       baseOpts({
-        kind: 'converge',
+        prompt: 'Fix the lint warning on main.ts',
+        kind: 'solve',
+        repoUrl: 'https://x',
+        ref: 'main',
+        forkFn,
+        ledger: withLedger(rt),
+      }),
+    );
+    expect(r).toBe(0);
+    expect(seenEnvelope?.kind).toBe('solve');
+    expect(seenEnvelope?.problemStatement).toBe('Fix the lint warning on main.ts');
+    expect(seenEnvelope?.prompt).toBeUndefined();
+  });
+
+  it('emits a JSON line to stdout with --json; the human message stays on stderr', async () => {
+    const { rt } = makeRt();
+    const { io, out, err } = makeIo();
+    const r = await cmdSpawn(
+      rt,
+      io,
+      baseOpts({ configRef: DIGEST, json: true, forkFn: () => 1234, ledger: withLedger(rt) }),
+    );
+    expect(r).toBe(0);
+    expect(JSON.parse(out[0]!)).toEqual({ type: 'session', sessionId: 'sess-abc', pid: 1234 });
+    // Human-readable 'spawned' line never pollutes --json stdout.
+    for (const line of out) expect(line).not.toMatch(/^spawned/);
+  });
+
+  it('builds a solve envelope that carries both repoUrl and ref through to the fork', async () => {
+    const { rt } = makeRt();
+    const { io } = makeIo();
+    let seenEnvelope: LeafEnvelope | undefined;
+    const forkFn: SpawnOptions['forkFn'] = (_sid, _tok, env) => {
+      seenEnvelope = env;
+      return 1;
+    };
+    const r = await cmdSpawn(
+      rt,
+      io,
+      baseOpts({
+        kind: 'solve',
         repoUrl: 'https://example.test/repo.git',
         ref: 'main',
         forkFn,
@@ -203,7 +244,7 @@ describe('cmdSpawn — happy path', () => {
       }),
     );
     expect(r).toBe(0);
-    expect(seenEnvelope?.kind).toBe('converge');
+    expect(seenEnvelope?.kind).toBe('solve');
     expect(seenEnvelope?.repoUrl).toBe('https://example.test/repo.git');
     expect(seenEnvelope?.ref).toBe('main');
   });
@@ -236,7 +277,7 @@ describe('cmdSpawn — failure paths that must not create a ledger orphan', () =
       rt,
       io,
       baseOpts({
-        bundle: DIGEST,
+        configRef: DIGEST,
         forkFn: () => {
           throw new Error('log open failed: ENOSPC');
         },
@@ -261,6 +302,32 @@ describe('cmdSpawn — failure paths that must not create a ledger orphan', () =
     expect(err.join('\n')).toContain('control plane unreachable');
     expect(forkFn).not.toHaveBeenCalled();
     expect(openLedger(ledgerPath).readAll()).toEqual([]);
+  });
+
+  it('async fork rejection (ENOENT on execPath after spawn() returns) marks the ledger failed', async () => {
+    // Simulates the adversary-M3 case: child_process.spawn emits an 'error' event asynchronously
+    // (next tick) rather than throwing. The fork seam here delivers the rejection as a Promise,
+    // which is the shape defaultFork now awaits in the real binary.
+    const { rt } = makeRt();
+    const ledger = withLedger(rt);
+    const { io, err } = makeIo();
+    const r = await cmdSpawn(
+      rt,
+      io,
+      baseOpts({
+        configRef: DIGEST,
+        forkFn: async () => {
+          await Promise.resolve();
+          throw Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' });
+        },
+        ledger,
+      }),
+    );
+    expect(r).toBe(1);
+    expect(err.join('\n')).toContain('ENOENT');
+    const only = openLedger(ledgerPath).readAll()[0]!;
+    expect(only.lastKnownState).toBe('failed');
+    expect(only.stateDetail).toContain('ENOENT');
   });
 });
 

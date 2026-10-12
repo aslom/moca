@@ -39,8 +39,8 @@ export const USAGE = `usage:
   mocactl credentials add NAME --host HOST [--host HOST ...] [--kind KIND] [--consumer CONSUMER]
       [--endpoint URL] [--json]                  the secret is read from stdin
   mocactl credentials delete NAME [--json]
-  mocactl spawn "prompt" --bundle DIGEST --kind prompt|converge
-      [--repo URL --ref REF] [--tag T] [--json]   fork a detached subagent
+  mocactl spawn "prompt" [--config DIGEST] --kind prompt|solve
+      [--repo URL --ref REF] [--tag T] [--json]   fork a detached subagent (solve needs --repo/--ref)
   mocactl subagents [--tag T] [--json]            list spawned subagents + current state
   mocactl get SESSIONID [--out DIR] [--json]      write result files + bounded summary
 flags for every command: --control-plane-url URL
@@ -104,7 +104,6 @@ export async function main(
         setup: { type: 'boolean' },
         'no-animation': { type: 'boolean' },
         'dry-run': { type: 'boolean' },
-        bundle: { type: 'string' },
         repo: { type: 'string' },
         ref: { type: 'string' },
         tag: { type: 'string' },
@@ -137,7 +136,7 @@ export async function main(
   const json = values.json === true;
   const { signal } = deps;
   if (!(command === 'credentials' && rest[0] === 'add')) {
-    // --kind is shared with `spawn` (prompt|converge); the other three remain credentials-only.
+    // --kind is shared with `spawn` (prompt|solve); the other three remain credentials-only.
     const stray = CREDENTIAL_FLAGS.filter((f) => !(f === 'kind' && command === 'spawn')).find(
       (f) => values[f] !== undefined,
     );
@@ -146,19 +145,16 @@ export async function main(
       return 2;
     }
   }
-  if (values.config !== undefined && command !== 'run') {
-    io.err(`--config only applies to \`mocactl run\`\n${USAGE}`);
+  if (values.config !== undefined && command !== 'run' && command !== 'spawn') {
+    io.err(`--config only applies to \`mocactl run\` and \`mocactl spawn\`\n${USAGE}`);
     return 2;
   }
   if (values.all !== undefined && command !== 'logout') {
     io.err(`--all only applies to \`mocactl logout\`\n${USAGE}`);
     return 2;
   }
-  if (
-    (values.bundle !== undefined || values.repo !== undefined || values.ref !== undefined) &&
-    command !== 'spawn'
-  ) {
-    io.err(`--bundle, --repo and --ref only apply to \`mocactl spawn\`\n${USAGE}`);
+  if ((values.repo !== undefined || values.ref !== undefined) && command !== 'spawn') {
+    io.err(`--repo and --ref only apply to \`mocactl spawn\`\n${USAGE}`);
     return 2;
   }
   if (values.tag !== undefined && command !== 'spawn' && command !== 'subagents') {
@@ -281,14 +277,18 @@ export async function main(
         return 2;
       }
       const kind = values.kind;
-      if (kind !== 'prompt' && kind !== 'converge') {
-        io.err(`--kind must be prompt or converge\n${USAGE}`);
+      if (kind !== 'prompt' && kind !== 'solve') {
+        io.err(`--kind must be prompt or solve\n${USAGE}`);
+        return 2;
+      }
+      if (values.config !== undefined && values.config.trim() === '') {
+        io.err(`--config needs a bundle digest (sha256:…); omit it to run without one\n${USAGE}`);
         return 2;
       }
       return cmdSpawn(rt, io, {
         prompt,
         kind,
-        bundle: values.bundle,
+        configRef: values.config,
         repoUrl: values.repo,
         ref: values.ref,
         tag: values.tag,
