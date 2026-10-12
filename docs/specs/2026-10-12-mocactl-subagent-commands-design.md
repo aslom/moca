@@ -126,7 +126,7 @@ the TUI column shows the distinction.
 - Per-row `/runs/status` failure in `subagents`: that row is reported as `unknown` with
   the error as its detail; other rows still render.
 - `spawn` validation: bundle digest must match `sha256:<64 lowercase hex>`; `--kind
-  converge` must have both `--repo` and `--ref`; `--kind prompt` must have neither;
+converge` must have both `--repo` and `--ref`; `--kind prompt` must have neither;
   prompt must be non-empty and under 64 KiB.
 - `get` validation: sessionId must match the harness-side alphabet
   (`[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]`); unmet exits `2`. A 404 from `/runs/status`
