@@ -2,7 +2,7 @@
 
 **Run stateful AI coding agents on a dense, warm process-manager runtime — sessions resume exactly where they left off.**
 
-![status](<https://img.shields.io/badge/status-MVP%20(Phase%201)-success>)
+![status](https://img.shields.io/badge/status-preview-yellow)
 ![platform](https://img.shields.io/badge/platform-P6%20process%20manager-blue)
 ![runtime](https://img.shields.io/badge/runtime-Pi%20coding%20agent-informational)
 ![node](https://img.shields.io/badge/node-22%2B-green)
@@ -26,8 +26,22 @@ agent work ("leaves") over a simple HTTP + shared-volume contract — sync turns
 streaming turns, and human-gated runs, with async fan-out and scheduled dispatch owed P6
 follow-ups ([ADR-0034](docs/adrs/0034-vm-process-manager-socket-handoff.md)).
 
+## Maturity
+
+Labels apply to each deployment path, not to the project as a whole (definitions in the
+[documentation map](docs/index.md#maturity-labels)).
+
+| Path                                                 | Label      | Notes                                                                      |
+| ---------------------------------------------------- | ---------- | -------------------------------------------------------------------------- |
+| [Docker Compose](deploy/compose/README.md)           | Preview    | Five-minute trial, not production                                          |
+| [Single VM](deploy/vm/README.md)                     | Preview    | The production path for one host                                           |
+| [P6 on Kubernetes / OpenShift](deploy/k8s/README.md) | Preview    | Same process model as ordinary cluster workloads                           |
+| [P4 microVM sandboxes](deploy/microvm/P4-ON-P6.md)   | Preview    | Per-`Exec` Firecracker VMs on a KVM host; known limits listed on that page |
+| [Knative + KEDA](deploy/knative/README-kind.md)      | **Legacy** | Deprecated 2026-10-11; removal no earlier than end of October 2026         |
+
 ## Table of Contents
 
+- [Maturity](#maturity)
 - [Why](#why)
 - [Architecture](#architecture)
 - [Features](#features)
@@ -97,7 +111,7 @@ flowchart LR
   conversation and state by `sessionId`, surviving process or pod death.
 - **Brain/hands isolation** — the agent never executes tools in its own process; everything runs
   in a remote sandbox over the gRPC relay — container tier, or a microVM per `Exec`.
-- **Human-in-the-loop gates** — a leaf can pause mid-run, report `awaiting_approval`, and resume on an
+- **Human-in-the-loop gates** — a leaf can pause mid-run, report `paused`, and resume on an
   external approve/reject/abort verdict.
 - **Volume-envelope contract** — orchestrators pass inputs and collect results as files, decoupling
   result size from HTTP limits.
@@ -105,48 +119,57 @@ flowchart LR
   substrate allows; isolation is enforced by the sandbox tier, not by trust.
 - **Built on Pi** — wraps a pinned [`kagenti/pi`](https://github.com/kagenti/pi) coding agent through
   an injectable `SessionStorageBackend` seam; the agent itself is unmodified.
-- **Promote a local Claude Code workflow** — `cd harness && pnpm promote` bundles skills, `CLAUDE.md`,
-  memory, and a slash command from your local `~/.claude` into a content-addressed bundle a leaf can
-  dispatch by digest (see [Promoting a local Claude Code workflow](#promoting-a-local-claude-code-workflow)).
+- **Promote a local Claude Code workflow** — `mocactl promote DIR` bundles your local skills and
+  commands into a content-addressed bundle that a session or a leaf runs with, uploaded through the
+  control plane (see [the guide](docs/guides/promote-claude-workflow.md)).
 
 ---
 
 ## Quick Start
 
-Try the P6 runtime in five minutes, no root, with Docker Compose — the supervisor, the relay,
-Redis and a sandbox on one machine:
+Try the P6 runtime in five minutes, no root, with Docker Compose: the supervisor, the relay, Redis
+and a sandbox on one machine.
 
-> **Prerequisites:** `docker` (or a compatible runtime) and an Anthropic-compatible model
-> credential.
+> **Prerequisites:** `docker` (or a compatible runtime) with Compose, `curl`, and an
+> Anthropic-compatible model credential.
 
 ```bash
-git clone --recurse-submodules https://github.com/rossoctl/moca.git
-cd moca
-./deploy/compose/install.sh
+curl -fsSL https://raw.githubusercontent.com/rossoctl/moca/main/deploy/compose/install.sh \
+  | ANTHROPIC_API_KEY=sk-ant-... sh
+```
+
+Verify it works, then stop it (Redis state goes with it):
+
+```bash
+curl -s -H 'Content-Type: application/json' -d '{"prompt":"Run uname -a and tell me the kernel."}' \
+  http://127.0.0.1:8080/turn
+cd ~/.serverless-harness && docker compose down
+```
+
+Details, configuration and the multi-user control plane are in the
+[Compose README](deploy/compose/README.md). To use the terminal client against a control plane,
+install `mocactl` (Node 22+):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rossoctl/moca/main/scripts/install-mocactl.sh | sh
 ```
 
 Where to go next:
 
-- **Production, a dedicated VM or bare metal:** [`deploy/vm/`](deploy/vm/README.md) — `setup-vm.sh`,
-  systemd units, podman `isolate=strict` + nftables.
-- **Stay on Kubernetes or OpenShift:** [`deploy/k8s/`](deploy/k8s/README.md) — the same P6 process
-  model as ordinary cluster workloads (`setup.sh`, with Kind and OCP overlays).
-- **Guided tour:** [`docs/demos/vm-multi-user-demo.md`](docs/demos/vm-multi-user-demo.md) — two
-  users, one VM, two sandbox tiers (~40 min). All demos are indexed in
-  [`docs/demos/`](docs/demos/).
+- **Choose an install path:** [`docs/get-started/`](docs/get-started/index.md).
+- **Production, a dedicated VM or bare metal:** [`deploy/vm/`](deploy/vm/README.md).
+- **Stay on Kubernetes or OpenShift:** [`deploy/k8s/`](deploy/k8s/README.md).
+- **Guided tour:** [`docs/demos/vm-multi-user-demo.md`](docs/demos/vm-multi-user-demo.md): two
+  users, one VM, two sandbox tiers (~40 min). All demos are indexed in [`docs/demos/`](docs/demos/).
 
 ---
 
 ## Legacy: the Knative + KEDA deployment (deprecated)
 
-The original scale-to-zero deployment — Knative Service, KEDA ScaledJobs, `kubectl exec` sandboxes
-under [`deploy/knative/`](deploy/knative/) — is **deprecated as of 2026-10-11**
-([ADR-0041](docs/adrs/0041-deprecate-knative-keda-deployment.md)). It receives security and
-breakage fixes only; removal comes no earlier than **end of October 2026**, once the remaining
-users have migrated. See [Migrating off the Knative/KEDA
-deployment](docs/migrating-from-knative.md) for what maps to what. Its setup scripts
-(`setup-kind.sh`, `setup-ocp.sh`), guides and smoke record
-([`deploy/knative/SMOKE.md`](deploy/knative/SMOKE.md)) remain in-tree and working until removal.
+The original scale-to-zero deployment under [`deploy/knative/`](deploy/knative/) is **deprecated as
+of 2026-10-11** ([ADR-0041](docs/adrs/0041-deprecate-knative-keda-deployment.md)): security and
+breakage fixes only, removal no earlier than **end of October 2026** and only once its remaining
+users have migrated. See [Migrating off the Knative/KEDA deployment](docs/migrating-from-knative.md).
 
 ---
 
@@ -166,83 +189,11 @@ deployment](docs/migrating-from-knative.md) for what maps to what. Its setup scr
 
 ### Promoting a local Claude Code workflow
 
-Iterate on a workflow locally in Claude Code — skills, `CLAUDE.md`, memory, a slash command — then
-promote it from inside Claude Code, in the project you want to promote:
-
-```bash
-mkdir -p ~/.claude/commands                                    # once
-cp deploy/claude/commands/promote.md ~/.claude/commands/       # once
-export SH_HARNESS_DIR=/path/to/moca              # once, per shell
-
-# launch with the CLI granted at session level, so the grant outlives the command's own turn
-claude --allowedTools "Bash(pnpm --dir $SH_HARNESS_DIR/harness promote:*)"
-
-/promote my-workflow                                           # in any project, from Claude Code
-```
-
-The command's `allowed-tools` frontmatter grants the CLI for the turn the slash command creates. That
-is enough when the promotion completes in that turn; if the turn ends first — an interruption, or a
-guard that stops to ask — the grant is gone and the next turn's `pnpm` call is refused, since a
-default install has no `pnpm` rule. The launch flag above avoids that, stays narrow (only the
-`promote` script, only in that checkout), and needs no change to your settings. The equivalent
-permanent form is the same rule in `permissions.allow`, with the path written out — a `*` inside the
-pattern matches nothing.
-
-`/promote` passes `--home` and `--project` for you, checks that the repo boundary and the Redis
-tunnel are right before uploading, and reads the digest back through the cluster's own client
-afterwards. It writes every path out in full, with no `$VAR` and no `HOME=… pnpm …` prefix, because
-Claude Code will only match a command against `allowed-tools` if it can analyse it statically —
-otherwise the command needs a permission prompt at best, and under `defaultMode: dontAsk` or `auto`
-it is refused outright.
-
-Installed in your **real** `~/.claude/commands/` as above, it is visible in every project and never
-travels. You can instead keep it **in the project**, which lets you run Claude Code with
-`HOME=<project>` so the local agent sees exactly what the promoted run will; `/promote` then detects
-that it lives there and self-excludes with `--exclude-prompt promote` (see below), because otherwise
-it would ship itself into every bundle.
-
-Or drive the CLI directly:
-
-```bash
-cd harness && pnpm promote --entry my-workflow --project /path/to/your/project
-```
-
-`promote` reads the workflow — skills, `CLAUDE.md` chain, and memory — from `--project`, so
-running it from the harness checkout without `--project` promotes the harness's own
-configuration, not yours.
-
-`--home <dir>` reads _user_ scope (skills, memory, prompts) from `<dir>/.claude` instead of your real
-`$HOME`, and `--redis-url <url>` names the Redis to upload to. Both override the corresponding env
-var (`HOME`, `REDIS_URL`) and produce a byte-identical bundle to it; they exist as flags so the whole
-invocation can be one statically analyzable command, which is what `/promote` needs to run without a
-permission prompt. The CLI prints the user scope it resolved, so you can see which one applied.
-
-`promote` dedupes and classifies your local configuration, drops what cannot work in the harness
-(with a reason for each), and scans for credentials before uploading. The scan has two tiers: a
-structural match on a known key shape (an AWS access key, a PEM private-key block, a GitHub or
-Slack token, an OpenAI-style key) **refuses the upload** and exits non-zero; a weaker prose
-heuristic (`token: <value>`-shaped lines) only **warns and proceeds**, leaving the judgement to
-you — that heuristic matches code and documentation placeholders too often to block on safely. It
-writes a committable `.claude/promoted.lock.json` and uploads a content-addressed bundle; an
-unchanged re-promotion uploads nothing.
-
-Keep a prompt out of the bundle with `--exclude-prompt <name>`, repeatable. This exists for the
-case where the command that _drives_ promotion lives in the project being promoted: with user scope
-pointed at that project, its `.claude/commands/` is the prompts directory, so without the flag such
-a command ships itself into every bundle. Excluding the entry prompt is refused outright, and an
-exclusion that matches nothing warns — an unmatched exclusion would otherwise ship the prompt you
-meant to omit.
-
-Dispatch it by adding one field to any prompt leaf:
-
-```json
-{ "sessionId": "run-1/item-1", "kind": "prompt", "prompt": "…", "configRef": "sha256:…" }
-```
-
-Memory travels **read-only** — a promoted run consumes what you taught it locally and reports
-discoveries back in the leaf result, which keeps leaf replay reproducible
-([ADR-0031](docs/adrs/0031-promoted-memory-read-only.md)). MCP servers and subagents are not
-promoted; see the [design](docs/specs/2026-09-02-claude-code-workflow-promotion-design.md) §2, §9.
+Iterate on skills and commands locally in Claude Code, then promote them with `mocactl promote DIR`
+(or `/promote DIR` inside the `mocactl` TUI). The bundle is built and credential-scanned on your
+machine, uploaded through the control plane with no cluster credentials, and fixed to the session
+you start with `mocactl run --config DIGEST`. Full guide:
+[`docs/guides/promote-claude-workflow.md`](docs/guides/promote-claude-workflow.md).
 
 ---
 
@@ -253,7 +204,7 @@ The same backend serves three orchestration patterns, all validated end-to-end o
 | Archetype             | Pattern                                                                                | Example use case                                     |
 | --------------------- | -------------------------------------------------------------------------------------- | ---------------------------------------------------- |
 | **A — Async fan-out** | `{async:true}` → Redis Streams → drained by KEDA ScaledJobs — **deprecated path only** | "Research 10 topics concurrently"                    |
-| **B — Human gate**    | Leaf pauses → `awaiting_approval` → external verdict → resume/terminate                | "Draft a clause, pause for legal sign-off, finalize" |
+| **B — Human gate**    | Leaf pauses (`paused`) → external verdict → resume/terminate                           | "Draft a clause, pause for legal sign-off, finalize" |
 | **C — Scheduled**     | CronJob → `cron-dispatch` posts async leaves — **deprecated path only**                | "Summarize yesterday's tickets at 02:00 daily"       |
 
 B is served by the P6 runtime today. A and C have **no P6 equivalent yet** — the async drainer
@@ -277,6 +228,8 @@ moca/
 │   ├── work-queue/        # Redis Streams work queue (async dispatch)
 │   ├── sandbox-relay/     # gRPC relay between control plane and remote-worker sandboxes
 │   ├── control-plane/     # Multi-user control plane, credential issuance
+│   ├── config-bundle/     # Promoted config bundle loading
+│   ├── ibac-stub/         # IBAC stub
 │   └── mocactl/           # MOCA terminal client for the control plane
 ├── remote-worker/         # Go: container + microVM sandbox workers
 ├── deploy/
@@ -286,7 +239,7 @@ moca/
 │   ├── microvm/           # P4 Firecracker microVM deployment
 │   └── knative/           # Knative/KEDA deployment — DEPRECATED (ADR-0041)
 ├── pi-fork/               # Pinned Pi coding agent (submodule)
-└── docs/                  # Specs, ADRs, demos, migration guide
+└── docs/                  # Docs map, guides, specs, ADRs, demos, migration guide
 ```
 
 ---
@@ -298,58 +251,48 @@ Behaviour and economics are backed by reproducible experiments rather than claim
 - **[`moca-experiments/knative/EXPERIMENTS.md`](https://github.com/rossoctl/moca-experiments/blob/main/knative/EXPERIMENTS.md)**
   — cluster experiments E1 (economics), E3 (mobility), E4 (recovery), run live on Kind. Moved to
   a separate repo 2026-09-25 (see `docs/specs/2026-09-24-ra1-density-cutover-and-repo-rearchitecture-design.md`).
-- **[`docs/experiment-results.md`](docs/experiment-results.md)** — E2 (reconstruction cost) and E5
-  (budget enforcement); the `@sh/experiments` workspace these ran from moved to
-  [`moca-experiments/experiments/`](https://github.com/rossoctl/moca-experiments/tree/main/experiments)
-  on 2026-09-25 (see `docs/specs/2026-09-24-ra1-density-cutover-and-repo-rearchitecture-design.md`).
-- **[`deploy/knative/SMOKE.md`](deploy/knative/SMOKE.md)** — the deprecated Knative path's 6/6
-  cold-start + resume smoke record.
+- **[`docs/experiment-results.md`](docs/experiment-results.md)**: E2 (reconstruction cost) and E5
+  (budget enforcement), a dated write-up from June 2026. The code these ran from now lives in
+  [`moca-experiments/experiments/`](https://github.com/rossoctl/moca-experiments/tree/main/experiments).
+- **[`deploy/knative/SMOKE.md`](deploy/knative/SMOKE.md)**: the deprecated Knative path's smoke
+  record, kept as history.
 
 ---
 
 ## Roadmap
 
-**Phase 1 — Decoupled Harness (built):** Redis session backend, remote sandbox client, persistent
-in-pod channel, Knative wrapper, compaction-checkpoint fast path, experiments, and the leaf-session
-backend with all three dispatch archetypes. See the
-[milestone registry](docs/specs/README.md) for the source-of-truth status of every milestone.
-
-**Phase 2 — Zero-Trust Credential Plane (design complete, deferred):** a credential plane where
-_no component influenced by model output ever holds a raw secret._
-
-| ID  | Adds                                                                  |
-| --- | --------------------------------------------------------------------- |
-| Z1  | Per-session SPIFFE identity (SPIRE)                                   |
-| Z2  | Secret-free, default-deny harness lock-down                           |
-| Z3  | Inference injector — provider-key chokepoint, mTLS to the LLM gateway |
-| Z4  | MCP code-mode in the sandbox                                          |
-| Z5  | Generalized credentialed egress (sandbox forward proxy)               |
-| Z6  | Subagents as isolated child sessions                                  |
-| Z7  | Red-team + formal validation of the credential plane                  |
-
-Today the harness uses a trust-the-operator model: the model credential is a pre-provisioned
-Kubernetes Secret, there is no egress policy, and all leaves share one service-account identity. Those
-gaps are exactly what Phase 2 closes.
+The [milestone registry](docs/specs/README.md) is the source of truth for the status of every
+milestone, including the process manager (P6), the microVM tier (P4), the multi-user control plane
+(MU), and the zero-trust credential plane (Z track), whose parts are at different stages. Open
+questions and planned documentation work are in [`docs/REORG-PLAN.md`](docs/REORG-PLAN.md).
 
 ---
 
 ## Documentation
 
-- [Glossary](docs/glossary.md) — canonical `session`/`turn` vocabulary; why `run` isn't a harness concept
-- [Migrating off the Knative/KEDA deployment](docs/migrating-from-knative.md) — deprecation policy and destination map
-- [Deploy: VM](deploy/vm/README.md) · [Kubernetes/OpenShift](deploy/k8s/README.md) · [Compose trial](deploy/compose/README.md)
-- [Executive overview — leaf-session backend](docs/executive-overview-leaf-session.md)
-- [Milestone registry](docs/specs/README.md) — authoritative milestone numbering and status
-- [Design specs](docs/specs/) — one dated design doc per milestone
-- [`harness/README.md`](harness/README.md) — local dev build (Pi workspace build order, headless smoke)
+Start at the [documentation map](docs/index.md).
+
+| I want to...                      | Go to                                                                                                                                                                                                                                                              |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Pick an install path              | [Get started](docs/get-started/index.md)                                                                                                                                                                                                                           |
+| Leave the Knative/KEDA deployment | [Migration guide](docs/migrating-from-knative.md)                                                                                                                                                                                                                  |
+| Promote a Claude Code workflow    | [Guide](docs/guides/promote-claude-workflow.md)                                                                                                                                                                                                                    |
+| Look up an environment variable   | [Configuration reference](docs/reference/configuration.md)                                                                                                                                                                                                         |
+| Look up a `mocactl` command       | [`mocactl` reference](docs/reference/cli-mocactl.md)                                                                                                                                                                                                               |
+| Look up a term                    | [Glossary](docs/glossary.md)                                                                                                                                                                                                                                       |
+| Call the HTTP API                 | [HTTP API guide](docs/reference/http-api.md), [leaf envelope](docs/reference/leaf-and-envelope.md), [`docs/api/openapi.yaml`](docs/api/openapi.yaml), [`docs/api/harness-openapi.yaml`](docs/api/harness-openapi.yaml), [Context service](docs/context-service.md) |
+| Follow a guided walkthrough       | [Demos](docs/demos/README.md)                                                                                                                                                                                                                                      |
+| See why a decision was made       | [ADRs](docs/adrs/README.md), [milestone registry](docs/specs/README.md)                                                                                                                                                                                            |
+| Build or contribute               | [`CONTRIBUTING.md`](CONTRIBUTING.md), [`harness/README.md`](harness/README.md), [docs conventions](docs/CONTRIBUTING-DOCS.md)                                                                                                                                      |
 
 ---
 
 ## Status & License
 
-This is explorative work. The warm-worker-pool runtime, durable resume, sandbox isolation
-(container and microVM tiers), and the multi-user control plane are built; async fan-out and
-scheduled dispatch on P6, and the zero-trust credential plane, are designed but not yet
-implemented. Interfaces may change.
+This is explorative work and every deployment path except the deprecated Knative one is Preview
+(see [Maturity](#maturity)). The warm-worker-pool runtime, durable resume, sandbox isolation
+(container and microVM tiers), and the multi-user control plane are built. Async fan-out and
+scheduled dispatch exist only on the deprecated path and have no P6 equivalent yet. Interfaces may
+change.
 
 Licensed under the [Apache License 2.0](LICENSE).
