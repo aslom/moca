@@ -27,6 +27,7 @@ Preview paths is an open decision; see [`REORG-PLAN.md`](REORG-PLAN.md), open qu
 | Pick an install path and run MOCA   | [Get started](get-started/index.md)                                                                                                                                                       |
 | Run MOCA for the first time         | [First run](get-started/first-run.md)                                                                                                                                                     |
 | Leave the Knative/KEDA deployment   | [Migrating off the Knative/KEDA deployment](migrating-from-knative.md)                                                                                                                    |
+| Understand how it works             | [Concepts](concepts/index.md)                                                                                                                                                             |
 | See the terms MOCA uses             | [Glossary](glossary.md)                                                                                                                                                                   |
 | Look up an environment variable     | [Configuration reference](reference/configuration.md)                                                                                                                                     |
 | Look up a `mocactl` command         | [`mocactl` reference](reference/cli-mocactl.md)                                                                                                                                           |
@@ -42,6 +43,7 @@ Preview paths is an open decision; see [`REORG-PLAN.md`](REORG-PLAN.md), open qu
 | ------------------------------------------------------------- | ---------------------------------------------------------------------- | ------------------------- |
 | `get-started/`                                                | Install-path chooser                                                   | New users                 |
 | `migrating-from-knative.md`                                   | The single deprecation and migration page                              | Operators                 |
+| `concepts/`                                                   | How sessions, sandboxes, multiplexing, multi-user and dispatch work    | Everyone                  |
 | `reference/`                                                  | Configuration, `mocactl` commands, HTTP API guide, leaf envelope       | Operators and integrators |
 | `glossary.md`, `context-service.md`, `api/`                   | Terms and API reference                                                | Integrators               |
 | `demos/`                                                      | Guided, hand-driven walkthroughs                                       | Evaluators                |
@@ -52,6 +54,6 @@ Preview paths is an open decision; see [`REORG-PLAN.md`](REORG-PLAN.md), open qu
 | `REORG-PLAN.md`                                               | The plan this structure follows, with the audit and open questions     | Maintainers               |
 
 Install and operations guides live next to the scripts they describe: `deploy/compose/`,
-`deploy/vm/`, `deploy/k8s/` and `deploy/microvm/`. Operations and concept pages are planned but
-do not exist yet; see the new-docs backlog in
+`deploy/vm/`, `deploy/k8s/` and `deploy/microvm/`. Operations pages are planned but do not exist yet;
+see the new-docs backlog in
 [`REORG-PLAN.md`](REORG-PLAN.md).
