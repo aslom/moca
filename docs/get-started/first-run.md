@@ -18,7 +18,9 @@ curl -fsSL https://raw.githubusercontent.com/rossoctl/moca/main/deploy/compose/i
 ```
 
 By default the data plane accepts unauthenticated calls on `127.0.0.1:8080` (`SH_REQUIRE_AUTH=false`),
-so a plain `curl` works. Running the control plane for `mocactl` turns that off; see
+so a plain `curl` works. Adding the control plane for `mocactl` does not close that: the operator's model
+credential still serves unauthenticated `curl /turn` unless you set `SH_REQUIRE_AUTH=true` in `.env`. What
+changes is that a present but invalid token is refused. See
 [Using mocactl](../../deploy/compose/README.md#using-mocactl-the-control-plane).
 
 ## 1. Send a turn

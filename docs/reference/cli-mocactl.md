@@ -16,7 +16,9 @@ Run `mocactl --help` for the usage text. `--help` is not per command: `mocactl r
 same global usage. `mocactl --version` prints a release tag, `edge-<sha>` or `dev`.
 
 All flags are accepted by one parser. An unknown flag, or a missing flag value, prints the usage and
-exits 2. A flag a command does not use is not always rejected; it may be ignored.
+exits 2. Some flags are always rejected (exit 2) outside their command: `--kind`, `--consumer`, `--host` and
+`--endpoint` outside `credentials add`, `--config` outside `run`, and `--all` outside `logout`. Other flags
+a command does not use are not rejected and may be ignored.
 
 ## Endpoints
 
@@ -44,7 +46,10 @@ With no harness URL, `mocactl` asks the control plane (`GET /v1/discovery`), whi
 | `4`   | `auth token`: the control plane is unreachable                                   |
 
 Output convention: stdout carries only the result, and all messages go to stderr. Times in tables are
-UTC. Not logged in prints `not logged in — run mocactl login first` and exits 2.
+UTC. Most commands that need a login print ``not logged in — run `mocactl login` first`` and exit 2, with
+exceptions: a login that cannot be refreshed prints `the login could not be refreshed — is the control plane
+reachable?` instead; `auth token` exits 3 (login required) or 4; `logout` while logged out exits 0; and
+`promote --dry-run` skips the check.
 
 ## Commands
 
@@ -69,8 +74,10 @@ UTC. Not logged in prints `not logged in — run mocactl login first` and exits 
 - The prompt is the positionals joined with spaces. Exit 2 for an empty prompt, `--new` with
   `--session`, `--config` with `--session` (a session's bundle is fixed at creation), a blank
   `--config`, or an `--option` without `=`.
-- `--option` keys: `inferenceCredential=NAME` and `sandboxTier=NAME`. A choice that is ambiguous or
-  unknown exits 2 with the declared values. `--option` is ignored when resuming a session.
+- `--option` keys: `inferenceCredential=NAME` and `sandboxTier=NAME`. An ambiguous or unknown choice for
+  `inferenceCredential` exits 2 with the declared values. With several `sandboxTier` choices and none given,
+  the tier is left unset for the server default; a value for a field that has no choices exits 2. Unknown
+  keys are silently ignored, and `=x` (no key) exits 2. `--option` is ignored when resuming a session.
 - Text mode streams the reply to stdout, and reports a `workspace_reset` to stderr.
 - `--json` emits NDJSON: a first line `{"type":"session","sessionId":...}`, then one raw
   [turn frame](http-api.md#streaming-frames) per line.
@@ -89,8 +96,9 @@ is validated before stdin is read.
 | `basic`        | `username=…` and `password=…`, one per line |
 
 Consumers are `inference`, `sandbox-egress` and `control-plane`. `basic` is not for inference; use it
-with `--consumer sandbox-egress`. Anthropic `sk-ant-oat…` OAuth tokens are rejected, as is an
-`sk-ant-api…` key under a bearer kind.
+with `--consumer sandbox-egress`. For the `inference` consumer, Anthropic `sk-ant-oat…` OAuth tokens are
+rejected, as is an `sk-ant-api…` key under a bearer kind (`bearer` or `oauth2-token`), and an
+`api.anthropic.com` endpoint with a bearer kind is rejected before stdin is read.
 
 ### `promote` exit codes
 
@@ -101,7 +109,8 @@ with `--consumer sandbox-egress`. Anthropic `sk-ant-oat…` OAuth tokens are rej
 | `2`  | Wrong argument count; not logged in (not checked with `--dry-run`); preflight errors               |
 | `3`  | A structural credential match; nothing was uploaded                                                |
 
-`--json` prints the whole result: `{digest, configRoot, skills, dropped, prompts, report, warnings, uploaded}`.
+`--json` prints the whole result: `{digest, configRoot, skills, dropped, prompts, report, warnings, uploaded}`,
+plus `dryRun: true` for a dry run.
 `~` is expanded in `DIR`.
 
 ### `doctor`
@@ -162,5 +171,5 @@ left behind. `/promote DIR` uploads the bundle and attaches it to the next sessi
 ## Known gaps
 
 - The keys inside the Sessions, Credentials and Palette overlays are not listed here.
-- `packages/mocactl/README.md` states exit codes as `0, 1, 2, 130` for every command; `auth token` and
-  `promote` also use `3` and `4` as above.
+- `packages/mocactl/README.md` states exit codes as `0, 1, 2, 130` for every command and documents
+  `promote`'s exit 3, but not `auth token`'s exits 3 and 4 (only `auth token` uses 4).

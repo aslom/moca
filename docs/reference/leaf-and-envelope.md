@@ -12,7 +12,9 @@ The first leaf contract passed inputs and results as files on a shared volume (`
 gate decision are **inline** in the request, the result is the **response body**, and a copy is stored
 in Redis for polling. The harness does no filesystem I/O of its own.
 
-An envelope with the old fields is rejected with 400 `envelope_invalid`. Some scripts under
+Nothing checks for the old fields by name. An envelope without the inline fields (the old file-ref shape
+has no `item`, `problemStatement` or `prompt`) is rejected with 400 `envelope_invalid`; an envelope that has
+the old fields **plus** a valid inline shape is accepted and the old fields are ignored. Some scripts under
 `deploy/knative/` (`leaf-cron.yaml`, `leaf-gate-smoke.sh`) still use them; they belong to the deprecated
 path. A leaf's tools still run in a sandbox with its own filesystem, and `workspaceRef` is a path inside
 that sandbox.
@@ -31,9 +33,18 @@ that sandbox.
 
 Optional fields on any envelope: `decision`, `model`, `provider`, `workspaceRef`, `repoUrl`, `ref`,
 `maxTurns` (verdict leaf only), `async`, `tenant`, `configRef`, `problemStatement`, `prompt`, `env_key`.
-`configRef` is `sha256:` plus 64 hex characters naming a [config bundle](../guides/promote-claude-workflow.md);
-a blank or non-string value is 400 `configRef_invalid`. `workloadId` returns 501
-`workload_runs_unavailable`.
+
+**`configRef`** names a [config bundle](../guides/promote-claude-workflow.md) (`sha256:` plus 64 lowercase hex
+characters). It applies to **prompt and solve leaves only**; a verdict leaf never reads it and runs without the
+bundle's skills, with no warning. It must be in the envelope: `/runs` does not use the session's bound
+bundle (unlike `/turn`). At request time only a non-blank string is required (`null` counts as absent; a
+blank or non-string value is 400 `configRef_invalid`); the digest format is checked when the bundle is
+resolved, and a bad digest comes back as a 200 `failed` result with reason `error`, not a 400.
+
+**`tenant`** is accepted only from unauthenticated callers: an authenticated `/runs` that sends it gets
+400 `tenant_not_allowed`.
+
+`workloadId` returns 501 `workload_runs_unavailable`, after the envelope and `configRef` checks pass.
 
 `sessionId` is mapped to a safe internal id: a `tenant/` prefix if any, every character outside
 `[A-Za-z0-9._-]` becomes `-`, and leading and trailing non-alphanumerics are trimmed.
@@ -53,8 +64,11 @@ The 200 body is a `LeafResult`:
 
 A `failed` result is returned as HTTP 200 on the sync path, not as a 4xx or 5xx, except `saturated`,
 which becomes 503 with `Retry-After`. Every non-saturated outcome is stored at `leaf:result:<id>` with
-a TTL of `LEAF_RESULT_TTL_SECONDS` (default 86400) and is readable with `GET /runs/status?sessionId=`;
-the last write wins.
+a TTL of `LEAF_RESULT_TTL_SECONDS` (default 86400); the last write wins. `GET /runs/status?sessionId=`
+returns a **reduced view** of that record, not the whole result: no `message` on `failed` (the stored
+record keeps none either), no `usage` on `solved` and `responded`, and `paused` repeats `gateId` at the top
+level and inside `gate`. A session with no record yet, or none at all, answers `200 {status: "queued"}`,
+and the lookup takes `tenant` as a query parameter (unauthenticated callers only).
 
 ## Idempotency and resume
 
@@ -70,8 +84,8 @@ the last write wins.
 
 A verdict leaf whose `item.require_approval` is `true` is told to call `request_approval` once and stop.
 `submit_verdict` is withheld until a decision exists. The run then returns
-`{status: "paused", gateId, gate: {summary, proposed_action}}` (also stored, and readable from
-`/runs/status`). There is no `awaiting_approval` status in the current code.
+`{status: "paused", gateId, gate: {summary, proposed_action}}` (also stored, and shown by
+`/runs/status` in its reduced view). There is no `awaiting_approval` status in the current code.
 
 To resolve it, re-POST the **same envelope** to `/v1/runs` with an inline decision:
 
@@ -107,5 +121,7 @@ with a token returns 501 `async_runs_unavailable`. See
 - The [human-gate design](../specs/2026-06-28-human-gate-design.md) still describes the file-based
   design (`decisionRef`, `gateRef`, an `awaiting_approval` marker). This page follows the code.
 - The P1 spec lists failure reasons without `saturated`, and statuses without `solved` and `responded`.
-- Which session id a prompt leaf passes to its turn (the raw or the sanitized one) should be checked
-  against `harness/src/run-leaf.ts` before relying on it.
+- **Prompt-leaf session ids are inconsistent.** The turn is opened under the **raw** `sessionId` (no tenant
+  prefix, no sanitising), while the sandbox lease, the promoted config and the result record use the
+  sanitized id (`harness/src/run-leaf.ts`, `server.ts`). Verdict and solve leaves use the sanitized id
+  throughout. Treat the two as different keys for a prompt leaf until the code is aligned.

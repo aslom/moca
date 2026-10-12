@@ -15,8 +15,10 @@
 
 A client logs in, creates a session (`POST /v1/sessions` returns `{sessionId, token, expiresAt}`), and
 sends turns to the harness with that **session token**. A session token has scope `turn:write`, a
-5-minute TTL, and is bound to one session; `POST /v1/sessions/{id}/token` mints a new one. API tokens
-(scope `api`, 15 minutes, refreshable) work on the control plane only, never on `/turn`.
+5-minute default TTL (`SH_SESSION_TOKEN_TTL_SECONDS`), and is bound to one session;
+`POST /v1/sessions/{id}/token` mints a new one. API tokens (scope `api`, 15-minute default TTL via
+`SH_API_TOKEN_TTL_SECONDS`, refreshable) are for the control plane and the harness's `/workloads/*` routes;
+they are never accepted on `/turn`.
 
 The same handler runs on the P6 supervisor's workers and on the deprecated Knative service, so the
 data-plane routes below are identical on both.
@@ -33,8 +35,10 @@ Send `Authorization: Bearer <session token>`. The token is an Ed25519 JWT checke
   token's session gives 400 `session_mismatch`; an `X-SH-Subject` that differs from the token's
   subject gives 400 `subject_conflict`.
 - For authenticated turns the harness exchanges the token with the control plane for the user's
-  inference credential, the config bundle (`configRef`) and the sandbox tier. These always come from
-  the control plane, never from the request.
+  inference credential, the config bundle (`configRef`) and the sandbox tier. On `/turn` these always
+  come from the control plane, never from the request. `/v1/runs` is different: it does not inherit the
+  session's bundle, and a leaf takes its `configRef` from the envelope (see
+  [Leaf envelope and result](leaf-and-envelope.md#request)).
 - An unreachable control plane fails the turn with 503 `credential_unavailable`; it never falls back
   to the environment.
 
@@ -50,8 +54,10 @@ Send `Authorization: Bearer <session token>`. The token is an Ed25519 JWT checke
 | `GET /runs/status?sessionId=`            | session token | Read a leaf's stored result                                                          |
 | `POST /run-leaf`, `GET /run-leaf/status` | session token | **Deprecated** aliases of `/runs` and `/runs/status`; log a warning once per process |
 
-Routes match the exact URL, so a query string defeats `/turn`, `/runs` and `/v1/turn/cancel`. Any other
-path returns an empty 404. The supervisor admin port (`/healthz`, `/readyz`, `/metrics`) is separate
+Matching is by URL and not uniform. `/health`, `/turn`, `/v1/turn` (POST), `/v1/turn/cancel`, `/runs`,
+`/v1/runs` and `/run-leaf` match the exact URL, so a query string defeats them. `GET /v1/turn` requires
+and accepts a query string, `/runs/status` and `/run-leaf/status` match by prefix, and `/workloads`
+strips the query. Any other path returns an empty 404. The supervisor admin port (`/healthz`, `/readyz`, `/metrics`) is separate
 and loopback by default.
 
 ## `POST /v1/turn`
@@ -80,17 +86,19 @@ A model-level failure still returns 200 with `stopReason` `error` or `aborted` a
 | ------ | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
 | 400    | `read_error`, `invalid_json`, `prompt_required`, `session_mismatch`, `subject_conflict` | Bad request                                                                                      |
 | 401    | `token_required`, `token_invalid`, `token_expired`                                      | Auth                                                                                             |
-| 404    | `session_not_found`                                                                     | An anonymous call named a session that does not exist                                            |
+| 404    | `session_not_found`                                                                     | A session that does not exist (anonymous calls), or passed through from the credential exchange  |
 | 409    | `turn_in_progress`                                                                      | `SH_TURN_DETACH=1` and a detachable turn is live (authenticated callers also get `turnId`)       |
 | 410    | `config_bundle_not_found`                                                               | The session's config bundle is missing or expired; the turn never runs without its skills        |
 | 503    | `sandbox_unavailable`                                                                   | Sandbox pool saturated, empty, or the session's sandbox is pending (affinity). Has `Retry-After` |
 | 503    | `credential_unavailable`, `redis_unavailable`                                           | Control plane or Redis fault. Has `Retry-After` for 503s                                         |
 | 500    | `internal_error`                                                                        | Never carries error text                                                                         |
 
-Error bodies are `{error, sessionId?}`. The 503 `Retry-After` is `KAGENTI_SYNC_SATURATION_RETRY_AFTER_S`
-(default 5), or, for a pending affinity, the wait clamped to 1 to 10 seconds. The control plane also
+Error bodies are `{error, sessionId?}`, plus a `message` on auth errors and on the `/runs` 501, and
+`turnId` on `turn_in_progress`. The 503 `Retry-After` is `KAGENTI_SYNC_SATURATION_RETRY_AFTER_S`
+(default 5), or, for a pending affinity, the wait clamped to 1 to 10 seconds. The credential exchange also
 passes through `credential_required`, `credential_ambiguous`, `credential_not_found`,
-`endpoint_unresolved` and `session_not_found` from the exchange.
+`endpoint_unresolved`, `session_not_found`, `token_invalid` and `token_expired`, so authenticated callers
+can receive them too; any other non-200 answer from it becomes 503 `credential_unavailable`.
 
 **Overload.** Before hand-off, the supervisor refuses a connection with a raw `HTTP/1.1 429`,
 `Retry-After: 1` and `{"error":"overloaded"}`. This is a transport-level answer to any route and is not
@@ -123,8 +131,9 @@ frame carries an `id:`; a frame whose log write failed has none.
 
 - **`GET /v1/turn?sessionId=ID`** follows the live turn and replays from the log. Send
   `Last-Event-ID: <turnId>:<entryId>` to resume after that entry; if the cursor is older than the
-  retained log the `turn` frame has `truncated: true`, and if it is at or past the end the stream is a
-  single `turn` frame with `ended: true`. Errors: 400 `sessionId_required`, 401, 404 `turn_not_found`
+  retained log the `turn` frame has `truncated: true`. If the cursor is at or past the end of a **finished**
+  turn, the stream is a single `turn` frame with `ended: true`; on a running turn it keeps following live
+  from the tail. Errors: 400 `sessionId_required`, 401, 404 `turn_not_found`
   (including when detach is off), 503 `redis_unavailable`. If the owning process is gone the stream
   ends with an `error` frame, `abortReason: owner_lost`.
 - **`POST /v1/turn/cancel`** with `{sessionId, turnId?}` returns 202 `{turnId, outcome}`, where
@@ -163,19 +172,19 @@ The control-plane routes are listed in [`docs/api/openapi.yaml`](../api/openapi.
 | Internal       | `POST /internal/credentials`: data plane only, authenticated with `SH_EXCHANGE_TOKEN`                                                  |
 
 Another user's session returns 404, not 403. Control-plane error codes and statuses: 400
-(`invalid_json`, `invalid_request`, `invalid_grant`, `digest_mismatch`, `configRef_invalid`,
-`credential_required`, `credential_ambiguous`, `endpoint_unresolved`), 401 (`token_required`,
-`token_invalid`, `token_expired`), 403 `forbidden`, 404 (`session_not_found`, `config_bundle_not_found`,
+(`invalid_json`, `invalid_request`, `invalid_grant`, `subject_conflict`, `session_mismatch`,
+`digest_mismatch`, `configRef_invalid`, `credential_required`, `credential_ambiguous`, `endpoint_unresolved`), 401 (`token_required`,
+`token_invalid`, `token_expired`, `unauthorized`), 403 `forbidden`, 404 (`session_not_found`, `config_bundle_not_found`,
 `credential_not_found`), 410 `device_code_expired`, 428 `authorization_pending`, 429
 `bundle_quota_exceeded`, 500 `internal_error`, 502 `identity_provider_misconfigured`, 503
-(`credential_unavailable`, `redis_unavailable`).
+(`credential_unavailable`, `redis_unavailable`). The list may not be complete; the mapping is in
+`packages/control-plane/src/errors.ts`.
 
 Note that the same `config_bundle_not_found` is 404 on the control plane and 410 on the harness.
 
 ## Known gaps
 
-- The 429 overload answer and the detach/attach error codes are not all in
-  `docs/api/harness-openapi.yaml`.
+- The supervisor's 429 `overloaded` answer is not in `docs/api/harness-openapi.yaml`.
 - `harness-openapi.yaml` describes `/runs/status` as for an async run; sync runs are stored and
   pollable too.
 - `prompt` is only checked for presence; how a non-string behaves is not specified.
