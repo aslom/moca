@@ -1,4 +1,4 @@
-.PHONY: lint fmt test test-deploy typecheck demo-remote-sandbox demo-remote-sandbox-teardown \
+.PHONY: lint fmt check-links test test-deploy typecheck demo-remote-sandbox demo-remote-sandbox-teardown \
 	demo-promoted-workflow demo-promoted-workflow-teardown demo-multiuser demo-multiuser-teardown \
 	mocactl-quickstart mocactl-quickstart-teardown
 
@@ -7,6 +7,10 @@ lint:
 
 fmt:
 	pnpm exec prettier --write .
+
+# Relative links and in-repo anchors across tracked Markdown. Offline; run in CI by the `docs` job.
+check-links:
+	python3 scripts/check-doc-links.py
 
 test:
 	pnpm -r test
