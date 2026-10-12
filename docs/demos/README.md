@@ -33,7 +33,7 @@ These three overlap and are easy to confuse:
 
 ## Conventions
 
-If you add a demo, follow the shape of the two above:
+If you add a demo, follow the shape of the existing demos:
 
 - **Open with the claim**, then a table of "what the normal thing needs / what this needs". A reader
   should know in fifteen seconds whether this demo is the one they want.

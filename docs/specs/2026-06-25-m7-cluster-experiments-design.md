@@ -7,7 +7,7 @@ Scope: Harden M4's deployed-harness smoke claims into three rigorous, measured e
 E3-mobility (session reconstruction on a fresh instance), E4 (crash recovery) — driven by bash
 extending `deploy/knative/smoke.sh`.
 
-Parent plan: [Serverless Harness (Pi Track) Implementation Plan](../../../docs/research/2026-06-10-serverless-harness-pi-track-plan.md) — experiments **E1 (Task 17)**, **E3 (Task 19)**, **E4 (Task 20)**.
+Parent plan: Serverless Harness (Pi Track) Implementation Plan — experiments **E1 (Task 17)**, **E3 (Task 19)**, **E4 (Task 20)**.
 Predecessors: [M4 — Knative Serverless Wrapper](2026-06-17-m4-knative-serverless-wrapper-design.md) (the deploy this builds on) and [M6 — Experiments E2 + E5](2026-06-24-m6-experiments-design.md) (§8.1 defined this sequel).
 
 > **Milestone numbering.** Repo milestone **M7**. M6 (E2/E5) measured _local_ behavior in-process;

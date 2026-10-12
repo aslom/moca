@@ -1,5 +1,10 @@
 # Leaf-Session Backend — Executive Overview
 
+> **Historical (2026-10-12).** This document describes the Knative + KEDA deployment, deprecated
+> by [ADR-0041](adrs/0041-deprecate-knative-keda-deployment.md) (2026-10-11; removal no earlier than
+> end of October 2026). It is kept as a dated record and is not updated. For the current runtime see
+> [Migrating off the Knative/KEDA deployment](migrating-from-knative.md).
+
 **Status:** MVP complete (Phase 1 + Leaf-Session shipped). Zero-trust deferred to Phase 2.
 **Repo:** `rossoctl/moca` (private)
 **Date:** 2026-06-28

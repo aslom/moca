@@ -1,5 +1,10 @@
 # MOCA — Experiment Results (E1–E5)
 
+> **Historical (2026-10-12).** This document describes the Knative + KEDA deployment, deprecated
+> by [ADR-0041](adrs/0041-deprecate-knative-keda-deployment.md) (2026-10-11; removal no earlier than
+> end of October 2026). It is kept as a dated record and is not updated. For the current runtime see
+> [Migrating off the Knative/KEDA deployment](migrating-from-knative.md).
+
 _Consolidated findings, June 2026. Source data:
 [`moca-experiments/experiments/RESULTS.md`](https://github.com/rossoctl/moca-experiments/blob/main/experiments/RESULTS.md)
 (E2, E5),
