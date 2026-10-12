@@ -40,6 +40,7 @@ Each linked README is the authority on its own prerequisites, verification and t
 
 ## After the install
 
+- Run your first turns on the Compose trial: [First run](first-run.md).
 - Walk through a full multi-user session on one VM:
   [`demos/vm-multi-user-demo.md`](../demos/vm-multi-user-demo.md).
 - Look up a term: [glossary](../glossary.md).

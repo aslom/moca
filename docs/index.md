@@ -22,31 +22,34 @@ Preview paths is an open decision; see [`REORG-PLAN.md`](REORG-PLAN.md), open qu
 
 ## Start here
 
-| I want to...                       | Go to                                                                                                                                 |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| Pick an install path and run MOCA  | [Get started](get-started/index.md)                                                                                                   |
-| Leave the Knative/KEDA deployment  | [Migrating off the Knative/KEDA deployment](migrating-from-knative.md)                                                                |
-| See the terms MOCA uses            | [Glossary](glossary.md)                                                                                                               |
-| Look up an environment variable    | [Configuration reference](reference/configuration.md)                                                                                 |
-| Call the HTTP API                  | [`api/openapi.yaml`](api/openapi.yaml), [`api/harness-openapi.yaml`](api/harness-openapi.yaml), [Context service](context-service.md) |
-| Watch a guided walkthrough         | [Demos](demos/README.md)                                                                                                              |
-| Understand why a decision was made | [ADRs](adrs/README.md) and the [spec registry](specs/README.md)                                                                       |
-| Work on MOCA itself                | [`CONTRIBUTING.md`](../CONTRIBUTING.md), [`CONTRIBUTING-DOCS.md`](CONTRIBUTING-DOCS.md)                                               |
+| I want to...                        | Go to                                                                                                                                                                                     |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Pick an install path and run MOCA   | [Get started](get-started/index.md)                                                                                                                                                       |
+| Run MOCA for the first time         | [First run](get-started/first-run.md)                                                                                                                                                     |
+| Leave the Knative/KEDA deployment   | [Migrating off the Knative/KEDA deployment](migrating-from-knative.md)                                                                                                                    |
+| See the terms MOCA uses             | [Glossary](glossary.md)                                                                                                                                                                   |
+| Look up an environment variable     | [Configuration reference](reference/configuration.md)                                                                                                                                     |
+| Look up a `mocactl` command         | [`mocactl` reference](reference/cli-mocactl.md)                                                                                                                                           |
+| Call the HTTP API                   | [HTTP API guide](reference/http-api.md); contracts: [`api/openapi.yaml`](api/openapi.yaml), [`api/harness-openapi.yaml`](api/harness-openapi.yaml), [Context service](context-service.md) |
+| Dispatch a leaf, use the human gate | [Leaf envelope and result](reference/leaf-and-envelope.md)                                                                                                                                |
+| Watch a guided walkthrough          | [Demos](demos/README.md)                                                                                                                                                                  |
+| Understand why a decision was made  | [ADRs](adrs/README.md) and the [spec registry](specs/README.md)                                                                                                                           |
+| Work on MOCA itself                 | [`CONTRIBUTING.md`](../CONTRIBUTING.md), [`CONTRIBUTING-DOCS.md`](CONTRIBUTING-DOCS.md)                                                                                                   |
 
 ## What is in `docs/`
 
-| Location                                                      | What it is                                                             | Audience    |
-| ------------------------------------------------------------- | ---------------------------------------------------------------------- | ----------- |
-| `get-started/`                                                | Install-path chooser                                                   | New users   |
-| `migrating-from-knative.md`                                   | The single deprecation and migration page                              | Operators   |
-| `reference/configuration.md`                                  | Environment variables by component                                     | Operators   |
-| `glossary.md`, `context-service.md`, `api/`                   | Terms and API reference                                                | Integrators |
-| `demos/`                                                      | Guided, hand-driven walkthroughs                                       | Evaluators  |
-| `specs/` (registry: `specs/README.md`)                        | Design specs; the milestone registry is the source of truth for status | Maintainers |
-| `adrs/`                                                       | Immutable decision records                                             | Maintainers |
-| `notes/`                                                      | Working notes, runbooks and result write-ups                           | Maintainers |
-| `executive-overview-leaf-session.md`, `experiment-results.md` | Dated historical write-ups (Knative-era)                               | Background  |
-| `REORG-PLAN.md`                                               | The plan this structure follows, with the audit and open questions     | Maintainers |
+| Location                                                      | What it is                                                             | Audience                  |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------- | ------------------------- |
+| `get-started/`                                                | Install-path chooser                                                   | New users                 |
+| `migrating-from-knative.md`                                   | The single deprecation and migration page                              | Operators                 |
+| `reference/`                                                  | Configuration, `mocactl` commands, HTTP API guide, leaf envelope       | Operators and integrators |
+| `glossary.md`, `context-service.md`, `api/`                   | Terms and API reference                                                | Integrators               |
+| `demos/`                                                      | Guided, hand-driven walkthroughs                                       | Evaluators                |
+| `specs/` (registry: `specs/README.md`)                        | Design specs; the milestone registry is the source of truth for status | Maintainers               |
+| `adrs/`                                                       | Immutable decision records                                             | Maintainers               |
+| `notes/`                                                      | Working notes, runbooks and result write-ups                           | Maintainers               |
+| `executive-overview-leaf-session.md`, `experiment-results.md` | Dated historical write-ups (Knative-era)                               | Background                |
+| `REORG-PLAN.md`                                               | The plan this structure follows, with the audit and open questions     | Maintainers               |
 
 Install and operations guides live next to the scripts they describe: `deploy/compose/`,
 `deploy/vm/`, `deploy/k8s/` and `deploy/microvm/`. Operations and concept pages are planned but
