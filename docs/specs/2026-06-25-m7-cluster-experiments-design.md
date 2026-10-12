@@ -1,7 +1,7 @@
 # M7 Design: End-to-End Cluster Experiments (E1 / E3-mobility / E4)
 
 Version: 1.0 — June 25, 2026
-Status: Design (for review)
+Status: Superseded by [ADR-0041](../adrs/0041-deprecate-knative-keda-deployment.md) — the cluster experiments target the deprecated Knative path (2026-10-11); the drivers moved to moca-experiments
 Scope: Harden M4's deployed-harness smoke claims into three rigorous, measured end-to-end
 **cluster** experiments on the Kind + Knative deploy — E1 (scale-to-zero economics),
 E3-mobility (session reconstruction on a fresh instance), E4 (crash recovery) — driven by bash
