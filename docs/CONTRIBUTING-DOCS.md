@@ -32,8 +32,8 @@ Legacy (matches the banners already on `deploy/knative/`):
 ```markdown
 > **Deprecated 2026-10-11 ([ADR-0041](<relative path>/adrs/0041-deprecate-knative-keda-deployment.md)).**
 > <What this page describes> is deprecated: security and breakage fixes only, and removal comes no
-> earlier than **end of October 2026**, once the remaining users have migrated. P6 is the primary
-> way to run MOCA sessions: see [Migrating off the Knative/KEDA
+> earlier than **end of October 2026**, once the remaining users have migrated. P6, the
+> process-manager runtime, is the primary way to run MOCA sessions: see [Migrating off the Knative/KEDA
 > deployment](<relative path>/migrating-from-knative.md).
 ```
 

@@ -1,4 +1,4 @@
-## What and why
+## Summary
 
 <!-- One or two sentences. Link the issue or ADR. -->
 

@@ -2,7 +2,7 @@
 """Check relative links and in-repo anchors in tracked Markdown files.
 
 Offline and deterministic: external (http/mailto) links are not fetched. Code fences and inline code
-are ignored. Anchors use GitHub's heading slug rules. Exit status 1 when any link is broken.
+are ignored. Inline and reference-style links are checked. Anchors use GitHub's heading slug rules. Exit status 1 when any link is broken.
 
 Usage: scripts/check-doc-links.py [path ...]   (default: every tracked *.md except pi-fork/)
 """
@@ -15,7 +15,8 @@ import sys
 ALLOW = {("SECURITY.md", "../../security/advisories/new")}
 
 LINK = re.compile(r"\[(?:[^\]\\]|\\.)*\]\(\s*<?([^)\s>]+)>?(?:\s+\"[^\"]*\")?\s*\)")
-FENCE = re.compile(r"^(```|~~~).*?^\1", re.S | re.M)
+FENCE = re.compile(r"^[ \t]*(```|~~~).*?^[ \t]*\1", re.S | re.M)
+REFDEF = re.compile(r"^[ ]{0,3}\[[^\]]+\]:\s*<?(\S+?)>?(?:\s+.*)?$", re.M)
 INLINE = re.compile(r"`[^`\n]*`")
 HEADING = re.compile(r"^#{1,6}\s+(.*?)\s*#*\s*$", re.M)
 
@@ -50,8 +51,7 @@ def main(argv):
     bad = []
     for f in files:
         text = INLINE.sub("", FENCE.sub("", open(f, encoding="utf-8").read()))
-        for m in LINK.finditer(text):
-            link = m.group(1)
+        for link in [m.group(1) for m in LINK.finditer(text)] + REFDEF.findall(text):
             if re.match(r"(https?:|mailto:|tel:)", link) or "<" in link or (f, link) in ALLOW:
                 continue
             target, _, frag = link.partition("#")
