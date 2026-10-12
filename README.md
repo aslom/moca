@@ -277,6 +277,7 @@ Start at the [documentation map](docs/index.md).
 | Pick an install path              | [Get started](docs/get-started/index.md)                                                                                                                       |
 | Leave the Knative/KEDA deployment | [Migration guide](docs/migrating-from-knative.md)                                                                                                              |
 | Promote a Claude Code workflow    | [Guide](docs/guides/promote-claude-workflow.md)                                                                                                                |
+| Look up an environment variable   | [Configuration reference](docs/reference/configuration.md)                                                                                                     |
 | Look up a term                    | [Glossary](docs/glossary.md)                                                                                                                                   |
 | Call the HTTP API                 | [`docs/api/openapi.yaml`](docs/api/openapi.yaml), [`docs/api/harness-openapi.yaml`](docs/api/harness-openapi.yaml), [Context service](docs/context-service.md) |
 | Follow a guided walkthrough       | [Demos](docs/demos/README.md)                                                                                                                                  |
