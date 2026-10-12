@@ -31,8 +31,8 @@ decisions behind them.
   commands share one flag name for the same digest.
 - Flow: create session → append a `record` line to the ledger (§2.5) → fork a detached
   worker (§2.6) that holds the sync `POST /v1/runs`. The sessionId is printed on stdout
-  before the fork completes so a shell pipeline can capture it even if the worker exits
-  immediately.
+  once the worker has started, so a shell pipeline can capture it even if the worker
+  exits immediately afterwards.
 - The envelope carries `configRef` on every leaf: `/v1/runs` resolves the bundle from the
   body, not from the session record (§1).
 - `--kind solve` requires `--repo` + `--ref` because the server's solve envelope requires
