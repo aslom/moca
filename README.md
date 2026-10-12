@@ -119,9 +119,9 @@ flowchart LR
   substrate allows; isolation is enforced by the sandbox tier, not by trust.
 - **Built on Pi** — wraps a pinned [`kagenti/pi`](https://github.com/kagenti/pi) coding agent through
   an injectable `SessionStorageBackend` seam; the agent itself is unmodified.
-- **Promote a local Claude Code workflow** — `cd harness && pnpm promote` bundles skills, `CLAUDE.md`,
-  memory, and a slash command from your local `~/.claude` into a content-addressed bundle a leaf can
-  dispatch by digest (see [the guide](docs/guides/promote-claude-workflow.md)).
+- **Promote a local Claude Code workflow** — `mocactl promote DIR` bundles your local skills and
+  commands into a content-addressed bundle that a session or a leaf runs with, uploaded through the
+  control plane (see [the guide](docs/guides/promote-claude-workflow.md)).
 
 ---
 
@@ -190,11 +190,11 @@ users have migrated. See [Migrating off the Knative/KEDA deployment](docs/migrat
 
 ### Promoting a local Claude Code workflow
 
-Iterate on a workflow locally in Claude Code (skills, `CLAUDE.md`, memory, a slash command), then
-promote it into a content-addressed bundle that a leaf dispatches by digest with one field,
-`configRef`. Use `mocactl promote DIR` against the control plane, or the `/promote` slash command and
-`pnpm promote` CLI against Redis directly. Memory travels read-only; MCP servers and subagents are not
-promoted. Full guide: [`docs/guides/promote-claude-workflow.md`](docs/guides/promote-claude-workflow.md).
+Iterate on skills and commands locally in Claude Code, then promote them with `mocactl promote DIR`
+(or `/promote DIR` inside the `mocactl` TUI). The bundle is built and credential-scanned on your
+machine, uploaded through the control plane with no cluster credentials, and fixed to the session
+you start with `mocactl run --config DIGEST`. Full guide:
+[`docs/guides/promote-claude-workflow.md`](docs/guides/promote-claude-workflow.md).
 
 ---
 

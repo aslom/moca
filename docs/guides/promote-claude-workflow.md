@@ -1,89 +1,83 @@
 # Promoting a local Claude Code workflow
 
 > **Preview.** Workflow promotion is implemented but not yet declared Stable; interfaces and limits
-> may change. Design: [workflow promotion](../specs/2026-09-02-claude-code-workflow-promotion-design.md),
+> may change. Design: [ADR-0038](../adrs/0038-mocactl-config-bundle-promotion.md) and the
+> [promotion spec](../specs/2026-10-06-mocactl-config-bundle-promotion-design.md); the bundle format is
 > [ADR-0030](../adrs/0030-claude-code-workflow-promotion.md).
 
-Two ways to promote exist. `mocactl promote DIR` uploads through the multi-user control plane
-([`packages/mocactl/README.md`](../../packages/mocactl/README.md),
-[ADR-0038](../adrs/0038-mocactl-config-bundle-promotion.md)). This guide documents the older
-harness-side path: the `/promote` slash command for Claude Code and the `pnpm promote` CLI, which
-upload straight to a Redis. The bundle format, credential scan and dispatch field are the same.
+Promotion packages the skills and commands you iterated on locally in Claude Code into a
+content-addressed **config bundle**, uploads it through the multi-user control plane, and starts a
+session that runs with those skills. You need no cluster credentials: `mocactl` talks only to the
+control plane's `/v1` API.
 
-Iterate on a workflow locally in Claude Code — skills, `CLAUDE.md`, memory, a slash command — then
-promote it from inside Claude Code, in the project you want to promote:
+## Before you start
 
-```bash
-mkdir -p ~/.claude/commands                                    # once
-cp deploy/claude/commands/promote.md ~/.claude/commands/       # once
-export SH_HARNESS_DIR=/path/to/moca              # once, per shell
+- `mocactl` installed and logged in to a control plane (`mocactl login`; install steps in
+  [Get started](../get-started/index.md)).
+- A directory with a `.claude/skills` and/or `.claude/commands` tree. `mocactl promote DIR` uploads
+  those two trees; this guide covers only what [`mocactl`'s README](../../packages/mocactl/README.md)
+  documents.
+- Upgrade the harness before the control plane. An older harness ignores the bundle reference, so
+  turns would run without the skills and report no error.
 
-# launch with the CLI granted at session level, so the grant outlives the command's own turn
-claude --allowedTools "Bash(pnpm --dir $SH_HARNESS_DIR/harness promote:*)"
-
-/promote my-workflow                                           # in any project, from Claude Code
-```
-
-The command's `allowed-tools` frontmatter grants the CLI for the turn the slash command creates. That
-is enough when the promotion completes in that turn; if the turn ends first — an interruption, or a
-guard that stops to ask — the grant is gone and the next turn's `pnpm` call is refused, since a
-default install has no `pnpm` rule. The launch flag above avoids that, stays narrow (only the
-`promote` script, only in that checkout), and needs no change to your settings. The equivalent
-permanent form is the same rule in `permissions.allow`, with the path written out — a `*` inside the
-pattern matches nothing.
-
-`/promote` passes `--home` and `--project` for you, checks that the repo boundary and the Redis
-tunnel are right before uploading, and reads the digest back through the cluster's own client
-afterwards. It writes every path out in full, with no `$VAR` and no `HOME=… pnpm …` prefix, because
-Claude Code will only match a command against `allowed-tools` if it can analyse it statically —
-otherwise the command needs a permission prompt at best, and under `defaultMode: dontAsk` or `auto`
-it is refused outright.
-
-Installed in your **real** `~/.claude/commands/` as above, it is visible in every project and never
-travels. You can instead keep it **in the project**, which lets you run Claude Code with
-`HOME=<project>` so the local agent sees exactly what the promoted run will; `/promote` then detects
-that it lives there and self-excludes with `--exclude-prompt promote` (see below), because otherwise
-it would ship itself into every bundle.
-
-Or drive the CLI directly:
+## Headless
 
 ```bash
-cd harness && pnpm promote --entry my-workflow --project /path/to/your/project
+mocactl promote DIR --dry-run     # build and print what would be uploaded; needs no login
+mocactl promote DIR               # print the preflight report, upload, print the bundle digest
+mocactl run "prompt" --config DIGEST   # start a new session on that bundle
 ```
 
-`promote` reads the workflow — skills, `CLAUDE.md` chain, and memory — from `--project`, so
-running it from the harness checkout without `--project` promotes the harness's own
-configuration, not yours.
+`promote` prints what it built and the preflight report (warnings go to stderr) **before**
+uploading, then the digest to pass to `run --config`. The same credential scan as ADR-0030 runs on
+your machine before anything leaves it. `--json` gives machine-readable output.
 
-`--home <dir>` reads _user_ scope (skills, memory, prompts) from `<dir>/.claude` instead of your real
-`$HOME`, and `--redis-url <url>` names the Redis to upload to. Both override the corresponding env
-var (`HOME`, `REDIS_URL`) and produce a byte-identical bundle to it; they exist as flags so the whole
-invocation can be one statically analyzable command, which is what `/promote` needs to run without a
-permission prompt. The CLI prints the user scope it resolved, so you can see which one applied.
+Exit codes for `promote`:
 
-`promote` dedupes and classifies your local configuration, drops what cannot work in the harness
-(with a reason for each), and scans for credentials before uploading. The scan has two tiers: a
-structural match on a known key shape (an AWS access key, a PEM private-key block, a GitHub or
-Slack token, an OpenAI-style key) **refuses the upload** and exits non-zero; a weaker prose
-heuristic (`token: <value>`-shaped lines) only **warns and proceeds**, leaving the judgement to
-you — that heuristic matches code and documentation placeholders too often to block on safely. It
-writes a committable `.claude/promoted.lock.json` and uploads a content-addressed bundle; an
-unchanged re-promotion uploads nothing.
+| Code | Meaning                                                                |
+| ---- | ---------------------------------------------------------------------- |
+| `0`  | Uploaded (or built, with `--dry-run`)                                  |
+| `2`  | Refused before upload: usage error, not logged in, or preflight errors |
+| `3`  | A structural credential match in the bundle; nothing was uploaded      |
+| `1`  | Anything else                                                          |
 
-Keep a prompt out of the bundle with `--exclude-prompt <name>`, repeatable. This exists for the
-case where the command that _drives_ promotion lives in the project being promoted: with user scope
-pointed at that project, its `.claude/commands/` is the prompts directory, so without the flag such
-a command ships itself into every bundle. Excluding the entry prompt is refused outright, and an
-exclusion that matches nothing warns — an unmatched exclusion would otherwise ship the prompt you
-meant to omit.
+## In the TUI
 
-Dispatch it by adding one field to any prompt leaf:
+Inside `mocactl`, `/promote DIR` builds and uploads the bundle and **attaches it to the next session
+you create**; a toast counts skills, commands and warnings. With exactly one inference credential
+and no presets, the new-session overlay creates the session as soon as it opens, so `/promote DIR`
+starts the session right away.
+
+## What to know
+
+- **A session's bundle is fixed when it is created.** `--config` cannot be combined with
+  `--session`, and the client never sends the bundle reference to the harness, so it cannot change
+  mid-session. To use a different bundle, start a new session.
+- **A missing or expired bundle fails the turn** (`410 config_bundle_not_found`); the turn never
+  runs without its skills.
+- **Budget.** Stored bundles count against a per-account and a deployment-wide byte budget; the
+  upload fails with `429` when full. `mocactl bundles delete DIGEST` deletes a bundle you promoted
+  and frees its share (an admin may delete anyone's). Sessions created on a deleted bundle fail
+  their next turn as for an expired one.
+- **A digest is a bearer capability.** Bundles are not owned records; preflight keeps them
+  secret-free (ADR-0038, Consequences).
+
+## Dispatching a promoted run from an orchestrator
+
+A batch leaf can use the same bundle by adding one field to a prompt leaf:
 
 ```json
 { "sessionId": "run-1/item-1", "kind": "prompt", "prompt": "…", "configRef": "sha256:…" }
 ```
 
-Memory travels **read-only** — a promoted run consumes what you taught it locally and reports
-discoveries back in the leaf result, which keeps leaf replay reproducible
-([ADR-0031](../adrs/0031-promoted-memory-read-only.md)). MCP servers and subagents are not
-promoted; see the [design](../specs/2026-09-02-claude-code-workflow-promotion-design.md) §2, §9.
+Memory in a promoted run is read-only
+([ADR-0031](../adrs/0031-promoted-memory-read-only.md)). MCP servers and subagents are not promoted;
+see the [original design](../specs/2026-09-02-claude-code-workflow-promotion-design.md) §2, §9.
+
+## The older harness-side path
+
+Before ADR-0038 the only uploader was a Claude Code slash command
+([`deploy/claude/commands/promote.md`](../../deploy/claude/commands/promote.md)) that runs
+`pnpm --dir <harness> promote` and writes straight to Redis over a tunnel you hold open. It needs
+cluster access, so it does not fit a multi-user control plane, and this guide does not cover it. The
+command and CLI remain in the repository; see ADR-0030 for how they work.
