@@ -250,19 +250,19 @@ reviewable isolation claim rather than continuing any one of them.
 
 These specs predate their registration. The status shown is copied from each spec's own header on 2026-10-12; the registry does not track it separately, and several `Proposed` entries describe work that has since shipped, so verify before relying on it.
 
-| Title                                                         | Spec                                                                                                           | Status (per spec header)      |
-| ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ----------------------------- |
-| Multi-protocol model provider (Anthropic + OpenAI-compatible) | [`2026-08-20-multi-protocol-model-provider-design.md`](2026-08-20-multi-protocol-model-provider-design.md)     | Accepted                      |
-| Async prompt dispatch (`kind:"prompt"`)                       | [`2026-08-25-async-prompt-dispatch-design.md`](2026-08-25-async-prompt-dispatch-design.md)                     | Proposed                      |
-| ST4 — Go reference worker                                     | [`2026-08-26-st4-go-reference-worker-design.md`](2026-08-26-st4-go-reference-worker-design.md)                 | see spec header               |
-| Streaming `/turn` responses (SSE)                             | [`2026-08-26-turn-sse-streaming-design.md`](2026-08-26-turn-sse-streaming-design.md)                           | Proposed                      |
-| ST6 — Seam-wide output cap + explicit truncation contract     | [`2026-08-30-seam-output-cap-truncation-design.md`](2026-08-30-seam-output-cap-truncation-design.md)           | Proposed                      |
-| Claude Code workflow promotion                                | [`2026-09-02-claude-code-workflow-promotion-design.md`](2026-09-02-claude-code-workflow-promotion-design.md)   | Implemented                   |
-| E11 density: repairing the instrument (#291)                  | [`2026-09-17-e11-driver-artifact-design.md`](2026-09-17-e11-driver-artifact-design.md)                         | approved for implementation   |
-| E11 density: persistent-connection Go Exec client (#294)      | [`2026-09-18-e11-go-exec-client-design.md`](2026-09-18-e11-go-exec-client-design.md)                           | see spec header               |
-| `mocactl` — terminal client for the MU1 control plane         | [`2026-09-25-mocactl-control-plane-client-design.md`](2026-09-25-mocactl-control-plane-client-design.md)       | Proposed                      |
-| `mocactl promote` — config-bundle promotion (ADR-0038)        | [`2026-10-06-mocactl-config-bundle-promotion-design.md`](2026-10-06-mocactl-config-bundle-promotion-design.md) | Proposed (amended 2026-10-06) |
-| Re-attach to a running turn (ADR-0040)                        | [`2026-10-09-turn-reattach-design.md`](2026-10-09-turn-reattach-design.md)                                     | Proposed                      |
+| Title                                                         | Spec                                                                                                           | Status (per spec header; "not stated" = no Status line) |
+| ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| Multi-protocol model provider (Anthropic + OpenAI-compatible) | [`2026-08-20-multi-protocol-model-provider-design.md`](2026-08-20-multi-protocol-model-provider-design.md)     | Accepted                                                |
+| Async prompt dispatch (`kind:"prompt"`)                       | [`2026-08-25-async-prompt-dispatch-design.md`](2026-08-25-async-prompt-dispatch-design.md)                     | Proposed                                                |
+| ST4 — Go reference worker                                     | [`2026-08-26-st4-go-reference-worker-design.md`](2026-08-26-st4-go-reference-worker-design.md)                 | not stated                                              |
+| Streaming `/turn` responses (SSE)                             | [`2026-08-26-turn-sse-streaming-design.md`](2026-08-26-turn-sse-streaming-design.md)                           | Proposed                                                |
+| ST6 — Seam-wide output cap + explicit truncation contract     | [`2026-08-30-seam-output-cap-truncation-design.md`](2026-08-30-seam-output-cap-truncation-design.md)           | Proposed                                                |
+| Claude Code workflow promotion                                | [`2026-09-02-claude-code-workflow-promotion-design.md`](2026-09-02-claude-code-workflow-promotion-design.md)   | Implemented                                             |
+| E11 density: repairing the instrument (#291)                  | [`2026-09-17-e11-driver-artifact-design.md`](2026-09-17-e11-driver-artifact-design.md)                         | approved for implementation                             |
+| E11 density: persistent-connection Go Exec client (#294)      | [`2026-09-18-e11-go-exec-client-design.md`](2026-09-18-e11-go-exec-client-design.md)                           | not stated                                              |
+| `mocactl` — terminal client for the MU1 control plane         | [`2026-09-25-mocactl-control-plane-client-design.md`](2026-09-25-mocactl-control-plane-client-design.md)       | Proposed                                                |
+| `mocactl promote` — config-bundle promotion (ADR-0038)        | [`2026-10-06-mocactl-config-bundle-promotion-design.md`](2026-10-06-mocactl-config-bundle-promotion-design.md) | Proposed (amended 2026-10-06)                           |
+| Re-attach to a running turn (ADR-0040)                        | [`2026-10-09-turn-reattach-design.md`](2026-10-09-turn-reattach-design.md)                                     | Proposed                                                |
 
 ## Lineage & supersessions (explicit)
 
