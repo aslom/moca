@@ -20,7 +20,10 @@ export type RouteAuth =
    * required under SH_REQUIRE_AUTH, and it must name the request's session (MU1 §4.3).
    */
   | 'session'
-  /** Bearer token with no session binding — the caller's subject only (the workload lifecycle). */
+  /**
+   * Control-plane API token (scope api) with no session binding — the caller's subject only (the
+   * workload lifecycle).
+   */
   | 'subject';
 
 export interface RouteSpec {
@@ -125,15 +128,32 @@ export const ROUTES: RouteSpec[] = [
     summary: 'Deprecated pre-rename wire path for GET /runs/status',
   },
   // Workload lifecycle: served, but an operator/stack surface rather than a client contract —
-  // deliberately outside docs/api/harness-openapi.yaml. Currently 501-refused: Context Service
-  // no longer allocates sandbox pools for Moca (#455).
+  // deliberately outside docs/api/harness-openapi.yaml. Off unless MOCA_CONTEXT_WORKLOADS_ENABLED=1
+  // and CONTEXT_SERVICE_URL are set (501 workloads_unavailable otherwise); see
+  // docs/context-service.md.
   {
     method: 'POST',
     path: '/workloads',
     operationId: 'createWorkload',
     auth: 'subject',
     surface: 'internal',
-    summary: 'Create a workload (currently 501 workloads_unavailable)',
+    summary: 'Create a workload and its Context; returns a one-time upload grant',
+  },
+  {
+    method: 'POST',
+    path: '/workloads/{id}/uploads',
+    operationId: 'createWorkloadUpload',
+    auth: 'subject',
+    surface: 'internal',
+    summary: 'Issue a fresh upload grant while the workload awaits upload',
+  },
+  {
+    method: 'POST',
+    path: '/workloads/{id}/activate',
+    operationId: 'activateWorkload',
+    auth: 'subject',
+    surface: 'internal',
+    summary: 'Freeze the uploaded revision; the workload becomes ready',
   },
   {
     method: 'GET',
@@ -141,7 +161,7 @@ export const ROUTES: RouteSpec[] = [
     operationId: 'getWorkload',
     auth: 'subject',
     surface: 'internal',
-    summary: 'Read a workload (currently 501 workloads_unavailable)',
+    summary: 'Read a workload',
   },
   {
     method: 'DELETE',
@@ -149,6 +169,6 @@ export const ROUTES: RouteSpec[] = [
     operationId: 'deleteWorkload',
     auth: 'subject',
     surface: 'internal',
-    summary: 'Delete a workload (currently 501 workloads_unavailable)',
+    summary: 'Delete a workload and its Context',
   },
 ];
