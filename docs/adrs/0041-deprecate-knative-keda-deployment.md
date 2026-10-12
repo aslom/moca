@@ -84,3 +84,41 @@ with wording that keeps the underlying concerns alive while the deprecated path 
   K8s-specific halves of `k8s-sandbox`, never the package.
 - Follow-up owed: #248's namespace-collocation risk persists for anyone still running the control
   plane on the deprecated path during the window; the migration guide says so.
+
+## Revisions
+
+### 2026-10-11 — RA1 §10.3 diff audit recorded (rollout PR2)
+
+The follow-up owed above — the diff of `knative-server/src/worker.ts` against the supervisor's
+`pool.ts`, to be reviewed "before `knative-server` is individually labeled" — is discharged.
+`worker.ts` (356 lines) was compared hunk-by-hunk against `pool.ts` (468 lines; 423 insertions /
+311 deletions between them). Findings:
+
+- **Duplicated protocol — the only literal duplication:** the two IPC unions, `SupervisorToWorker`
+  (2 rows) and `WorkerToSupervisor` (4 rows: `ready`/`load`/`draining`/`stats`). The duplication is
+  deliberate — `pool.ts`'s header cites its spec §9: the supervisor forks the worker as a process,
+  and a shared type module would advertise an in-process coupling that does not exist — and drift
+  is caught by `supervisor/test/real-worker.integration.test.ts`, which forks the real worker and
+  drives all four rows across the boundary.
+- **Worker-side behavior with no `pool.ts` counterpart:** every `worker.ts` export was checked —
+  the two protocol unions above, plus `isTurnRequest`, `TurnCounter`, `WorkerRuntime`/
+  `createWorkerRuntime`, `statsIntervalMs`, `DETACHED_DRAIN_MS`/`armDetachedDrain`,
+  `startStatsReporter`, `parseRole`, and the main-module boot block. None is Knative-specific, and
+  none is missing from the supervisor by accident: each is the child half of a deliberate
+  parent/child split whose other half lives in `pool.ts` (`handOff`'s optimistic increment,
+  `reconcile`, the `stats` receiving handler, `drainAll`) or elsewhere in the supervisor (`readInt`
+  in `config.ts`, which `statsIntervalMs` mirrors; `SHUTDOWN_GRACE_MS` in `main.ts`, which
+  `DETACHED_DRAIN_MS` must stay under). The supervisor estimates turn counts and reconciles from
+  `load` by design; it has no need of the worker's counting machinery.
+- **`pool.ts` additions:** `WorkerTelemetry`, `TelemetryAggregates`, `WorkerHandle`, `PoolOptions`,
+  `PoolCounters`, `Slot` and `WorkerPool` (routing, restart backoff, refusal accounting,
+  `awaitIdle`) — supervisor-side concerns with no worker counterpart required.
+
+Neither file imports or detects anything Knative-specific (no `K_SERVICE`/`K_CONFIGURATION`/
+`K_REVISION`, no KEDA, no kubectl). The ~775-line diff RA1 §10.3 flagged is the two complementary
+halves of one deliberately-duplicated protocol, not a fork with silent drift.
+
+**Labeling decision:** no missing behavior was found, so `knative-server` keeps entry-point
+deprecation labels only — `leaf-job.ts` carries the `@deprecated` header; `worker.ts` and
+`pool.ts` carry none — and the package itself stays unlabeled, consistent with this ADR's rule
+that the shared code is P6-load-bearing, whatever its package name says.
