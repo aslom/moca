@@ -55,7 +55,7 @@ equivalent ([migration guide](migrating-from-knative.md#if-you-depend-on-async-f
 
 A dispatch pattern an orchestrator can use against the same backend. **A** is async fan-out
 (`async: true`, a Redis Streams queue, many leaves at once), **B** is the human gate (a leaf pauses
-as `awaiting_approval` and resumes on an external verdict), **C** is scheduled dispatch (a cron
+with status `paused` and resumes on an external verdict), **C** is scheduled dispatch (a cron
 trigger posts async leaves). B is served by the P6 runtime; A and C run only on the deprecated
 Knative/KEDA path today. See the [README](../README.md#dispatch-archetypes).
 
@@ -117,8 +117,7 @@ see [Promoting a local Claude Code workflow](guides/promote-claude-workflow.md).
 
 ## human gate
 
-A pause point in a leaf: it stops (wire status `paused` on a sync `/runs`, with an `awaiting_approval`
-marker) and resumes or terminates on an external approve, reject or abort verdict
+A pause point in a leaf: it stops (status `paused` on `/runs`) and resumes or terminates on an external approve, reject or abort verdict
 ([human-gate design](specs/2026-06-28-human-gate-design.md)). Archetype B. The early archetypes
 requirements doc describes B as an iterative role-based loop; this glossary follows the README and
 the human-gate design. There is no human-gate path on `/turn`.

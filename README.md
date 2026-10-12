@@ -111,7 +111,7 @@ flowchart LR
   conversation and state by `sessionId`, surviving process or pod death.
 - **Brain/hands isolation** — the agent never executes tools in its own process; everything runs
   in a remote sandbox over the gRPC relay — container tier, or a microVM per `Exec`.
-- **Human-in-the-loop gates** — a leaf can pause mid-run, report `awaiting_approval`, and resume on an
+- **Human-in-the-loop gates** — a leaf can pause mid-run, report `paused`, and resume on an
   external approve/reject/abort verdict.
 - **Volume-envelope contract** — orchestrators pass inputs and collect results as files, decoupling
   result size from HTTP limits.
@@ -204,7 +204,7 @@ The same backend serves three orchestration patterns, all validated end-to-end o
 | Archetype             | Pattern                                                                                | Example use case                                     |
 | --------------------- | -------------------------------------------------------------------------------------- | ---------------------------------------------------- |
 | **A — Async fan-out** | `{async:true}` → Redis Streams → drained by KEDA ScaledJobs — **deprecated path only** | "Research 10 topics concurrently"                    |
-| **B — Human gate**    | Leaf pauses → `awaiting_approval` → external verdict → resume/terminate                | "Draft a clause, pause for legal sign-off, finalize" |
+| **B — Human gate**    | Leaf pauses (`paused`) → external verdict → resume/terminate                           | "Draft a clause, pause for legal sign-off, finalize" |
 | **C — Scheduled**     | CronJob → `cron-dispatch` posts async leaves — **deprecated path only**                | "Summarize yesterday's tickets at 02:00 daily"       |
 
 B is served by the P6 runtime today. A and C have **no P6 equivalent yet** — the async drainer
@@ -272,17 +272,18 @@ questions and planned documentation work are in [`docs/REORG-PLAN.md`](docs/REOR
 
 Start at the [documentation map](docs/index.md).
 
-| I want to...                      | Go to                                                                                                                                                          |
-| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Pick an install path              | [Get started](docs/get-started/index.md)                                                                                                                       |
-| Leave the Knative/KEDA deployment | [Migration guide](docs/migrating-from-knative.md)                                                                                                              |
-| Promote a Claude Code workflow    | [Guide](docs/guides/promote-claude-workflow.md)                                                                                                                |
-| Look up an environment variable   | [Configuration reference](docs/reference/configuration.md)                                                                                                     |
-| Look up a term                    | [Glossary](docs/glossary.md)                                                                                                                                   |
-| Call the HTTP API                 | [`docs/api/openapi.yaml`](docs/api/openapi.yaml), [`docs/api/harness-openapi.yaml`](docs/api/harness-openapi.yaml), [Context service](docs/context-service.md) |
-| Follow a guided walkthrough       | [Demos](docs/demos/README.md)                                                                                                                                  |
-| See why a decision was made       | [ADRs](docs/adrs/README.md), [milestone registry](docs/specs/README.md)                                                                                        |
-| Build or contribute               | [`CONTRIBUTING.md`](CONTRIBUTING.md), [`harness/README.md`](harness/README.md), [docs conventions](docs/CONTRIBUTING-DOCS.md)                                  |
+| I want to...                      | Go to                                                                                                                                                                                                                                                              |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Pick an install path              | [Get started](docs/get-started/index.md)                                                                                                                                                                                                                           |
+| Leave the Knative/KEDA deployment | [Migration guide](docs/migrating-from-knative.md)                                                                                                                                                                                                                  |
+| Promote a Claude Code workflow    | [Guide](docs/guides/promote-claude-workflow.md)                                                                                                                                                                                                                    |
+| Look up an environment variable   | [Configuration reference](docs/reference/configuration.md)                                                                                                                                                                                                         |
+| Look up a `mocactl` command       | [`mocactl` reference](docs/reference/cli-mocactl.md)                                                                                                                                                                                                               |
+| Look up a term                    | [Glossary](docs/glossary.md)                                                                                                                                                                                                                                       |
+| Call the HTTP API                 | [HTTP API guide](docs/reference/http-api.md), [leaf envelope](docs/reference/leaf-and-envelope.md), [`docs/api/openapi.yaml`](docs/api/openapi.yaml), [`docs/api/harness-openapi.yaml`](docs/api/harness-openapi.yaml), [Context service](docs/context-service.md) |
+| Follow a guided walkthrough       | [Demos](docs/demos/README.md)                                                                                                                                                                                                                                      |
+| See why a decision was made       | [ADRs](docs/adrs/README.md), [milestone registry](docs/specs/README.md)                                                                                                                                                                                            |
+| Build or contribute               | [`CONTRIBUTING.md`](CONTRIBUTING.md), [`harness/README.md`](harness/README.md), [docs conventions](docs/CONTRIBUTING-DOCS.md)                                                                                                                                      |
 
 ---
 
