@@ -1,4 +1,8 @@
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { MAX_EXEC_MESSAGE_BYTES } from '@moca/k8s-sandbox';
 import {
@@ -8,6 +12,7 @@ import {
   CONTEXT_CHUNK_BYTES,
   contextCacheDir,
   contextCacheKey,
+  contextMaxEntries,
   contextRetainMinutes,
   contextRoot,
   overlayContext,
@@ -23,7 +28,7 @@ describe('P6 context overlay', () => {
     const alice = contextCacheKey('1'.repeat(32), digest);
     const bob = contextCacheKey('2'.repeat(32), digest);
     expect(contextCacheDir(alice)).not.toBe(contextCacheDir(bob));
-    expect(() => contextCacheKey('not-a-scope', digest)).toThrow('owner scope');
+    expect(() => contextCacheKey('not-a-scope', digest)).toThrow('cache scope');
     expect(() => contextCacheDir(digest)).toThrow('cache key');
   });
 
@@ -96,6 +101,50 @@ describe('P6 context overlay', () => {
     expect(populate.indexOf('sha256sum -c')).toBeLessThan(populate.indexOf('tar -xzf'));
     expect(populate).toContain(createHash('sha256').update(bundle).digest('hex'));
     expect(exec.mock.calls.at(-1)![0]).toMatch(/^rm -f .*incoming\/0{32}-a{64}\.run-5\.context/);
+  });
+
+  it('caps the bundle entries before extracting: 10000 by default, like Context Service', () => {
+    const populate = buildContextPopulateScript(revision, 'run-6', digest);
+    expect(populate).toContain('[ "$ENTRIES" -le 10000 ]');
+    expect(populate.indexOf('sha256sum -c')).toBeLessThan(populate.indexOf('tar -tzf'));
+    expect(populate.indexOf('tar -tzf')).toBeLessThan(populate.indexOf('tar -xzf'));
+    expect(buildContextPopulateScript(revision, 'run-6', digest, 7)).toContain('-le 7 ]');
+    expect(contextMaxEntries({ MOCA_CONTEXT_BUNDLE_MAX_ENTRIES: '25' })).toBe(25);
+    expect(contextMaxEntries({ MOCA_CONTEXT_BUNDLE_MAX_ENTRIES: 'many' })).toBe(10_000);
+    expect(() => buildContextPopulateScript(revision, 'run-6', digest, 0)).toThrow('entry limit');
+  });
+
+  it('the entry cap refuses, in a real shell, an archive with more entries than the limit', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'moca-context-entries-'));
+    try {
+      mkdirSync(join(dir, 'src'));
+      for (const name of ['a', 'b', 'c']) writeFileSync(join(dir, 'src', name), name);
+      const archive = join(dir, 'bundle.context');
+      // COPYFILE_DISABLE keeps macOS tar from adding AppleDouble entries.
+      execFileSync('tar', ['-czf', archive, '-C', join(dir, 'src'), 'a', 'b', 'c'], {
+        env: { ...process.env, COPYFILE_DISABLE: '1' },
+      });
+      const check = (limit: number) => {
+        const line = buildContextPopulateScript(revision, 'run-7', digest, limit)
+          .split('\n')
+          .find((l) => l.includes('tar -tzf'))!;
+        return () =>
+          execFileSync(
+            'bash',
+            ['-c', `set -euo pipefail\nARCHIVE=$1\n${line}\necho ok`, '_', archive],
+            {
+              stdio: ['ignore', 'pipe', 'pipe'],
+            },
+          ).toString();
+      };
+      expect(check(3)()).toBe('ok\n');
+      expect(check(2)).toThrow(/context bundle has +3 entries, over 2/);
+      // A corrupt archive fails the listing, so it is never extracted either.
+      writeFileSync(archive, 'not gzip');
+      expect(check(3)).toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('concurrent misses each publish under the lock, and only the first copy is kept', () => {
