@@ -1,5 +1,9 @@
 # mocactl
 
+> **Preview.** `mocactl` is implemented but not yet declared Stable. The command reference is in
+> [`docs/reference/cli-mocactl.md`](../../docs/reference/cli-mocactl.md); the change policy in
+> [`docs/reference/change-policy.md`](../../docs/reference/change-policy.md).
+
 A terminal client for the harness: log in, manage sessions and inference credentials, and watch
 turns stream live. It talks only to the control plane's `/v1` API and the harness's `/v1/turn`,
 so it works the same whatever runs behind those URLs. Design:
