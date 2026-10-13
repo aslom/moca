@@ -55,8 +55,8 @@ checkpoint marker still scans the whole stream, so total Redis work is not const
 
 Redis durability depends on the deployment. In the single-VM and Compose deployments Redis has no named
 volume (it keeps only the image's default snapshots in an anonymous volume), so a reboot may lose
-sessions, and removing or replacing the container loses them all (re-running `setup-vm.sh` does the
-latter). The `setup-vm.sh` comments say a reboot loses them, so assume it does. The Kubernetes deployment uses a StatefulSet with a persistent volume
+sessions. Whether the anonymous volume survives removing or replacing the container (re-running
+`setup-vm.sh` does the latter) is not established, so assume it does not. The `setup-vm.sh` comments say a reboot loses them, so assume it does. The Kubernetes deployment uses a StatefulSet with a persistent volume
 and append-only persistence. Plan backups accordingly; there is no operations guide for this yet.
 
 ## Lifetime
