@@ -35,9 +35,14 @@ Labels apply to each deployment path, not to the project as a whole (definitions
 | ---------------------------------------------------- | ---------- | -------------------------------------------------------------------------- |
 | [Docker Compose](deploy/compose/README.md)           | Preview    | Five-minute trial, not production                                          |
 | [Single VM](deploy/vm/README.md)                     | Preview    | The production path for one host                                           |
-| [P6 on Kubernetes / OpenShift](deploy/k8s/README.md) | Preview    | Same process model as ordinary cluster workloads                           |
+| [P6 on Kubernetes / OpenShift](deploy/k8s/README.md) | Preview    | Same process model as ordinary cluster workloads; first target for Stable  |
 | [P4 microVM sandboxes](deploy/microvm/P4-ON-P6.md)   | Preview    | Per-`Exec` Firecracker VMs on a KVM host; known limits listed on that page |
 | [Knative + KEDA](deploy/knative/README-kind.md)      | **Legacy** | Deprecated 2026-10-11; removal no earlier than end of October 2026         |
+
+Criteria for Stable and the support policy are in
+[Maturity and lifecycle](docs/reference/maturity-and-lifecycle.md). **Still on Knative?** Say so, or say you
+depend on async fan-out or the CronJob, in the [tracking issue](https://github.com/rossoctl/moca/issues/490): the
+removal date waits for you.
 
 ## Table of Contents
 

@@ -167,7 +167,9 @@ easy return. After removal lands, the deprecated path will not be there to roll 
 ## During the window
 
 - The deprecated path keeps working and receives security and breakage fixes. It gets no new
-  features.
+  features. Fixes land on `main` only: there are no release branches or backports, and a user pinned to
+  an older tag gets no fixes. "Breakage" means a regression or a break from a base-image or dependency
+  update. The full policy is in [Maturity and lifecycle](reference/maturity-and-lifecycle.md#support-for-legacy-paths).
 - If you run the control plane on the deprecated K8s path during the window, #248's
   namespace-collocation consideration still applies to it, unchanged by the deprecation.
 - Removal happens no earlier than end of October 2026 and only once the remaining users have

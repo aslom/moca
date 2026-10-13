@@ -17,8 +17,9 @@ the path, not about the project as a whole.
 | **Legacy**  | Deprecated. Security and breakage fixes only; removal is gated as described in the migration guide.       |
 
 Today every deployment path is **Preview** except the Knative + KEDA path, which is **Legacy**
-([ADR-0041](adrs/0041-deprecate-knative-keda-deployment.md)). What "Stable" requires for the
-Preview paths is an open decision; see [`REORG-PLAN.md`](REORG-PLAN.md), open question 1.
+([ADR-0041](adrs/0041-deprecate-knative-keda-deployment.md)). The first path to be promoted to Stable is
+P6 on Kubernetes; the criteria, the status of each path and the support policy are in
+[Maturity and lifecycle](reference/maturity-and-lifecycle.md).
 
 ## Start here
 
@@ -29,6 +30,7 @@ Preview paths is an open decision; see [`REORG-PLAN.md`](REORG-PLAN.md), open qu
 | Leave the Knative/KEDA deployment   | [Migrating off the Knative/KEDA deployment](migrating-from-knative.md)                                                                                                                    |
 | Understand how it works             | [Concepts](concepts/index.md)                                                                                                                                                             |
 | See the terms MOCA uses             | [Glossary](glossary.md)                                                                                                                                                                   |
+| Know what Stable requires           | [Maturity and lifecycle](reference/maturity-and-lifecycle.md)                                                                                                                             |
 | Look up an environment variable     | [Configuration reference](reference/configuration.md)                                                                                                                                     |
 | Look up a `mocactl` command         | [`mocactl` reference](reference/cli-mocactl.md)                                                                                                                                           |
 | Call the HTTP API                   | [HTTP API guide](reference/http-api.md); contracts: [`api/openapi.yaml`](api/openapi.yaml), [`api/harness-openapi.yaml`](api/harness-openapi.yaml), [Context service](context-service.md) |
