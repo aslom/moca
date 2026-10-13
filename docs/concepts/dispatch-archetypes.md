@@ -23,8 +23,9 @@ deprecated path alike.
   `status: "failed"`, so check the status field, not only the HTTP code.
 - **Retry:** re-send the same `sessionId`. A verdict leaf returns its recorded verdict; the others run
   again.
-- **Back-pressure:** a 503 with `Retry-After` means the sandbox pool is saturated, and a 429 from the
-  supervisor means no worker has a free slot. Retry after the delay.
+- **Back-pressure:** a 503 with `Retry-After` means no sandbox is available right now (the pool is
+  saturated, or the session's sandbox is busy or briefly absent), and a 429 from the supervisor means no
+  worker has a free slot. Retry after the delay. A detachable turn can also return 503 `redis_unavailable`.
 
 ## Archetype B, the human gate
 
@@ -38,7 +39,9 @@ session log in Redis, and there is no harness-side timeout. There is no gate on 
 `async: true` and the cron on-ramp need the Redis-Streams drainer that ran as a KEDA `ScaledJob` and the
 `CronJob`; neither has a P6 counterpart yet, and the supervisor only runs `--role=turn` workers (a
 `--role=leaf` role is reserved and not implemented). An authenticated `async: true` request returns 501
-`async_runs_unavailable`. If you depend on A or C, stay on the deprecated path and tell the maintainers in
+`async_runs_unavailable`. An _anonymous_ one on a deployment with `SH_REQUIRE_AUTH` off still gets 202 and is
+queued, but nothing drains the queue on P6, so `/runs/status` answers `queued` forever: do not mistake the
+202 for support. If you depend on A or C, stay on the deprecated path and tell the maintainers in
 [the tracking issue](https://github.com/rossoctl/moca/issues/490); the
 [migration guide](../migrating-from-knative.md#if-you-depend-on-async-fan-out-or-the-cronjob) explains what
 the repository states and what it does not.

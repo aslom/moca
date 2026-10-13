@@ -9,13 +9,13 @@ when it is created.
 
 ## The two tiers
 
-|               | Container tier                                  | MicroVM tier (P4)                                                                                          |
-| ------------- | ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| What it is    | A container running a `remote-worker`           | A `microvm-worker` that runs each `Exec` in its own Firecracker microVM, behind the same `Attach` contract |
-| Typical host  | Any Docker, podman or Kubernetes host           | A Linux host with `/dev/kvm` (verified on an AWS `m8i.xlarge` with nested virtualization)                  |
-| Workspace     | Container-local; lost if the container restarts | Persists between turns in a per-workspace disk image; a fresh VM per tool call                             |
-| Network       | See below                                       | **None**: the guest has no NIC, so `curl` and `git` to the internet fail                                   |
-| Where it runs | VM, Compose, Kubernetes                         | On a P6 VM host, or on an external KVM host attached to an in-cluster relay over TLS                       |
+|               | Container tier                                  | MicroVM tier (P4)                                                                                                    |
+| ------------- | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| What it is    | A container running a `remote-worker`           | A `microvm-worker` that runs each `Exec` in its own Firecracker microVM, behind the same `Attach` contract           |
+| Typical host  | Any Docker, podman or Kubernetes host           | A Linux host with `/dev/kvm` (verified on an AWS `m8i.xlarge` with nested virtualization)                            |
+| Workspace     | Container-local; lost if the container restarts | Persists between turns in a per-workspace disk image; a fresh VM per tool call                                       |
+| Network       | See below                                       | **None**: the guest has no NIC, so `curl` and `git` to the internet fail                                             |
+| Where it runs | VM, Compose, Kubernetes                         | On a P6 VM host, or on an external KVM host attached to an in-cluster relay over TLS (documented for OpenShift only) |
 
 MicroVMs inside a Kubernetes cluster are not supported; the KVM host stays outside the cluster.
 
@@ -69,4 +69,5 @@ saturated the turn gets 503 `sandbox_unavailable` with `Retry-After`.
   with reason `detached`. If the sandbox has been relabelled to another declared tier, the session falls
   back immediately with reason `retiered`.
 
-A session never silently loses its workspace: it either waits, or is told it was reset.
+An affinity move never loses a workspace silently: the session either waits or is told it was reset. Idle
+reclaim (`SH_WORKSPACE_IDLE`) is still silent on both tiers (#338).

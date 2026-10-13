@@ -22,10 +22,10 @@ bundle, sandbox tier), so sessions can be listed, owned and deleted without read
 Send the same `sessionId` and the harness reopens the log and continues from the last compaction
 checkpoint. What happens for an unknown id depends on the caller:
 
-| Caller                               | Unknown `sessionId`                                         |
-| ------------------------------------ | ----------------------------------------------------------- |
-| Authenticated `/v1/turn`, `/v1/runs` | The session is created under that id                        |
-| Anonymous `/turn`                    | 404 `session_not_found`; omit the id to start a new session |
+| Caller                                                     | Unknown `sessionId`                                         |
+| ---------------------------------------------------------- | ----------------------------------------------------------- |
+| Authenticated turn (`/turn` or `/v1/turn`), any `/v1/runs` | The session is created under that id                        |
+| Anonymous turn (`/turn` or `/v1/turn`)                     | 404 `session_not_found`; omit the id to start a new session |
 
 Resuming works across workers and across process restarts, because state is in Redis and not in the
 worker. Sandbox state is separate: a resumed session finds its workspace in a sandbox, or gets a fresh
@@ -46,16 +46,17 @@ checkpoint marker still scans the whole stream, so total Redis work is not const
 
 ## What survives what
 
-| Event                   | Result                                                                                                |
-| ----------------------- | ----------------------------------------------------------------------------------------------------- |
-| A worker dies mid-turn  | The in-flight turn is lost; the committed session survives in Redis and the next request resumes it   |
-| The supervisor restarts | Workers exit and are restarted; in-flight turns end, sessions survive. Turns do not survive a restart |
-| A sandbox goes away     | The session survives; the workspace may be reset and the turn reports `workspace_reset`               |
-| **Redis is lost**       | All sessions, ownership records and leases are lost                                                   |
+| Event                   | Result                                                                                                                     |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| A worker dies mid-turn  | The in-flight turn is lost; the committed session survives in Redis and the next request resumes it                        |
+| The supervisor restarts | Workers exit and are restarted; in-flight turns end, sessions survive. Turns do not survive a restart                      |
+| A sandbox goes away     | The session survives; if it is moved the workspace is reset and the turn reports `workspace_reset`; idle reclaim is silent |
+| **Redis is lost**       | All sessions, ownership records and leases are lost                                                                        |
 
-Redis durability depends on the deployment. In the single-VM and Compose deployments the Redis container
-has no volume, so rebooting the host or removing the container wipes every session (re-running
-`setup-vm.sh` forgets them too). The Kubernetes deployment uses a StatefulSet with a persistent volume
+Redis durability depends on the deployment. In the single-VM and Compose deployments Redis has no named
+volume (it keeps only the image's default snapshots in an anonymous volume), so a reboot may lose
+sessions, and removing or replacing the container loses them all (re-running `setup-vm.sh` does the
+latter). The `setup-vm.sh` comments say a reboot loses them, so assume it does. The Kubernetes deployment uses a StatefulSet with a persistent volume
 and append-only persistence. Plan backups accordingly; there is no operations guide for this yet.
 
 ## Lifetime
@@ -70,6 +71,7 @@ bundles (30 days, refreshed on use).
 A normal `/v1/turn` has no idempotency key; sending it twice runs two turns. A verdict leaf is
 resumable and returns a recorded verdict without re-running; a prompt leaf runs again
 ([Leaf envelope and result](../reference/leaf-and-envelope.md#idempotency-and-resume)).
-A **detachable** turn (opt-in, `SH_TURN_DETACH=1`) allows one live turn per session (409
+A **detachable** turn (opt-in: `SH_TURN_DETACH=1`, plus an authenticated streaming request that sends
+`detachable: true`) allows one live turn per session (409
 `turn_in_progress`), keeps running when the client disconnects, and can be re-attached with its
 event log ([HTTP API](../reference/http-api.md#detachable-turns-attach-and-cancel)).

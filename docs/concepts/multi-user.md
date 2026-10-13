@@ -30,7 +30,7 @@ unauthenticated calls on its operator credential, which suits a single-user tria
 ## Credentials
 
 A user stores an inference credential with `mocactl credentials add`. The store is **write-only**: there is
-no read-back, `GET /v1/credentials` returns names, kinds, hosts and endpoints only, and the secret is read
+no read-back, `GET /v1/credentials` returns names, kinds, consumers, hosts, endpoints and bindings (never a secret), and the secret is read
 from stdin so it stays out of shell history. Secrets are encrypted per subject (AES-256-GCM, with the
 subject and name as authenticated data) under a key ring, `SH_CREDENTIAL_KEK`, newest key first. Storage
 is a file store on a VM or in Compose, Kubernetes Secrets on a cluster, or Vault.
@@ -38,7 +38,8 @@ is a file store on a VM or in Compose, Kubernetes Secrets on a cluster, or Vault
 On each turn the data plane presents the session token to the control plane and receives, for that turn
 only, the credential to use, the model endpoint, the session's config bundle and its sandbox tier. In
 `placeholder` mode the worker receives an inert placeholder and a gateway injects the real key; in `direct`
-mode the worker holds the real key for the turn. The credential is chosen when the session is created
+mode the worker holds the real key for the turn. Which mode applies depends only on whether an injector is
+configured; `MOCA_TENANCY=multi` does not force placeholder mode. The credential is chosen when the session is created
 and a session that names one never falls back to another.
 
 An operator can opt in to a fallback key for users who have none
@@ -51,8 +52,10 @@ existed, so ids cannot be probed. 403 appears only where a role is missing (`?ow
 deleting someone else's bundle). Deleting a session also removes its log and stored leaf results.
 
 Config bundles are content-addressed and counted against a budget (16 MiB per user, 64 MiB in total by
-default, 8 MiB per bundle), expiring after 30 days unless used. A bundle's digest acts as a bearer
-capability; there is no ownership record.
+default, 8 MiB per bundle), expiring after 30 days unless used. Using a bundle needs only its digest, which
+acts as a bearer capability. Deleting one requires being its uploader (the budget entry records the first
+uploader) or an admin; a bundle stored by the older `/promote` path has no budget entry, so only an admin
+can delete it.
 
 ## Isolation between users today
 

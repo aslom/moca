@@ -10,8 +10,9 @@ idle capacity costs memory, in exchange for no cold start and no autoscaler to o
 
 ## How a request travels
 
-1. The supervisor listens on one port at layer 4. It accepts the connection, reads only the request head,
-   and **hands the socket** to a worker. It never touches a response byte.
+1. The supervisor listens on one port at layer 4. It accepts the connection and **hands the socket** to a
+   worker, reading at most the request head (only under `stickyBySession`). It never touches a response
+   byte on a handed-off socket; the 429 under Overload is the one answer it writes itself.
 2. The worker serves the request with the same HTTP handler used everywhere, then returns to the pool.
 3. The turn's state is in Redis, so the next request, even from the same client, may land on any worker.
 
@@ -26,8 +27,8 @@ connections would defeat the per-connection hand-off.
 | `SH_TURNS_PER_WORKER` | S, concurrent turns allowed per worker. **Required**, no default: the right value has to be measured |
 | `SH_ROUTING_POLICY`   | `leastInFlight` (the default) or `stickyBySession`                                                   |
 
-The capacity at any moment is W x S concurrent turns. The Compose and Kubernetes manifests use S = 4 as a
-trial value, not a recommendation. Only `POST /turn` and `POST /v1/turn` count toward S; `/v1/runs` does
+The capacity at any moment is W x S concurrent turns. The Kubernetes manifest and the Compose installer use S = 4 as a
+trial value, not a recommendation; the VM template ships it empty. Only `POST /turn` and `POST /v1/turn` count toward S; `/v1/runs` does
 not.
 
 **Routing** is decided per connection, not per request, so a keep-alive connection stays on its first
@@ -49,8 +50,8 @@ should retry after the delay.
   reset after 10 seconds of healthy running). Its sandbox leases expire after the 60-second TTL.
 - **The supervisor dies:** workers exit when they lose their link to it, and the process manager restarts
   the set. Re-adopting running workers is deliberately not built.
-- **A graceful stop:** the supervisor drains workers and waits up to 20 seconds for idle; a detachable turn
-  gets up to 15 more seconds before it is aborted with "harness restarting".
+- **A graceful stop:** the supervisor drains workers and waits up to 20 seconds for idle; within that, a detachable turn
+  is aborted with "harness restarting" after 15 seconds.
 
 ## Why one process can serve many sessions
 
@@ -59,6 +60,6 @@ enforces this per request: an authenticated turn takes its identity from the ver
 conflicting `X-SH-Subject` is rejected), the process holds no ambient provider credential under
 `MOCA_TENANCY=multi` (it is scrubbed and replaced by a sentinel), and the worker's Pi loader is locked
 down. Some process-wide state in Pi cannot be isolated and is pinned by tests rather than refactored; the
-[P5 design](../specs/2026-09-06-p5-session-isolation-design.md) lists the residual hazards (for example,
-`cwd` is process-wide, which is one reason tools run in sandboxes). The P5 spec's `X-SH-Subject` flow for
+[P5 design](../specs/2026-09-06-p5-session-isolation-design.md) lists the residual hazards (for example, a write error in the output guard can exit the whole process,
+which the spec calls a fleet-wide outage triggered by one session). The P5 spec's `X-SH-Subject` flow for
 unauthenticated callers does not appear in the current server code.

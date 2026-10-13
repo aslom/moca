@@ -40,8 +40,9 @@ The older `kubectl exec` transport belongs to the deprecated Knative path
 
 ## Limits on what the hands return
 
-Command output is capped at 8 MiB. A command that exceeds it is aborted with exit status 137 and the
-marker `[output truncated]`; a `read` that would be truncated fails instead of returning partial bytes.
+Command output is capped at 8 MiB. A `bash` command that exceeds it is aborted with exit status 137 and
+the marker `[output truncated]`; other tools return the truncated output with that marker, and a `read`
+that would be truncated fails instead of returning partial bytes.
 A command's default timeout is 30 minutes.
 
 ## The workspace
@@ -51,16 +52,18 @@ Each session gets its own directory under the sandbox's workspace root
 (`KAGENTI_SANDBOX_CWD`) must equal the sandbox worker's `SH_WORKSPACE_ROOT`
 ([Configuration](../reference/configuration.md)). The per-session directory is **not a security
 boundary**: sessions on one sandbox share a Unix user and container. An idle workspace is deleted after
-`SH_WORKSPACE_IDLE` (30 minutes by default; the microVM installer sets 8 hours). A session whose
-workspace was removed or moved gets a fresh one, and the turn reports `workspace_reset`.
+`SH_WORKSPACE_IDLE` (30 minutes by default; the microVM installer sets 8 hours), and the next turn is
+**not told** that it happened (#338). A session moved to another sandbox gets a fresh workspace, and that
+turn reports `workspace_reset`.
 
 ## What the sandbox can reach
 
 Be clear about what is and is not enforced today:
 
 - Only `LANG`, `LC_ALL`, `LC_CTYPE` and `TZ` cross from the harness into a sandbox command, and the
-  sandbox worker removes its own settings (`SANDBOX_TOKEN`, `RELAY_*`, `SH_*`, `MOCA_*`) from child
+  sandbox worker removes its own settings (tokens, the relay address, `SH_*`, `MOCA_*`) from child
   environments. The model credential never reaches a sandbox.
 - There is **no credentialed-egress proxy** for P6 sandboxes yet. Network reach depends on the tier
-  (see [Sandboxes and tiers](sandboxes-and-tiers.md)): container sandboxes can generally reach the
-  internet but not the host's private networks, and microVM guests have no network at all.
+  (see [Sandboxes and tiers](sandboxes-and-tiers.md)): on Kubernetes, container sandboxes reach the
+  internet but not private ranges; on the single VM and in Compose they can reach anything the host can
+  route to (on the VM, except the host itself); and microVM guests have no network at all.
