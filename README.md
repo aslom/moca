@@ -251,7 +251,7 @@ Behaviour and economics are backed by reproducible experiments rather than claim
 - **[`moca-experiments/knative/EXPERIMENTS.md`](https://github.com/rossoctl/moca-experiments/blob/main/knative/EXPERIMENTS.md)**
   — cluster experiments E1 (economics), E3 (mobility), E4 (recovery), run live on Kind. Moved to
   a separate repo 2026-09-25 (see `docs/specs/2026-09-24-ra1-density-cutover-and-repo-rearchitecture-design.md`).
-- **[`docs/experiment-results.md`](docs/experiment-results.md)**: E2 (reconstruction cost) and E5
+- **[`docs/archive/experiment-results.md`](docs/archive/experiment-results.md)**: E2 (reconstruction cost) and E5
   (budget enforcement), a dated write-up from June 2026. The code these ran from now lives in
   [`moca-experiments/experiments/`](https://github.com/rossoctl/moca-experiments/tree/main/experiments).
 - **[`deploy/knative/SMOKE.md`](deploy/knative/SMOKE.md)**: the deprecated Knative path's smoke
