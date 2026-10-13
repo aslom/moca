@@ -18,8 +18,9 @@ stays Pending. The generated configuration is exactly `requirepass`, `appendonly
   writable.
 - The smoke test deletes `redis-0` and checks that a session survives the AOF reload.
 
-The single-VM and Compose deployments differ: Redis has no named volume there, so removing or replacing the
-container loses everything. See [Sessions and turns](../concepts/sessions-and-turns.md).
+The single-VM and Compose deployments differ: Redis has no named volume there. Whether the image's anonymous
+`/data` volume survives a container recreate is not established by the repository, so assume that removing or
+replacing the container (including re-running `setup-vm.sh`) loses everything. See [Sessions and turns](../concepts/sessions-and-turns.md).
 
 ## What lives in Redis
 
