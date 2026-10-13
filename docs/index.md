@@ -29,6 +29,9 @@ P6 on Kubernetes; the criteria, the status of each path and the support policy a
 | Run MOCA for the first time         | [First run](get-started/first-run.md)                                                                                                                                                     |
 | Leave the Knative/KEDA deployment   | [Migrating off the Knative/KEDA deployment](migrating-from-knative.md)                                                                                                                    |
 | Understand the security model       | [Security model](reference/security-model.md); [hardening checklist](operations/hardening.md)                                                                                             |
+| Run a deployment for several users  | [Manage multi-user sessions](guides/manage-multi-user-sessions.md)                                                                                                                        |
+| Attach a sandbox on another host    | [Attach a remote sandbox](guides/remote-sandbox.md)                                                                                                                                       |
+| Promote a Claude Code workflow      | [Promote a workflow](guides/promote-claude-workflow.md)                                                                                                                                   |
 | Operate P6 on Kubernetes            | [Operations](operations/index.md)                                                                                                                                                         |
 | Understand how it works             | [Concepts](concepts/index.md)                                                                                                                                                             |
 | See the terms MOCA uses             | [Glossary](glossary.md)                                                                                                                                                                   |
@@ -47,6 +50,7 @@ P6 on Kubernetes; the criteria, the status of each path and the support policy a
 | ------------------------------------------- | ---------------------------------------------------------------------- | ------------------------- |
 | `get-started/`                              | Install-path chooser                                                   | New users                 |
 | `migrating-from-knative.md`                 | The single deprecation and migration page                              | Operators                 |
+| `guides/`                                   | Task guides: multi-user sessions, remote sandbox, promoting a workflow | Operators and users       |
 | `operations/`                               | Upgrades, Redis backup, observability, sizing, troubleshooting         | Operators                 |
 | `concepts/`                                 | How sessions, sandboxes, multiplexing, multi-user and dispatch work    | Everyone                  |
 | `reference/`                                | Configuration, `mocactl` commands, HTTP API guide, leaf envelope       | Operators and integrators |
