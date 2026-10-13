@@ -58,13 +58,41 @@ period is only an outer bound. Practically:
 
 - **Harness before control plane.** Config bundles require the harness to be upgraded first: an older harness
   ignores `configRef`, so turns run without the skills and report no error. Nothing enforces this order, and the
-  supervisor and control plane use the same image, so one `--image` bump moves them together. Whether you can split
-  them is not documented.
+  supervisor and control plane use the same image, so one `--image` bump moves them together and the two
+  Deployments roll in parallel. For a release whose notes say it changes config-bundle handling, roll the supervisor
+  first (see below). Do not split the image to get this ordering.
 - **Tier lists must match.** `SH_SANDBOX_TIERS` and `SH_SANDBOX_DEFAULT_TIER` are read by both from the same
   ConfigMap.
 - **No schema version.** There is no schema-version key or migration tool for Redis. New fields are handled by
   tolerant reads. The only versioned artefact at rest is the credential envelope (`v1.`).
 - No wire-version negotiation exists. `GET /v1/discovery` returns the control plane's `version`.
+
+### Rolling the harness before the control plane
+
+_Unverified: this uses plain Kubernetes commands and has not been run against `deploy/k8s`._ Pause the control
+plane's rollout, apply the upgrade, wait for the supervisor, then resume:
+
+```bash
+kubectl -n moca rollout pause deployment/moca-control-plane
+deploy/k8s/setup.sh --target kind --skip-build        # your usual flags, including --image
+kubectl -n moca rollout status deployment/moca-supervisor
+kubectl -n moca rollout resume deployment/moca-control-plane
+kubectl -n moca rollout status deployment/moca-control-plane
+```
+
+`setup.sh` ends by waiting on every component in turn (Redis, relay, supervisor, control plane, sandboxes) and then
+for the relay to have mirrored every sandbox. `kubectl rollout status` on a paused Deployment is expected to fail
+rather than wait, so the script will probably stop at the control-plane wait and skip the sandbox and presence
+checks after it. If it does, resume the rollout as above and run what was skipped:
+
+```bash
+kubectl -n moca-sandbox rollout status statefulset/moca-sandbox
+kubectl -n moca exec redis-0 -- sh -c 'redis-cli HLEN sh:sandbox:records'   # should equal SH_SANDBOX_COUNT
+mocactl doctor
+```
+
+For releases that do not change bundle handling, skip all of this: the window is short and only affects sessions
+that use a promoted bundle.
 
 ## Rolling back
 
