@@ -23,7 +23,8 @@
       networks you do not trust. The admin port is unauthenticated.
 - [ ] **Keep the supervisor reachable at layer 4 only.** No Ingress, edge Route or mesh sidecar in front of it.
 - [ ] **Pin images by digest.** The harness and remote-worker images are `:latest` by default; pass
-      `--image <ref>@sha256:...` to `setup.sh`. Images are not signed.
+      `--image <ref>@sha256:...` (harness) and `--sandbox-image <ref>@sha256:...` (remote worker) to `setup.sh`, or
+      `SANDBOX_IMAGE` on the VM. Redis is digest-pinned only on Kubernetes. Images are not signed.
 - [ ] **Treat the supervisor-to-control-plane hop as plaintext.** It carries the exchange bearer and session tokens,
       and in direct mode the real model key. Keep it on a network you control.
 - [ ] **Rotate tokens deliberately.** Access tokens last 15 minutes and are never revoked, so shorten
@@ -35,16 +36,17 @@
       isolation rule is open _(documented)_. Run the smoke test's isolation claim to check.
 - [ ] **Look at your node network.** If it uses publicly routable addresses, the sandbox egress rule does not block
       it; set `SH_SANDBOX_EGRESS_EXCEPT` _(documented, #446)_.
-- [ ] **Scope the admin port.** Any pod in `moca` can read the unauthenticated `/metrics`. Do not run unrelated
-      workloads in that namespace, or tighten the policy.
-- [ ] **Restrict who can read secrets in `moca`.** All four MU1 values (signing key, KEK, exchange token) are keys of
+- [ ] **Scope the admin port.** Any pod in `moca` can read the unauthenticated `/metrics`. On the single-namespace
+      OpenShift target (`ocp-single`) that includes the **sandbox** pods. Do not run unrelated workloads in that
+      namespace, or tighten the policy.
+- [ ] **Restrict who can read secrets in `moca`.** All four MU1 values (signing key, public keys, KEK, exchange token) are keys of
       one Secret, `moca-mu1`.
 - [ ] **Delete a leftover `moca-genkeys` pod** if `setup.sh` was killed; its log holds the generated keys.
 - [ ] **Consider encryption at rest for Secrets.** This repository does not configure it, and per-user credentials
       sit in Secrets (sealed under the KEK, with metadata in plaintext annotations).
 - [ ] **Add what the manifests omit:** no ResourceQuota, LimitRange, PID or ephemeral-storage limits, and no
       PodDisruptionBudget.
-- [ ] **On OpenShift, supply a real certificate** (`--tls-cert`/`--tls-key` or `--tls-secret`) instead of the
+- [ ] **On OpenShift, supply a real certificate** (`--tls-cert`/`--tls-key`, or `--tls-secret` on the `ocp-single` target only) instead of the
       self-signed fallback, and remember the control plane's Route terminates TLS at the router.
 
 ## Single VM ([`deploy/vm`](../../deploy/vm/README.md))

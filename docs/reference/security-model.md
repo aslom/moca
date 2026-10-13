@@ -8,7 +8,8 @@
 ## Read this first
 
 1. **With `SH_REQUIRE_AUTH` not set to `true`, anyone who can reach port 8080 can run turns on the operator's model
-   credential, and can name any subject with `X-SH-Subject`.** Compose defaults to `false` and passes the operator's
+   credential.** (The P5 design also had unauthenticated callers name a subject with `X-SH-Subject`; that flow is
+   _designed, not built_: the header is read only for the `subject_conflict` check when a token is present.) Compose defaults to `false` and passes the operator's
    `ANTHROPIC_*` variables into the supervisor, so adding the control plane does not close this. The single-VM template
    and the Kubernetes manifest set it to `true`. `MOCA_TENANCY=multi` refuses to boot unless it is `true`, but no
    shipped deployment sets `MOCA_TENANCY`.
@@ -21,37 +22,37 @@
 
 ## Components and what they hold
 
-| Component              | Holds                                                                                                                                                                                                                  |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Supervisor and workers | Redis URL and password; the relay exec token; the exchange token; the control plane's **public** keys; a user's real model key for the length of a turn (direct mode). Compose also holds the operator's `ANTHROPIC_*` |
-| Control plane          | The Ed25519 signing key, the credential KEK ring, the exchange token, the operator's inference token, sealed user credentials, refresh-token hashes, the ownership index, config bundles, the audit stream             |
-| Relay                  | The sandbox attach token(s), the exec token, the Redis password                                                                                                                                                        |
-| Container sandbox      | The attach token. Not the exec token, the Redis password or the MU1 keys                                                                                                                                               |
-| Redis                  | Sessions, ownership, sandbox records (which decide where a turn executes), leases, hashed refresh tokens, audit streams, bundles                                                                                       |
+| Component              | Holds                                                                                                                                                                                                                                          |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Supervisor and workers | Redis URL (with a password on Kubernetes only); the relay exec token; the exchange token; the control plane's **public** keys; a user's real model key for the length of a turn (direct mode). Compose also holds the operator's `ANTHROPIC_*` |
+| Control plane          | The Ed25519 signing key, the credential KEK ring, the exchange token, the operator's inference token (not wired on Kubernetes), sealed user credentials, refresh-token hashes, the ownership index, config bundles, the audit stream           |
+| Relay                  | The sandbox attach token(s), the exec token, the Redis password (Kubernetes only)                                                                                                                                                              |
+| Container sandbox      | The attach token. Not the exec token, the Redis password or the MU1 keys                                                                                                                                                                       |
+| Redis                  | Sessions, ownership, sandbox records (which decide where a turn executes), leases, hashed refresh tokens, audit streams, bundles                                                                                                               |
 
 Tool commands run in a sandbox with an explicit environment that strips the worker's own settings
-(`SANDBOX_TOKEN`, `RELAY_*`, `SH_*`, `MOCA_*` and others). But commands run as the same Unix user as the sandbox
+(`SANDBOX_TOKEN`, `RELAY_ADDR`, `RELAY_TLS`, `RELAY_CA_FILE`, `SH_*`, `MOCA_*` and others; any other `RELAY_`-prefixed name is not stripped). But commands run as the same Unix user as the sandbox
 worker, so its token remains readable through `/proc` _(documented only; inferred from the shared uid)_. The
 container tier uses one shared attach token, so a compromised container sandbox holds the credential for all of them.
 
 ### Who can reach what (Kubernetes)
 
-| Port                  | Reachable from                                                                                                                                                                              |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Supervisor 8080       | No pod (no ingress rule). Port-forward and, on OpenShift, the TLS sidecar over loopback bypass the policy                                                                                   |
-| Supervisor admin 8081 | **Any pod in `moca`**. Bound to all interfaces so the kubelet can probe it; unauthenticated; `/metrics` echoes an allowlisted slice of the environment                                      |
-| Control plane 8080    | The supervisor pods; on OpenShift also the router. The whole listener, including `/internal/credentials`, is exposed through the Route; that route is protected only by the exchange bearer |
-| Relay attach 9443     | Pods labelled `app=moca-sandbox` in `moca-sandbox`                                                                                                                                          |
-| Relay exec 9444       | The supervisor pods                                                                                                                                                                         |
-| Redis 6379            | Supervisor, relay and control plane, which share one password                                                                                                                               |
-| Sandbox               | No ingress. Egress to the relay, DNS, and the internet except private, CGNAT and link-local ranges                                                                                          |
+| Port                  | Reachable from                                                                                                                                                                                                                                                                                      |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Supervisor 8080       | No pod (no ingress rule). Port-forward and, on OpenShift, the TLS sidecar over loopback bypass the policy                                                                                                                                                                                           |
+| Supervisor admin 8081 | **Any pod in `moca`**, and on the single-namespace OpenShift target (`ocp-single`) also the **sandbox** pods, because that overlay removes the separate namespaces. Bound to all interfaces so the kubelet can probe it; unauthenticated; `/metrics` echoes an allowlisted slice of the environment |
+| Control plane 8080    | The supervisor pods; on OpenShift also the router. The whole listener, including `/internal/credentials`, is exposed through the Route; that route is protected only by the exchange bearer                                                                                                         |
+| Relay attach 9443     | Pods labelled `app=moca-sandbox` in `moca-sandbox`                                                                                                                                                                                                                                                  |
+| Relay exec 9444       | The supervisor pods                                                                                                                                                                                                                                                                                 |
+| Redis 6379            | Supervisor, relay and control plane, which share one password                                                                                                                                                                                                                                       |
+| Sandbox               | No ingress. Egress to the relay, DNS, and the internet except private, CGNAT and link-local ranges                                                                                                                                                                                                  |
 
 Default-deny applies in both directions in `moca`, `moca-sandbox` and `moca-credentials`. It only works on a CNI that
 enforces NetworkPolicy; on one that does not, every row above is open. Because the three components share one Redis
 password, a compromised worker could rewrite the ownership index _(inferred)_; the VM README says whoever can write it
 can make another user's session their own.
 
-The control plane has no rate limiting; its only cap is the request body size (64 KiB by default). A credential's
+The control plane has no rate limiting; its only caps are the request body size (64 KiB by default, 12 MiB for config bundles) and the bundle byte quota (429 `bundle_quota_exceeded`). A credential's
 `endpoint` is accepted as any absolute http(s) URL with no private-range check, and the supervisor's egress rule is
 `0.0.0.0/0:443`, so a user-supplied endpoint can aim a worker at in-cluster port-443 targets _(inferred)_.
 
@@ -59,15 +60,15 @@ The control plane has no rate limiting; its only cap is the request body size (6
 
 ### Tokens
 
-All tokens are issued by the control plane; the data plane gets only public keys, so a compromised harness can verify
+All JWS and refresh tokens are issued by the control plane; the data plane gets only public keys, so a compromised harness can verify
 tokens but not mint them. No credential travels in a token.
 
-| Token          | Scope                       | Lifetime                       | Notes                                                                                                                |
-| -------------- | --------------------------- | ------------------------------ | -------------------------------------------------------------------------------------------------------------------- |
-| API token      | `api`                       | 15 minutes (default)           | Stateless and never revoked, so its lifetime is the revocation latency                                               |
-| Session token  | `turn:write`, carries `sid` | 5 minutes (default)            | Re-minted per session                                                                                                |
-| Refresh token  | opaque (`mrt_...`)          | 30 days idle, 90 days absolute | Hashed in Redis. Rotates on every use; replaying a superseded token after a 30-second grace revokes the whole family |
-| Exchange token | shared bearer               | none                           | Used by workers to call `/internal/credentials`; compared in constant time                                           |
+| Token          | Scope                       | Lifetime                       | Notes                                                                                                                                                                                                                                                                                                                                                              |
+| -------------- | --------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| API token      | `api`                       | 15 minutes (default)           | Stateless and never revoked, so its lifetime is the revocation latency                                                                                                                                                                                                                                                                                             |
+| Session token  | `turn:write`, carries `sid` | 5 minutes (default)            | Re-minted per session                                                                                                                                                                                                                                                                                                                                              |
+| Refresh token  | opaque (`mrt_...`)          | 30 days idle, 90 days absolute | Stored hashed in Redis, except that during the grace window the grace key holds the **plaintext** successor so a replay can be answered: anyone who can read Redis sees each new refresh token for up to 30 seconds (`SH_REFRESH_REUSE_GRACE_SECONDS`, capped at 300). Rotates on every use; replaying a superseded token after the grace revokes the whole family |
+| Exchange token | shared bearer               | none                           | Used by workers to call `/internal/credentials`; compared in constant time                                                                                                                                                                                                                                                                                         |
 
 Tokens are EdDSA (Ed25519) JWS with `aud: harness`. A session token for one session cannot drive another
 (`session_mismatch`), and an `X-SH-Subject` that differs from the token's subject is refused (`subject_conflict`). A
@@ -109,8 +110,9 @@ single host), or Vault (the value is still sealed under the KEK; `VAULT_ADDR` ma
 `setup-vm.sh`). Encryption of etcd at rest is not configured by this repository.
 
 The operator fallback is off by default, needs a token and a default endpoint or the control plane refuses to boot, and
-applies only to a session created with no credential name. Each use is audited as `operator_fallback_used`. It is not
-wired on Kubernetes at all.
+applies only to a session created with no credential name. Each use is audited as `operator_fallback_used`. On Kubernetes the switch
+(`SH_ALLOW_OPERATOR_FALLBACK`) is wired but the token (`SH_OPERATOR_INFERENCE_TOKEN`) is not, so enabling it makes the
+control plane refuse to boot (#368).
 
 ### Where secrets live
 
@@ -125,11 +127,11 @@ whose log holds them for a few seconds; if `setup.sh` is killed the pod can be l
 
 ## Isolation by tier
 
-|                        | Container (Kubernetes)                                                                                                                                                | Container (single VM)                                                                                                                                                                            | Container (Compose)                                       | MicroVM (P4)                                                                                        |
-| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| Process isolation      | Non-root uid 1001, all capabilities dropped, no privilege escalation, default seccomp, no service-account token; root filesystem **not** read-only; memory limit only | A podman container; **no** `--cap-drop`, `--read-only`, security options or limits                                                                                                               | A container; no capability, filesystem or resource limits | A Firecracker microVM per `Exec`, launched under the jailer with its own uid/gid, chroot and cgroup |
-| Network                | NetworkPolicy: relay and public internet; private, CGNAT and link-local blocked (including cloud metadata)                                                            | Dedicated `isolate=strict` network; an input firewall drops traffic to the host except the relay port and DNS. **Forwarded traffic is untouched**: the internet and cloud metadata are reachable | Own network, routed to the internet                       | **No NIC**, no DNS: the guest cannot reach any network                                              |
-| Host service hardening | Pod Security `restricted` on the namespaces                                                                                                                           | systemd units with `ProtectSystem=strict`, `NoNewPrivileges`, a syscall filter                                                                                                                   | n/a                                                       | The `microvm-worker` unit has no `User=` and none of those directives; it runs as root              |
+|                        | Container (Kubernetes)                                                                                                                                                | Container (single VM)                                                                                                                                                                            | Container (Compose)                                       | MicroVM (P4)                                                                                                                                         |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Process isolation      | Non-root uid 1001, all capabilities dropped, no privilege escalation, default seccomp, no service-account token; root filesystem **not** read-only; memory limit only | A podman container; **no** `--cap-drop`, `--read-only`, security options or limits                                                                                                               | A container; no capability, filesystem or resource limits | A Firecracker microVM per `Exec`, launched under the jailer (chroot and cgroup; the same uid/gid as the worker, which is root with the shipped unit) |
+| Network                | NetworkPolicy: relay and public internet; private, CGNAT and link-local blocked (including cloud metadata)                                                            | Dedicated `isolate=strict` network; an input firewall drops traffic to the host except the relay port and DNS. **Forwarded traffic is untouched**: the internet and cloud metadata are reachable | Own network, routed to the internet                       | **No NIC**, no DNS: the guest cannot reach any network                                                                                               |
+| Host service hardening | Pod Security `restricted` on the namespaces                                                                                                                           | systemd units with `ProtectSystem=strict`, `NoNewPrivileges`, a syscall filter                                                                                                                   | n/a                                                       | The `microvm-worker` unit has no `User=` and none of those directives; it runs as root                                                               |
 
 ### Not enforced on any tier
 
@@ -155,8 +157,8 @@ domain.
 ### One process, many sessions
 
 A worker serves many sessions, so process-wide state matters. The harness takes identity from the verified token on
-every request, runs Pi with extensions, context files and skills switched off, and pins five pieces of process-wide Pi
-state with tests rather than refactoring them. The design records residual hazards: a write error in the output guard
+every request, runs Pi with extensions, context files and skills switched off, and pins four pieces of process-wide Pi
+state with tests rather than refactoring them, and documents a fifth (`fileMutationQueues`) unchanged. The design records residual hazards: a write error in the output guard
 would exit the whole process (pinned unreachable in server mode), the project-settings trust gate defaults to open, and
 a settings lock can busy-wait for up to about 200 ms. The worker's sentinel assignment to `ANTHROPIC_API_KEY` is also
 process-wide, though it is the same constant for every caller.
@@ -190,10 +192,12 @@ run dependency review (informational: it does not block), Trivy in filesystem mo
 the root `Dockerfile` only. Scorecard runs weekly. Images are pushed to `ghcr.io/rossoctl/*` and **are not signed or
 attested**. The harness image has no `USER` line (the manifests impose non-root), uses floating base tags and includes
 `kubectl` for the deprecated Knative path. Redis and the OpenShift TLS sidecar are pinned by digest; the harness and
-remote-worker images are `:latest` unless you pass `--image`.
+remote-worker images are `:latest` unless you pass `--image` (harness) and `--sandbox-image` (remote worker; the
+VM uses `SANDBOX_IMAGE`). Redis is digest-pinned only in the Kubernetes manifests; the VM and Compose use
+`redis:7-alpine` by tag.
 
 ## Known gaps in `SECURITY.md`
 
 `SECURITY.md` says dependency vulnerabilities are detected with `pnpm audit` (no workflow runs it), and describes
-non-root, read-only-rootfs, capability-dropped containers on Kubernetes (true of the supervisor, control plane, relay
-and Redis, not of the sandbox). Treat this page as the more accurate description until `SECURITY.md` is corrected.
+non-root, read-only-rootfs, capability-dropped containers on Kubernetes (true of every container, except that the sandbox's
+root filesystem is writable). Treat this page as the more accurate description until `SECURITY.md` is corrected.
