@@ -9,11 +9,12 @@
 One supervisor pod runs `SH_WORKERS` workers, each allowing `SH_TURNS_PER_WORKER` concurrent turns. The shipped
 manifest pins **2 workers and 4 turns per worker**, so a pod serves up to **8 concurrent turns**; beyond that it
 answers `429 {"error":"overloaded"}` with `Retry-After: 1` before reading the request. Only `POST /turn` and
-`POST /v1/turn` count; `/v1/runs` does not. See [Session multiplexing](../concepts/session-multiplexing.md).
+`POST /v1/turn` count toward the cap, but the supervisor checks saturation once per connection, before reading any
+bytes, so while a pod is saturated **every** connection on the data port gets the 429, `/v1/runs` included. See [Session multiplexing](../concepts/session-multiplexing.md).
 
 Change the worker count, the CPU limit and the memory request together: the manifest pins W with a CPU limit of 2
-(about one CPU per worker) and a memory request of at least W x 256Mi plus 256Mi, and a manifest test fails if the
-memory request is too low. If `SH_WORKERS` were unset, W would follow the pod's CPU limit.
+(about one CPU per worker) and a memory request of at least W x 256Mi (a manifest test enforces that), plus about 256Mi of headroom, which is
+advice in the deploy README and not tested. If `SH_WORKERS` were unset, W would follow the pod's CPU limit.
 
 ## Resource defaults
 
@@ -51,13 +52,13 @@ memory request is too low. If `SH_WORKERS` were unset, W would follow the pod's 
 
 ## Limits to watch
 
-| Limit                                   | Default                                   | Notes                                                                       |
-| --------------------------------------- | ----------------------------------------- | --------------------------------------------------------------------------- |
-| Redis memory                            | 256Mi limit, 1Gi volume                   | Sessions never expire; per-session memory is unmeasured                     |
-| Config bundles                          | 16 MiB per user, 64 MiB total, 8 MiB each | Upload fails with 429 `bundle_quota_exceeded`; bundles expire after 30 days |
-| Detachable turns                        | 1800 s unwatched, 86400 s log retention   | `SH_TURN_DETACHED_MAX_S`, `SH_TURN_LOG_TTL_S`                               |
-| Sandbox affinity                        | 86400 s memory, 60 s grace                | `SH_SANDBOX_AFFINITY_TTL_SECONDS`, `SH_SANDBOX_AFFINITY_GRACE_SECONDS`      |
-| Token lifetimes                         | API 900 s, session 300 s                  | Refresh 30 days idle, 90 days absolute                                      |
-| Harness config cache (`/tmp/sh-config`) | Grows with each distinct bundle digest    | No cleanup yet (a known ADR-0038 follow-up)                                 |
+| Limit                                   | Default                                   | Notes                                                                                                                                                                                                 |
+| --------------------------------------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Redis memory                            | 256Mi limit, 1Gi volume                   | Sessions never expire; per-session memory is unmeasured                                                                                                                                               |
+| Config bundles                          | 16 MiB per user, 64 MiB total, 8 MiB each | 429 `bundle_quota_exceeded` when the per-user or total budget is full; a single bundle over 8 MiB gets 400 `invalid_request` (and `mocactl promote` refuses it locally); bundles expire after 30 days |
+| Detachable turns                        | 1800 s unwatched, 86400 s log retention   | `SH_TURN_DETACHED_MAX_S`, `SH_TURN_LOG_TTL_S`                                                                                                                                                         |
+| Sandbox affinity                        | 86400 s memory, 60 s grace                | `SH_SANDBOX_AFFINITY_TTL_SECONDS`, `SH_SANDBOX_AFFINITY_GRACE_SECONDS`                                                                                                                                |
+| Token lifetimes                         | API 900 s, session 300 s                  | Refresh 30 days idle, 90 days absolute                                                                                                                                                                |
+| Harness config cache (`/tmp/sh-config`) | Grows with each distinct bundle digest    | No cleanup yet (a known ADR-0038 follow-up)                                                                                                                                                           |
 
 The cold-turn cost of a promoted bundle is unmeasured.

@@ -60,8 +60,8 @@ the audit decision `refresh_reuse_detected`.
 ## The audit stream
 
 The control plane appends to the Redis stream `sh:cp:audit` (trimmed to about 1,000,000 entries) with fields `ts`,
-`subject`, `decision`, and optionally `sessionId`, `credential` (a name, never a value), `configRef`, `bytes` and
-`reason`. Decisions: `credential_issued`, `operator_fallback_used`, `session_created`, `session_deleted`,
+`subject`, `decision`, and optionally `sessionId`, `credential` (a name, never a value), `configRef`, `bytes`, `reason` and
+`family` (written by every refresh-token decision). Decisions: `credential_issued`, `operator_fallback_used`, `session_created`, `session_deleted`,
 `session_deleted_in_flight`, `credential_written`, `credential_deleted`, `config_bundle_uploaded`,
 `config_bundle_unchanged`, `config_bundle_refused`, `config_bundle_deleted`, and the refresh-token decisions
 `refresh_issued`, `refresh_rotated`, `refresh_refused`, `refresh_reuse_detected`, `refresh_revoked`. Anonymous
@@ -71,7 +71,8 @@ through `kubectl exec`; no HTTP endpoint for the audit stream is documented.
 ## Per-session placement
 
 Workers report, best effort, where each session ran. `GET /v1/sessions/{id}/resources` returns the session, harness,
-sandbox, lease and placement (sandbox id, tier, last `workspace_reset`). The data is self-reported by the harness
+sandbox, lease and placement (sandbox id, tier, and `workspaceReset`, either `{at, from}` or null; the stream event
+is called `workspace_reset`). A top-level `queue` is always null. The data is self-reported by the harness
 and display-only. Some fields still carry Knative-era values (`mode` is `leaf-job` or `knative`), and the sandbox
 `phase` probably reads `unknown` on this deployment because the control plane has no pod permissions (inferred from
 the manifests, not run).
