@@ -1,7 +1,7 @@
 # Redis backup and recovery
 
-> **Preview.** For P6 on Kubernetes. **The repository documents no backup or restore procedure.** The approaches
-> below are things the manifests make possible, devised from the deployment, not endorsed or tested by the project.
+> **Preview.** For P6 on Kubernetes. **The repository documents no backup or restore procedure**, so this page
+> describes what is stored and what a loss costs, and recommends no backup method.
 
 ## How Redis is deployed
 
@@ -40,18 +40,10 @@ encrypted under `SH_CREDENTIAL_KEK`. Losing Redis leaves them intact; back up th
 
 ## Backing up
 
-Not documented. Options, none tested here:
+The repository documents no backup procedure, and none has been tested, so this page does not recommend one.
 
-1. **A volume snapshot** of the PVC `data-redis-0`, if your StorageClass supports CSI snapshots.
-2. **An RDB or AOF copy** taken through `kubectl exec redis-0`. `REDISCLI_AUTH` is already in the container
-   environment, so `redis-cli` needs no password argument, and `setup.sh` itself uses `kubectl exec ... redis-cli`.
-   The root filesystem is read-only, so write to `/data` or stream the file out.
-3. **Sessions are append-only streams**, so a periodic copy is consistent per session; a copy taken mid-turn may lack
-   the entries still queued in the worker (they are written behind the model loop).
-
-Because sessions never expire, plan **retention**: delete sessions you no longer need
-(`mocactl sessions delete ID`, which also removes the log and stored leaf results) and watch Redis memory against
-256Mi and the volume against 1Gi.
+Because sessions never expire, plan **retention**: delete sessions you no longer need (`mocactl sessions delete ID`,
+which also removes the log and stored leaf results) and watch Redis memory against 256Mi and the volume against 1Gi.
 
 ## Restoring
 
@@ -59,8 +51,8 @@ No ordering is required. The control plane and supervisor reconnect to Redis on 
 the control plane's `/readyz` reports 503 while Redis is down and recovers by itself. With Redis down, session
 routes return 503 `redis_unavailable` while credential routes keep working.
 
-If you restore an older snapshot, session records may reference entries newer than the snapshot. The behaviour is
-not verified.
+If Redis comes back from an older copy of its data, session records may reference entries newer than that copy. The
+behaviour is not verified.
 
 ## Secrets to back up separately
 

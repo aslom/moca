@@ -70,7 +70,7 @@ period is only an outer bound. Practically:
 
 No procedure is documented. Mechanically, re-running `setup.sh` with an older `--image` rolls the Deployments back,
 and plain `kubectl rollout undo` also works. Redis data is not versioned, so a rollback across a data-format change
-is untested. Take a snapshot first if the release notes mention a change.
+is untested.
 
 ## Availability during a node drain
 
