@@ -1,5 +1,8 @@
 # Single-VM deployment (P6 process-manager runtime)
 
+> **Preview.** The single-VM deployment is implemented but not yet declared Stable; interfaces and limits may
+> change. Known gaps (no Redis persistence by default, no upgrade or backup guide): [Maturity and lifecycle](../../docs/reference/maturity-and-lifecycle.md).
+
 Round one's target for the VM process-manager runtime (spec §4.3, §4.4, step 4): a single
 Linux VM running the supervisor, the relay and the MU1 control plane under systemd, with Redis and
 the sandbox containers as podman containers alongside them. `setup-vm.sh` is the P6 counterpart of the
