@@ -39,19 +39,19 @@ Preview paths is an open decision; see [`REORG-PLAN.md`](REORG-PLAN.md), open qu
 
 ## What is in `docs/`
 
-| Location                                                      | What it is                                                             | Audience                  |
-| ------------------------------------------------------------- | ---------------------------------------------------------------------- | ------------------------- |
-| `get-started/`                                                | Install-path chooser                                                   | New users                 |
-| `migrating-from-knative.md`                                   | The single deprecation and migration page                              | Operators                 |
-| `concepts/`                                                   | How sessions, sandboxes, multiplexing, multi-user and dispatch work    | Everyone                  |
-| `reference/`                                                  | Configuration, `mocactl` commands, HTTP API guide, leaf envelope       | Operators and integrators |
-| `glossary.md`, `context-service.md`, `api/`                   | Terms and API reference                                                | Integrators               |
-| `demos/`                                                      | Guided, hand-driven walkthroughs                                       | Evaluators                |
-| `specs/` (registry: `specs/README.md`)                        | Design specs; the milestone registry is the source of truth for status | Maintainers               |
-| `adrs/`                                                       | Immutable decision records                                             | Maintainers               |
-| `notes/`                                                      | Working notes, runbooks and result write-ups                           | Maintainers               |
-| `executive-overview-leaf-session.md`, `experiment-results.md` | Dated historical write-ups (Knative-era)                               | Background                |
-| `REORG-PLAN.md`                                               | The plan this structure follows, with the audit and open questions     | Maintainers               |
+| Location                                    | What it is                                                             | Audience                  |
+| ------------------------------------------- | ---------------------------------------------------------------------- | ------------------------- |
+| `get-started/`                              | Install-path chooser                                                   | New users                 |
+| `migrating-from-knative.md`                 | The single deprecation and migration page                              | Operators                 |
+| `concepts/`                                 | How sessions, sandboxes, multiplexing, multi-user and dispatch work    | Everyone                  |
+| `reference/`                                | Configuration, `mocactl` commands, HTTP API guide, leaf envelope       | Operators and integrators |
+| `glossary.md`, `context-service.md`, `api/` | Terms and API reference                                                | Integrators               |
+| `demos/`                                    | Guided, hand-driven walkthroughs                                       | Evaluators                |
+| `specs/` (registry: `specs/README.md`)      | Design specs; the milestone registry is the source of truth for status | Maintainers               |
+| `adrs/`                                     | Immutable decision records                                             | Maintainers               |
+| `notes/`                                    | Working notes, runbooks and result write-ups                           | Maintainers               |
+| `archive/`                                  | Dated historical write-ups (Knative-era)                               | Background                |
+| `REORG-PLAN.md`                             | The plan this structure follows, with the audit and open questions     | Maintainers               |
 
 Install and operations guides live next to the scripts they describe: `deploy/compose/`,
 `deploy/vm/`, `deploy/k8s/` and `deploy/microvm/`. Operations pages are planned but do not exist yet;
