@@ -4,7 +4,7 @@
 > were run on. Commands are taken from [`docs/demos/vm-two-user-acceptance.md`](../demos/vm-two-user-acceptance.md) and
 > [`vm-multi-user-demo.md`](../demos/vm-multi-user-demo.md), which were run by one person with two GitHub accounts on
 > one laptop. Two people on two laptops was not tried. I have not re-run them. Read the
-> [multi-user concepts](../concepts/multi-user.md) first: ownership is enforced at the API, but sandboxes are not
+> [security model](../reference/security-model.md) and [multi-user concepts](../concepts/multi-user.md) first: ownership is enforced at the API, but sandboxes are not
 > isolated between users.
 
 ## Before you start
@@ -63,7 +63,8 @@
    ```
 
 5. **Optionally make an admin:** set `SH_ADMIN_SUBJECTS=github:<numeric id>` in `control-plane.env`, restart the
-   control plane, and have the user log in again. `GET /v1/me` then shows `"roles"`.
+   control plane (it reads the list only at boot). The role reaches the user on their next token refresh, within 15
+   minutes, so logging in again is not required. `GET /v1/me` shows `"roles":["admin"]` (`[]` for everyone else).
 
 ### Each user, on their laptop
 
@@ -149,10 +150,12 @@ yours` and exits 1.
 
 ```bash
 mocactl sessions [--json]            # every session you own
-mocactl sessions delete ID [--json]  # also drops the local history; status "deleted", or "accepted" if a turn was in flight
+mocactl sessions delete ID [--json]  # also drops the local history
 ```
 
-Deleting a session also removes its log and any stored leaf result. In the TUI it is `ctrl+x l`, then `d`.
+Deleting a session also removes its log and any stored leaf result. The text output is `deleted session ID`, or
+`deleting session ID; the control plane finishes in the background` if a turn was in flight (`--json` reports
+`status` as `deleted` or `accepted`). In the TUI it is `ctrl+x l`, then `d`.
 
 **An admin can list another user's sessions** with the `?owner=` query on `GET /v1/sessions`; a non-admin gets 403. An
 admin still cannot read, delete or mint a token for another user's session. `mocactl` has no `--owner` option, so use the
@@ -173,18 +176,18 @@ mocactl run --new --option sandboxTier=microvm "In your sandbox: ..."
 ```
 
 `--option` is ignored when resuming. The tier is fixed for the session's life and never crosses tiers. With several tiers
-and no choice, the server default applies. The container tier has network access and a shared `/workspace`; the microVM
-tier has no network and a per-session workspace ([Sandboxes and tiers](../concepts/sandboxes-and-tiers.md)).
+and no choice, the server default applies. The container tier has network access and per-session directories under one `/workspace`, which are not isolated from
+each other; the microVM tier has no network ([Sandboxes and tiers](../concepts/sandboxes-and-tiers.md)).
 
 ## 5. Revoke access
 
-| To remove...               | Do this                                                                                                                                                     |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| One login                  | `mocactl logout` ends this login on the server and deletes the local file. `mocactl logout --all` ends all of that user's logins                            |
-| A credential               | `mocactl credentials delete NAME`. A session on a deleted credential has its next turn refused                                                              |
-| Admin rights               | Remove the subject from `SH_ADMIN_SUBJECTS`; it takes effect within the 15-minute API token lifetime                                                        |
-| A user's network path      | Close their tunnel (`ssh -S ~/.ssh/moca-tunnel -O exit <account>@<vm>`), `sudo userdel -r <account>`, remove their `Match` block, then `sshd -t` and reload |
-| Their GitHub authorization | The user revokes the app under Settings, Applications, Authorized OAuth Apps. The control plane keeps no GitHub token                                       |
+| To remove...               | Do this                                                                                                                                                                  |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| One login                  | `mocactl logout` ends this login on the server and deletes the local file. `mocactl logout --all` ends all of that user's logins                                         |
+| A credential               | `mocactl credentials delete NAME`. A session on a deleted credential has its next turn refused                                                                           |
+| Admin rights               | Remove the subject from `SH_ADMIN_SUBJECTS` and restart the control plane (it reads the list only at boot); it then takes effect within the 15-minute API token lifetime |
+| A user's network path      | Close their tunnel (`ssh -S ~/.ssh/moca-tunnel -O exit <account>@<vm>`), `sudo userdel -r <account>`, remove their `Match` block, then `sshd -t` and reload              |
+| Their GitHub authorization | The user revokes the app under Settings, Applications, Authorized OAuth Apps. The control plane keeps no GitHub token                                                    |
 
 API tokens last 15 minutes and are never revoked, so a logged-out client can keep calling the control plane until its
 token expires. An already-open SSH tunnel keeps its rights until it closes.
@@ -196,8 +199,8 @@ file by hand.
 ## What this does not give you
 
 - **Ownership holds at the API only.** Redis and port 8081 are unauthenticated.
-- **Users share the container sandboxes**, their `/workspace`, their Unix user and the process list, until owner
-  binding lands. The microVM tier has no network but also no grant binding.
+- **Users share the container sandboxes**, their Unix user, filesystem and process list, until owner binding lands.
+  Each session has its own directory under `/workspace`, but the directories are not isolated from each other. The microVM tier has no network but also no grant binding.
 - **A user's inference key reaches the shared harness process** for the length of a turn (direct mode). It never reaches
   the sandbox.
 - **Egress is open** from container sandboxes, including to cloud metadata (require IMDSv2 with a hop limit of 1).

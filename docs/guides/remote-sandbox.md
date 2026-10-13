@@ -5,7 +5,8 @@
 > P6: extra container sandboxes on the same host or cluster, and a microVM host attached to an OpenShift relay. Running
 > a container sandbox on an unrelated host against a P6 relay is not documented anywhere; the recipe in step 2 is
 > assembled from the pieces and **has not been run**. Read [Sandboxes and tiers](../concepts/sandboxes-and-tiers.md) and
-> the [multi-user isolation notes](../concepts/multi-user.md#isolation-between-users-today) first: a sandbox you attach joins the
+> the [security model](../reference/security-model.md#isolation-by-tier) and the
+> [multi-user isolation notes](../concepts/multi-user.md#isolation-between-users-today) first: a sandbox you attach joins the
 > shared pool and is not bound to any user.
 
 ## What the worker needs
@@ -32,8 +33,9 @@ rejected.
 
 - **Underscore ids** (`^[A-Za-z_][A-Za-z0-9_]*$`, for example `byo_1`) can have their own token, because the id becomes an
   environment variable name.
-- **Dashed ids** (such as `sh-sandbox-0`) cannot, because systemd drops dashed names; they use the global
-  `SH_RELAY_TOKEN` or a token-directory file.
+- **Dashed ids** (such as `sh-sandbox-0`) are never looked up in the token directory. They use
+  `SH_RELAY_TOKEN_<id>` where the environment can carry a dashed name (not under systemd, which drops such names, so
+  not on the VM or a microVM host), otherwise the global `SH_RELAY_TOKEN`.
 - The exec token (`MOCA_RELAY_EXEC_TOKEN`) is a different secret, must differ from every sandbox token, and must never be
   given to a sandbox. The name `DIR` is reserved.
 
@@ -66,7 +68,9 @@ sudo podman exec sh-redis redis-cli HKEYS sh:sandbox:records            # VM; us
 sudo podman exec sh-redis redis-cli HGET sh:sandbox:records byo_1
 ```
 
-A tiered record carries the label `moca.dev/tier`. Stopping the worker clears the record without any manual deletion.
+A tiered record carries the label `moca.dev/tier`. The label only narrows placement when the tier is declared in
+`SH_SANDBOX_TIERS` on both the supervisor and the control plane and the session picks it (`--option sandboxTier=...`);
+with no tiers declared, labels are ignored. See [choosing a tier](manage-multi-user-sessions.md#4-choose-a-sandbox-tier). Stopping the worker clears the record without any manual deletion.
 Relay-side, the relay logs presence-write retries and token problems (`relay token for <id> unreadable`); see
 [Observability](../operations/observability.md#logs).
 
