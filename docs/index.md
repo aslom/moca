@@ -28,6 +28,7 @@ P6 on Kubernetes; the criteria, the status of each path and the support policy a
 | Pick an install path and run MOCA   | [Get started](get-started/index.md)                                                                                                                                                       |
 | Run MOCA for the first time         | [First run](get-started/first-run.md)                                                                                                                                                     |
 | Leave the Knative/KEDA deployment   | [Migrating off the Knative/KEDA deployment](migrating-from-knative.md)                                                                                                                    |
+| Understand the security model       | [Security model](reference/security-model.md); [hardening checklist](operations/hardening.md)                                                                                             |
 | Operate P6 on Kubernetes            | [Operations](operations/index.md)                                                                                                                                                         |
 | Understand how it works             | [Concepts](concepts/index.md)                                                                                                                                                             |
 | See the terms MOCA uses             | [Glossary](glossary.md)                                                                                                                                                                   |
@@ -59,4 +60,4 @@ P6 on Kubernetes; the criteria, the status of each path and the support policy a
 
 Install guides live next to the scripts they describe: `deploy/compose/`, `deploy/vm/`, `deploy/k8s/` and
 `deploy/microvm/`. Day-two operations for P6 on Kubernetes are in [`operations/`](operations/index.md); the
-security model and hardening guide are still to come (see [`REORG-PLAN.md`](REORG-PLAN.md)).
+[security model](reference/security-model.md) and [hardening checklist](operations/hardening.md) cover the rest.

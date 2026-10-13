@@ -5,13 +5,14 @@
 > something is not documented anywhere in the repository, the page says so rather than guessing. Single-VM and
 > Compose notes appear only where they differ.
 
-| Page                                                  | Covers                                                                                    |
-| ----------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| [Upgrades](upgrades.md)                               | Re-running `setup.sh`, image pinning, rollout behaviour, version skew, rollback           |
-| [Redis backup and recovery](redis-backup-recovery.md) | What lives in Redis, what a loss costs, which secrets to back up separately, key rotation |
-| [Observability](observability.md)                     | Health endpoints, the JSON metrics, probes, log lines, the audit stream                   |
-| [Sizing and scaling](sizing-and-scaling.md)           | Resource defaults, workers and turns per worker, replicas, sandbox capacity               |
-| [Troubleshooting](troubleshooting.md)                 | Symptom, cause, check and fix                                                             |
+| Page                                                  | Covers                                                                                     |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| [Upgrades](upgrades.md)                               | Re-running `setup.sh`, image pinning, rollout behaviour, version skew, rollback            |
+| [Redis backup and recovery](redis-backup-recovery.md) | What lives in Redis, what a loss costs, which secrets to back up separately, key rotation  |
+| [Observability](observability.md)                     | Health endpoints, the JSON metrics, probes, log lines, the audit stream                    |
+| [Sizing and scaling](sizing-and-scaling.md)           | Resource defaults, workers and turns per worker, replicas, sandbox capacity                |
+| [Hardening](hardening.md)                             | A checklist per deployment path, from the [security model](../reference/security-model.md) |
+| [Troubleshooting](troubleshooting.md)                 | Symptom, cause, check and fix                                                              |
 
 ## Gaps you should know about
 
