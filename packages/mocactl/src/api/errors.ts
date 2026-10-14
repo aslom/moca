@@ -50,6 +50,11 @@ export async function errorFromResponse(source: ErrorSource, res: Response): Pro
   );
 }
 
+// Node's fetch reports every transport failure as `TypeError: fetch failed`; the cause tells a
+// peer that was never reached (refused, DNS) from a connection that was open and then closed under
+// the request, which is what a proxy's idle timeout does.
+const CLOSED_CAUSES = new Set(['UND_ERR_SOCKET', 'ECONNRESET', 'EPIPE']);
+
 export function networkError(source: ErrorSource, err: unknown): ApiError {
   const message = err instanceof Error ? err.message : String(err);
   // undici attaches the real socket-layer error on `.cause`; its `.code` is how we tell
@@ -65,7 +70,15 @@ export function networkError(source: ErrorSource, err: unknown): ApiError {
   // undici's top-level message is just "fetch failed"; fold the cause code in so the
   // operator can tell why.
   const detail = causeCode ? `${message} (${causeCode})` : message;
-  return new ApiError(source, 0, 'network_error', detail, undefined, causeCode);
+  const closed = causeCode !== undefined && CLOSED_CAUSES.has(causeCode);
+  return new ApiError(
+    source,
+    0,
+    closed ? 'connection_dropped' : 'network_error',
+    detail,
+    undefined,
+    causeCode,
+  );
 }
 
 export const TOKEN_CODES: ReadonlySet<string> = new Set([
