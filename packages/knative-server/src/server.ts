@@ -873,12 +873,12 @@ async function resolveRunWorkload(
     res.writeHead(workload.status, JSON_HEADERS).end(JSON.stringify({ error: workload.error }));
     return null;
   }
-  const { contextName, revision, ownerScope } = workload;
+  const { contextName, revision, cacheScope } = workload;
   return {
     ...body,
     internalContext: {
       revision,
-      ownerScope,
+      cacheScope,
       loadBundle: () => downloadContextBundle(contextName, revision, owner),
     },
   };
@@ -890,7 +890,6 @@ async function handleEnqueueLeafParsed(body: any, res: ServerResponse): Promise<
     return;
   }
   if (rejectInvalidConfigRef(body, res)) return;
-  if (body.workloadId !== undefined) return rejectWorkloadRun(res);
   const q = getQueue();
   await q.ensureGroup();
   await q.enqueue(body);
@@ -1105,6 +1104,8 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
       }
 
       if (parsed && parsed.async === true) {
+        // Before the gate below, so every asynchronous run naming a workload gets the same answer.
+        if (parsed.workloadId !== undefined) return rejectWorkloadRun(res);
         if (deps.requireAuth || auth) {
           // Running it later on its caller's credential would mean storing a bearer in the queue
           // (MI1 §6.5); running it on the ambient credential would spend the operator's key for a

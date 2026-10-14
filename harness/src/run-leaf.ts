@@ -107,8 +107,11 @@ export interface LeafEnvelope {
    */
   internalContext?: {
     revision: string;
-    /** Opaque per-owner namespace (32 hex chars) that keeps each user's sandbox cache separate. */
-    ownerScope: string;
+    /**
+     * Opaque, unguessable per-owner name (32 hex chars) for this user's copies in the sandbox's
+     * context cache. Not the scope of the owner's workload records in Redis.
+     */
+    cacheScope: string;
     /** Fetches the frozen bundle; called only when the selected sandbox lacks the revision. */
     loadBundle: () => Promise<Buffer>;
   };
@@ -450,10 +453,10 @@ async function runPromptLeaf(
       }, promptTimings.heartbeatMs);
     }
     if (env.internalContext) {
-      const { revision, ownerScope, loadBundle } = env.internalContext;
+      const { revision, cacheScope, loadBundle } = env.internalContext;
       if (
         !/^[a-f0-9]{64}$/.test(revision) ||
-        !/^[a-f0-9]{32}$/.test(ownerScope) ||
+        !/^[a-f0-9]{32}$/.test(cacheScope) ||
         typeof loadBundle !== 'function'
       ) {
         return { status: 'failed', reason: 'error', message: 'invalid internal context reference' };
@@ -467,7 +470,7 @@ async function runPromptLeaf(
           message: 'a workload run requires a P6 relay sandbox',
         };
       }
-      contextKey = contextCacheKey(ownerScope, revision);
+      contextKey = contextCacheKey(cacheScope, revision);
       try {
         contextPath = await (deps?.overlayContext ?? overlayContext)(
           selected.transport,

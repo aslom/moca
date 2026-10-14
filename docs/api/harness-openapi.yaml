@@ -409,8 +409,8 @@ paths:
         never settable by an external caller. A synchronous prompt run naming a `workloadId` runs
         with that workload's frozen context, which Moca copies read-only into the sandbox; the
         session token's user must own the workload (docs/context-service.md). With workloads off,
-        or for an async run, it is refused with 501 workload_runs_unavailable rather than run on
-        the default pool.
+        or for any async run, it is refused with 501 workload_runs_unavailable rather than run on
+        the default pool; a synchronous one without a token is 401 token_required.
       security:
         - sessionToken: []
       requestBody:
@@ -464,7 +464,9 @@ paths:
             async_runs_unavailable — async: true with a token-bearing caller. Not a capability
             this deployment grants; a token-less caller on a require-auth deployment never
             reaches it (401 token_required fires first). workload_runs_unavailable — the
-            envelope named a workloadId, but workloads are off or the run is async.
+            envelope named a workloadId, but workloads are off or the run is async. It is
+            checked before async_runs_unavailable, so an async run naming a workload gets it
+            whether or not it carries a token.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -490,7 +492,10 @@ paths:
                       reason: { type: string, enum: [saturated] }
                   - $ref: '#/components/schemas/Error'
         '500':
-          description: internal_error — not retryable as-is
+          description: |
+            internal_error — not retryable as-is. workloads_misconfigured — the run named a
+            workloadId, but the operator's Context Service settings are missing or unsafe
+            (docs/context-service.md).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

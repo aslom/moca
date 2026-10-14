@@ -48,7 +48,7 @@ const env = (loadBundle: () => Promise<Buffer>): LeafEnvelope =>
     item: { item_id: 'i1', file: 'f', pattern: 'p' },
     kind: 'prompt',
     prompt: 'Inspect.',
-    internalContext: { revision: REVISION, ownerScope: SCOPE, loadBundle },
+    internalContext: { revision: REVISION, cacheScope: SCOPE, loadBundle },
   }) as LeafEnvelope;
 
 describe('frozen context on a prompt leaf', () => {

@@ -5,8 +5,13 @@ import type { SandboxTransport } from '@moca/k8s-sandbox';
  * Delivers a workload's frozen Context Service revision into a shared P6 sandbox, read-only, for one
  * run. The sandbox keeps one extracted copy per owner and revision under `cache/`; each run
  * registers a ref on it and gets its own view at `runs/<session>`. The bundle crosses the relay only
- * on a miss. Keying the cache by owner means two users never share a copy, so one user's agent
- * cannot alter what another user's run reads, even when both uploaded identical content.
+ * on a miss. Keying the cache by owner means two users never share a copy, even when both uploaded
+ * identical content. The owner's part of the key is an HMAC under a secret agents never see, so an
+ * agent cannot derive another user's key from their name and plant a copy for a revision it knows.
+ * It is not isolation: every agent runs as the same uid as these files, so it can still alter any
+ * copy it can see, and learn that copy's scope from its name. The read-only modes stop accidents,
+ * not a determined agent. Isolation between users needs separate sandboxes (rossoctl/moca#476,
+ * phase 2 workloads).
  */
 
 /**
@@ -26,14 +31,14 @@ function sq(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-const OWNER_SCOPE = /^[a-f0-9]{32}$/;
+const CACHE_SCOPE = /^[a-f0-9]{32}$/;
 const CACHE_KEY = /^[a-f0-9]{32}-[a-f0-9]{64}$/;
 
-/** The sandbox cache key for one owner's revision: `<owner scope>-<revision>`. */
-export function contextCacheKey(ownerScope: string, revision: string): string {
-  if (!OWNER_SCOPE.test(ownerScope)) throw new Error('invalid context owner scope');
+/** The sandbox cache key for one owner's revision: `<cache scope>-<revision>`. */
+export function contextCacheKey(cacheScope: string, revision: string): string {
+  if (!CACHE_SCOPE.test(cacheScope)) throw new Error('invalid context cache scope');
   if (!SHA256.test(revision)) throw new Error('invalid context revision');
-  return `${ownerScope}-${revision}`;
+  return `${cacheScope}-${revision}`;
 }
 
 function cacheKeyValue(key: string): string {
@@ -56,6 +61,16 @@ function sessionValue(sessionId: string): string {
 export function contextRetainMinutes(env: NodeJS.ProcessEnv = process.env): number {
   const parsed = Number.parseInt(env.MOCA_CONTEXT_SANDBOX_RETAIN_MINUTES ?? '0', 10);
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
+}
+
+/**
+ * Most entries a bundle may hold, `MOCA_CONTEXT_BUNDLE_MAX_ENTRIES`, default 10000 (Context
+ * Service's own upload limit). Moca already bounds the bytes a bundle inflates to; this bounds the
+ * inodes its extraction takes on a disk that several users share.
+ */
+export function contextMaxEntries(env: NodeJS.ProcessEnv = process.env): number {
+  const parsed = Number.parseInt(env.MOCA_CONTEXT_BUNDLE_MAX_ENTRIES ?? '', 10);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 10_000;
 }
 
 export function contextCacheDir(key: string): string {
@@ -136,15 +151,24 @@ export function buildContextAcquireScript(
 }
 
 /**
- * Verify the assembled upload against the digest Moca computed, extract it outside the lock into a
- * private staging dir beside the cache, make it read-only, then publish it with one same-directory
- * rename under the lock. A concurrent run that published first wins and this copy is discarded, so
- * a published revision is never partial.
+ * Verify the assembled upload against the digest Moca computed (transport integrity: the bytes are
+ * the ones Moca sent), refuse it when it holds more than `maxEntries` entries, extract it outside the
+ * lock into a private staging dir beside the cache, make it read-only, then publish it with one
+ * same-directory rename under the lock. A concurrent run that published first wins and this copy is
+ * discarded, so a published revision is never partial.
  */
-export function buildContextPopulateScript(key: string, sessionId: string, sha256: string): string {
+export function buildContextPopulateScript(
+  key: string,
+  sessionId: string,
+  sha256: string,
+  maxEntries = contextMaxEntries(),
+): string {
   const rev = cacheKeyValue(key);
   const sid = sessionValue(sessionId);
   if (!SHA256.test(sha256)) throw new Error('invalid context bundle digest');
+  if (!Number.isSafeInteger(maxEntries) || maxEntries <= 0) {
+    throw new Error('invalid context bundle entry limit');
+  }
   return [
     'set -euo pipefail',
     '# CONTEXT_POPULATE',
@@ -153,6 +177,7 @@ export function buildContextPopulateScript(key: string, sessionId: string, sha25
     `STAGE=${sq(`${BASE}/cache/.stage.${rev}.${sid}`)}`,
     `trap 'chmod -R u+w "$STAGE" 2>/dev/null || true; rm -rf "$STAGE" "$ARCHIVE"' EXIT`,
     `printf '%s  %s\\n' ${sq(sha256)} "$ARCHIVE" | sha256sum -c --status`,
+    `ENTRIES="$(tar -tzf "$ARCHIVE" | wc -l)"; [ "$ENTRIES" -le ${maxEntries} ] || { echo "context bundle has $ENTRIES entries, over ${maxEntries}" >&2; exit 1; }`,
     'chmod -R u+w "$STAGE" 2>/dev/null || true; rm -rf "$STAGE"; mkdir -p "$STAGE"',
     'tar -xzf "$ARCHIVE" --no-same-owner --no-same-permissions -C "$STAGE"',
     'find "$STAGE" -type d -exec chmod 0555 {} +',
@@ -168,7 +193,9 @@ export function buildContextPopulateScript(key: string, sessionId: string, sha25
 /**
  * Expose one frozen revision read-only to this run and return the path of its view. `loadBundle`
  * is called only when the sandbox lacks the revision; the bytes then go over SandboxExec stdin in
- * chunks and are checked against their sha256 in the sandbox before anything is extracted.
+ * chunks and are checked against their sha256 in the sandbox before anything is extracted. That
+ * check proves the copy is intact, not which revision it is: Moca trusts Context Service's
+ * authenticated export for that.
  *
  * The transport must be a P6 relay transport, whose stdin is binary-safe.
  */
