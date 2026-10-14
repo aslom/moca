@@ -174,12 +174,19 @@ to every run on it ([`docs/context-service.md`](../../docs/context-service.md)).
 file with `contextctl` (`mocactl` never calls it), then:
 
 ```bash
-contextctl ctx export ... -o ctx.context
+contextctl ctx pack ./repo --type workspace -o ctx.context
 id=$(mocactl workloads create --context ctx.context --name demo)
 sid=$(mocactl spawn "summarize the repo in the context" --kind prompt --workload "$id")
 mocactl get "$sid"                          # once `mocactl subagents` says done
 mocactl workloads delete "$id"
 ```
+
+`ctx pack` puts the directory's files under the bundle's `workspace/` directory. It needs a Context
+Service version that has `pack` (coming in a Context Service PR). A run starts in its context: the
+agent's working directory shows the bundle's `workspace/` directory (`src/`, not `workspace/src/`),
+or the whole bundle when it has none. A read-only run gets the session's own directory,
+`/workspace/<session>`, as writable scratch space. See "Runs" in
+[`docs/context-service.md`](../../docs/context-service.md).
 
 `workloads create` creates the workload (`POST /workloads` on the harness, with your API token),
 uploads the file straight to Context Service with the one-time grant it returns, then activates the
@@ -202,10 +209,11 @@ status). A workload that stops being ready after that fails the run (`workload_n
 `workload_not_found`), as `mocactl subagents` then shows.
 
 `spawn --workload ID --writable` gives the run its own writable copy of the context instead, for a
-subagent that edits files or reruns tests. The copy is discarded when the run ends, so ask the
-subagent to return its changes (a diff, test output) in its answer. It sends `contextWritable: true`
-and records `writable` in the ledger row, which `mocactl subagents --json` shows as `"writable": true`
-on that row only. `--writable` without `--workload` exits `2`.
+subagent that edits files or reruns tests. The copy is the run's working directory and is discarded
+when the run ends, so ask the subagent to return its changes (a diff, test output) in its answer. It
+sends `contextWritable: true` and records `writable` in the ledger row, which
+`mocactl subagents --json` shows as `"writable": true` on that row only. `--writable` without
+`--workload` exits `2`.
 
 ### Output
 

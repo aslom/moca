@@ -516,15 +516,20 @@ async function runPromptLeaf(
         };
       }
     }
+    // A workload run starts in its context, as a solve leaf starts in its worktree. The session's
+    // own directory stays the scratch space the note points a read-only run at.
+    const turnConfig =
+      contextPath && selected ? { ...selected.config, podCwd: contextPath } : selected?.config;
     const r: TurnResult = await exec({
-      prompt: contextPath
-        ? `${env.prompt}\n\n${contextNote(contextPath, env.internalContext?.writable === true)}`
-        : env.prompt,
+      prompt:
+        contextPath && selected
+          ? `${env.prompt}\n\n${contextNote(contextPath, env.internalContext?.writable === true, selected.config.podCwd)}`
+          : env.prompt,
       sessionId: env.sessionId,
       config,
       createIfAbsent: true,
       selection,
-      sandbox: { config: selected?.config ?? null, transport: selected?.transport },
+      sandbox: { config: turnConfig ?? null, transport: selected?.transport },
       ...(attached ? { promotedConfig: attached.promotedConfig } : {}),
     });
     if (r.stopReason === 'aborted') return { status: 'aborted' };
@@ -556,13 +561,17 @@ async function runPromptLeaf(
   }
 }
 
-/** The line appended to a workload run's prompt that tells the agent where its context is. */
-export function contextNote(path: string, writable: boolean): string {
+/**
+ * The note appended to a workload run's prompt: the run starts in its context at `path`, and a
+ * read-only run writes to `scratch`, the session's own directory.
+ */
+export function contextNote(path: string, writable: boolean, scratch: string): string {
   return writable
-    ? `The workload's context is copied to ${path} for this run. The copy is writable and is ` +
-        'discarded when the run ends, so return any changes you make, such as a diff or test ' +
-        'output, in your response.'
-    : `The workload's frozen context is available read-only at ${path}.`;
+    ? `Your working directory, ${path}, is a writable copy of the workload's context. It is ` +
+        'discarded when the run ends, so return your changes, such as a diff or test output, in ' +
+        'your response.'
+    : `Your working directory, ${path}, is the workload's read-only context. Use ${scratch} as ` +
+        'writable scratch space.';
 }
 
 // Real solve runner: lease a sandbox, converge the per-leaf worktree, run the agent with ONLY the

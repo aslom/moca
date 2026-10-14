@@ -4,9 +4,10 @@ import type { SandboxTransport } from '@moca/k8s-sandbox';
 /**
  * Delivers a workload's frozen Context Service revision into a shared P6 sandbox, read-only, for one
  * run. The sandbox keeps one extracted copy per owner and revision under `cache/`; each run
- * registers a ref on it and gets its own view at `runs/<session>`. The bundle crosses the relay only
- * on a miss. A writable run gets its own copy of the cached revision there instead of a link, which
- * it may change and which cleanup removes; the cached copy stays read-only. Keying the cache by
+ * registers a ref on it and gets its own view at `runs/<session>`, rooted at the revision's
+ * `workspace/` directory when it has one and at the whole revision otherwise. The bundle crosses
+ * the relay only on a miss. A writable run gets its own copy of that root there instead of a link,
+ * which it may change and which cleanup removes; the cached copy stays read-only. Keying the cache by
  * owner means two users never share a copy, even when both uploaded identical content. The owner's
  * part of the key is an HMAC under a secret agents never see, so an agent cannot derive another
  * user's key from their name and plant a copy for a revision it knows.
@@ -87,6 +88,15 @@ const uploadPath = (rev: string, sid: string) => `${BASE}/incoming/${rev}.${sid}
 const writableStage = (sid: string) => `${BASE}/runs/.stage.${sid}`;
 
 /**
+ * Set `SRC` to the directory a run's view shows: the revision's `workspace/` directory when it has
+ * one (Context Service packs a directory's plain files there), else the whole revision. Only a real
+ * directory counts: `[ -d ]` follows links, so a bundled `workspace` link is never followed out of
+ * the cache.
+ */
+const VIEW_SOURCE =
+  'SRC="$CACHE"; if [ -d "$CACHE/workspace" ] && [ ! -L "$CACHE/workspace" ]; then SRC="$CACHE/workspace"; fi';
+
+/**
  * Remove revisions that no live run references and no run used within the retention window, plus
  * anything a dead harness abandoned. Runs inside the caller's flock, so it cannot race the ref an
  * acquire writes. Dot-prefixed staging dirs are invisible to the `cache/*` glob.
@@ -153,7 +163,7 @@ export function buildContextAcquireScript(
     `  mkdir -p "${BASE}/refs/${rev}"`,
     `  : > "${BASE}/refs/${rev}/${sid}"`,
     `  touch "${BASE}/used/${rev}"`,
-    '  if [ -d "$CACHE" ]; then ln -sfn "$CACHE" "$ROOT"; printf hit; else printf miss; fi',
+    `  if [ -d "$CACHE" ]; then ${VIEW_SOURCE}; ln -sfn "$SRC" "$ROOT"; printf hit; else printf miss; fi`,
     `) 9>"${LOCK}"`,
   ].join('\n');
 }
@@ -194,7 +204,8 @@ export function buildContextPopulateScript(
     '(',
     '  flock 9',
     '  [ -d "$CACHE" ] || mv "$STAGE" "$CACHE"',
-    '  ln -sfn "$CACHE" "$ROOT"',
+    `  ${VIEW_SOURCE}`,
+    '  ln -sfn "$SRC" "$ROOT"',
     `) 9>"${LOCK}"`,
   ].join('\n');
 }
@@ -216,8 +227,9 @@ export function buildContextWritableScript(key: string, sessionId: string): stri
     `STAGE=${sq(writableStage(sid))}`,
     `trap 'chmod -R u+w "$STAGE" 2>/dev/null || true; rm -rf "$STAGE"' EXIT`,
     '[ -d "$CACHE" ]',
+    VIEW_SOURCE,
     'chmod -R u+w "$STAGE" 2>/dev/null || true; rm -rf "$STAGE"',
-    'cp -a "$CACHE" "$STAGE"',
+    'cp -a "$SRC" "$STAGE"',
     'chmod -R u+w "$STAGE"',
     'touch "$STAGE"',
     // `rm -rf` on the link removes only the link, never the cached copy it points at.
