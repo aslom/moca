@@ -3,7 +3,7 @@ import { spawn as spawnChild } from 'node:child_process';
 import { writeFileSync, mkdirSync, existsSync, openSync, closeSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ApiError } from './api/errors.js';
-import { validWorkloadId } from './api/workloads.js';
+import { validWorkloadId, WorkloadsClient } from './api/workloads.js';
 import type { ControlPlaneApi, CreateSessionRequest } from './api/types.js';
 import { describeError } from './core/messages.js';
 import { sanitizeRemote } from './core/sanitize.js';
@@ -16,6 +16,7 @@ import {
 } from './core/subagent-ledger.js';
 import type { Io } from './headless.js';
 import type { Runtime } from './runtime.js';
+import { describeWorkloadError } from './workloads.js';
 import {
   DEFAULT_UNKNOWN_GRACE_MS,
   LeafTransport,
@@ -75,6 +76,8 @@ export interface SpawnOptions {
   tag?: string;
   /** A ready workload whose context the run sees; prompt runs only (the harness refuses others). */
   workloadId?: string;
+  /** Give the run its own writable copy of the workload's context (`--writable`). */
+  writable?: boolean;
   json: boolean;
   /** Test seams: fork + ledger injection. */
   forkFn?: (
@@ -84,6 +87,8 @@ export interface SpawnOptions {
     cwd: string,
   ) => number | Promise<number>;
   ledger?: Ledger;
+  /** Test seam for the `--workload` preflight; otherwise built from the runtime. */
+  workloads?: Pick<WorkloadsClient, 'get'>;
 }
 
 /** Create session, record it, fork a detached worker, return. Worker survives mocactl exit. */
@@ -112,6 +117,12 @@ export async function cmdSpawn(rt: Runtime, io: Io, opts: SpawnOptions): Promise
     io.err('--repo and --ref are only meaningful with --kind solve');
     return 2;
   }
+  if (opts.writable && opts.workloadId === undefined) {
+    io.err(
+      "--writable needs --workload ID: it gives the run a writable copy of a workload's context",
+    );
+    return 2;
+  }
   if (opts.workloadId !== undefined) {
     if (opts.kind !== 'prompt') {
       io.err('--workload needs --kind prompt: the harness runs only prompts on a workload');
@@ -120,6 +131,29 @@ export async function cmdSpawn(rt: Runtime, io: Io, opts: SpawnOptions): Promise
     if (!validWorkloadId(opts.workloadId)) {
       io.err(`invalid workload id '${sanitizeRemote(opts.workloadId)}'`);
       return 2;
+    }
+  }
+
+  // Preflight, before a session or a worker exists: a run on a workload that is missing or not
+  // ready would only fail later, in the detached worker.
+  if (opts.workloadId !== undefined) {
+    const id = sanitizeRemote(opts.workloadId);
+    try {
+      // `main` has already refreshed the API token for this command.
+      const client =
+        opts.workloads ??
+        new WorkloadsClient(rt.harness, async () => rt.auth?.apiToken, rt.fetchImpl);
+      const workload = await client.get(opts.workloadId);
+      if (workload.status !== 'ready') {
+        io.err(
+          `workload ${id} is ${sanitizeRemote(workload.status)}, not ready; ` +
+            `\`mocactl workloads get ${id}\` shows it`,
+        );
+        return 1;
+      }
+    } catch (err) {
+      io.err(describeWorkloadError(err, opts.workloadId));
+      return 1;
     }
   }
 
@@ -145,6 +179,7 @@ export async function cmdSpawn(rt: Runtime, io: Io, opts: SpawnOptions): Promise
     envelope: envelopeForLedger(opts),
     ...(opts.configRef ? { bundle: opts.configRef } : {}),
     ...(opts.workloadId ? { workloadId: opts.workloadId } : {}),
+    ...(opts.writable ? { writable: true } : {}),
     ...(opts.repoUrl ? { repoUrl: opts.repoUrl } : {}),
     ...(opts.ref ? { ref: opts.ref } : {}),
     submittedAt: rt.now(),
@@ -202,6 +237,7 @@ function buildEnvelope(sessionId: string, opts: SpawnOptions): LeafEnvelope {
       ...base,
       prompt: opts.prompt,
       ...(opts.workloadId ? { workloadId: opts.workloadId } : {}),
+      ...(opts.writable ? { contextWritable: true } : {}),
     };
   }
   return { ...base, problemStatement: opts.prompt, repoUrl: opts.repoUrl!, ref: opts.ref! };
@@ -215,6 +251,7 @@ function envelopeForLedger(opts: SpawnOptions): LedgerEnvelope {
     ...(opts.ref ? { ref: opts.ref } : {}),
     ...(opts.configRef ? { configRef: opts.configRef } : {}),
     ...(opts.workloadId ? { workloadId: opts.workloadId } : {}),
+    ...(opts.writable ? { contextWritable: true } : {}),
   };
 }
 
@@ -462,6 +499,8 @@ export async function cmdSubagents(rt: Runtime, io: Io, opts: SubagentsOptions):
           detail: view.detail ?? null,
           bundle: record.bundle ?? null,
           workload: record.workloadId ?? null,
+          // Only on `spawn --writable` rows, so the shape of every other row is unchanged.
+          ...(record.writable ? { writable: true } : {}),
           submittedAt: record.submittedAt,
         })),
       }) + '\n',

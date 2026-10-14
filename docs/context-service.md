@@ -23,7 +23,7 @@ Context Service:
 3. **Activate:** `POST /workloads/{id}/activate` names the uploaded revision; Context Service freezes
    it.
 4. **Run:** a synchronous `POST /runs` with a `workloadId` runs the prompt on a shared sandbox with
-   the workload's frozen revision available read-only.
+   the workload's frozen revision available read-only, or as a writable copy for that run.
 5. **Delete:** `DELETE /workloads/{id}` deletes the Context, then the workload.
 
 `mocactl` is the client for this flow
@@ -92,8 +92,8 @@ drops its cached bundles. Downloads in flight share a byte budget: each reserves
 the export timeout for budget to come free. A bundle over the size ceiling, that inflates past the
 expanded ceiling, or with an incomplete gzip stream is refused and never cached. The harness copies
 the raw bytes over SandboxExec in 8 MiB chunks, checks their sha256 in the sandbox, refuses an
-archive with more entries than the entry limit, extracts it read-only (directories `0555`, files
-`0444`) and publishes the revision atomically under `flock`.
+archive with more entries than the entry limit, extracts it read-only (write permission removed;
+directories stay traversable and executable files keep their exec bit) and publishes the revision atomically under `flock`.
 The run gets its own view at `/workspace/.moca-context/runs/<session>`, and the prompt tells the
 agent that path. Each user's copy is cached separately, so two users never share one, even for
 identical content. Only P6 sandboxes (Moca's long-running sandbox workers, reached through the
@@ -104,6 +104,17 @@ Moca downloaded. It does not prove they are the pinned revision. A Context Servi
 digest of the Context's files (their paths, checksums and sizes), not of the compressed bundle, and
 the bundle carries no record from which Moca could recompute it exactly. Moca trusts Context
 Service's authenticated export for the revision's identity.
+
+**Writable copies.** A run that also sets `"contextWritable": true` gets its own writable copy of
+the revision instead of a read-only view, for tasks that edit files, rerun tests or build. The
+harness first places the revision in the sandbox's read-only cache as usual, then copies it
+(`cp -a`) into a staging directory, makes the copy writable for the agent, and renames it into
+place, so the run's path is a real directory, never a partial one. The cached copy stays read-only
+and is shared, ref-counted and swept as for any other run. The prompt tells the agent the copy is
+writable and is discarded when the run ends, so the agent should return any changes, such as a diff
+or test output, in its response. Exec bits survive the copy, so a bundled `./test.sh` runs as is.
+`contextWritable` must be a boolean (`400 context_writable_invalid`), and `true` needs a
+`workloadId` (`400 context_writable_requires_workload`); `false` is ignored.
 
 Read-only is enforced by file permissions only: the agent runs as the same user as the files and
 could change them. Each user's copy is its own, under a cache name derived with an HMAC under a
@@ -117,7 +128,9 @@ Contexts and sandbox caches are per user. The sandboxes themselves are shared, t
 a security boundary between users: tasks from different users can run on the same sandbox, as the
 same Linux user, one after another. Per-user sandboxes come with #476.
 
-After the run, its view is removed and, by default, so is any revision no run still uses. Shared
+After the run, its view, or its writable copy, is removed and, by default, so is any revision no
+run still uses. A writable copy left by a harness that died is swept a day later, as abandoned
+uploads are. Shared
 sandboxes serve several users, so a user's context should not stay on them for the next user's
 task. `MOCA_CONTEXT_SANDBOX_RETAIN_MINUTES` keeps unused revisions longer, which saves a transfer
 for repeated runs at the cost of leaving that context on the sandbox for the period.
@@ -157,6 +170,10 @@ Context's owner.
 | `MOCA_CONTEXT_SANDBOX_RETAIN_MINUTES`    | Minutes an unused revision stays on a sandbox, default `0`              |
 
 A missing token or an unsafe public URL answers `500 workloads_misconfigured`.
+
+A writable run keeps the cached revision and its own copy, so it takes up to twice the expanded
+limit on the sandbox's disk while it runs, plus what the agent writes. There is no separate limit
+for it.
 
 The entry limit matches Context Service's upload limit. The expanded limit is a quarter above
 Context Service's 1 GiB, because it also counts tar headers and padding. The download budget must

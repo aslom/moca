@@ -1,6 +1,16 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -9,6 +19,7 @@ import {
   buildContextAcquireScript,
   buildContextCleanupScript,
   buildContextPopulateScript,
+  buildContextWritableScript,
   CONTEXT_CHUNK_BYTES,
   contextCacheDir,
   contextCacheKey,
@@ -52,7 +63,7 @@ describe('P6 context overlay', () => {
     expect(populate).toContain(createHash('sha256').update(bundle).digest('hex'));
     expect(populate).toContain('sha256sum -c --status');
     expect(populate).toContain('tar -xzf "$ARCHIVE" --no-same-owner --no-same-permissions');
-    expect(populate).toContain('chmod 0444');
+    expect(populate).toContain('chmod -R u+rX,a-w "$STAGE"');
     expect(populate).toContain('[ -d "$CACHE" ] || mv "$STAGE" "$CACHE"');
   });
 
@@ -190,7 +201,8 @@ describe('P6 context overlay', () => {
 
   it('cleanup drops only this run and sweeps unreferenced caches past retention', () => {
     const script = buildContextCleanupScript(revision, 'run-1', 0);
-    expect(script).toContain("rm -f '/workspace/.moca-context/runs/run-1'");
+    expect(script).toContain("ROOT='/workspace/.moca-context/runs/run-1'");
+    expect(script).toContain('rm -rf "$ROOT"');
     expect(script).toContain(`rm -f "/workspace/.moca-context/refs/${revision}/run-1"`);
     expect(script).toContain('ls -A "/workspace/.moca-context/refs/$REV"');
     expect(script).toContain('-mmin -0');
@@ -211,5 +223,108 @@ describe('P6 context overlay', () => {
     const release = script.indexOf(`refs/${revision}/run-1`);
     expect(lock).toBeLessThan(release);
     expect(release).toBeLessThan(script.indexOf('rm -rf "$DIR"'));
+  });
+
+  it('a writable run copies the revision after binding it, on a hit and on a miss', async () => {
+    const hit = vi.fn().mockResolvedValue(ok('hit'));
+    await overlayContext({ exec: hit } as never, revision, 'run-w', vi.fn(), { writable: true });
+    expect(hit.mock.calls.map(([script]) => script.split('\n')[1])).toEqual([
+      '# CONTEXT_ACQUIRE',
+      '# CONTEXT_WRITABLE_COPY',
+    ]);
+
+    const miss = vi.fn().mockResolvedValueOnce(ok('miss')).mockResolvedValue(ok());
+    await overlayContext({ exec: miss } as never, revision, 'run-w', async () => Buffer.from('x'), {
+      writable: true,
+    });
+    expect(miss.mock.calls.map(([script]) => script.split('\n')[1])).toEqual([
+      '# CONTEXT_ACQUIRE',
+      '# CONTEXT_UPLOAD_CHUNK',
+      '# CONTEXT_POPULATE',
+      '# CONTEXT_WRITABLE_COPY',
+    ]);
+
+    // Read-only is the default.
+    const plain = vi.fn().mockResolvedValue(ok('hit'));
+    await overlayContext({ exec: plain } as never, revision, 'run-r', vi.fn());
+    expect(plain).toHaveBeenCalledTimes(1);
+  });
+
+  it('stages the writable copy and renames it into place, so it is never partial', () => {
+    const script = buildContextWritableScript(revision, 'run-w');
+    const order = [
+      'cp -a "$CACHE" "$STAGE"',
+      'chmod -R u+w "$STAGE"\n',
+      'touch "$STAGE"',
+      'rm -rf "$ROOT"',
+      'mv "$STAGE" "$ROOT"',
+    ].map((step) => script.indexOf(step));
+    expect(order.every((at) => at >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(script).toContain("STAGE='/workspace/.moca-context/runs/.stage.run-w'");
+    expect(() => buildContextWritableScript(revision, '../run')).toThrow('invalid session id');
+  });
+
+  it('in a real shell, gives the run a writable copy, leaves the cache alone, and cleans up', () => {
+    const base = mkdtempSync(join(tmpdir(), 'moca-context-writable-'));
+    const local = (script: string) => script.replaceAll('/workspace/.moca-context', base);
+    const sh = (script: string) =>
+      execFileSync('bash', ['-c', local(script)], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const cache = join(base, 'cache', revision);
+    const root = join(base, 'runs', 'run-w');
+    try {
+      mkdirSync(join(cache, 'src'), { recursive: true });
+      mkdirSync(join(base, 'runs'));
+      // Another run still references the revision, so the cleanup sweep keeps the cache.
+      mkdirSync(join(base, 'refs', revision), { recursive: true });
+      writeFileSync(join(base, 'refs', revision, 'other'), '');
+      writeFileSync(join(cache, 'src', 'a.txt'), 'frozen');
+      writeFileSync(join(cache, 'test.sh'), '#!/bin/sh\necho tests ok\n', { mode: 0o755 });
+      // Make the cache read-only exactly as the populate script does.
+      const readOnly = buildContextPopulateScript(revision, 'run-w', digest)
+        .split('\n')
+        .find((l) => l.includes('a-w'))!;
+      execFileSync('bash', ['-c', `STAGE=$1\n${readOnly}`, '_', cache]);
+      const mode = (path: string) => statSync(path).mode & 0o777;
+      // Nothing is writable, directories stay traversable, and the script keeps its exec bit.
+      expect([cache, join(cache, 'src'), join(cache, 'src', 'a.txt')].map(mode)).toEqual([
+        0o555, 0o555, 0o444,
+      ]);
+      expect(mode(join(cache, 'test.sh'))).toBe(0o555);
+      expect(() => writeFileSync(join(cache, 'src', 'a.txt'), 'x')).toThrow();
+      symlinkSync(cache, root);
+
+      sh(buildContextWritableScript(revision, 'run-w'));
+      expect(lstatSync(root).isSymbolicLink()).toBe(false);
+      writeFileSync(join(root, 'src', 'a.txt'), 'edited');
+      writeFileSync(join(root, 'src', 'new.txt'), 'new');
+      expect(mode(join(root, 'test.sh'))).toBe(0o755);
+      expect(execFileSync('./test.sh', { cwd: root }).toString()).toBe('tests ok\n');
+      expect(readFileSync(join(cache, 'src', 'a.txt'), 'utf8')).toBe('frozen');
+      expect(mode(cache)).toBe(0o555);
+      expect(mode(join(cache, 'src', 'a.txt'))).toBe(0o444);
+
+      // The agent may leave its copy read-only; cleanup still removes it.
+      chmodSync(join(root, 'src'), 0o555);
+      sh(buildContextCleanupScript(revision, 'run-w', 0));
+      expect(() => lstatSync(root)).toThrow();
+      expect(() => lstatSync(join(base, 'runs', '.stage.run-w'))).toThrow();
+      expect(readFileSync(join(cache, 'src', 'a.txt'), 'utf8')).toBe('frozen');
+      expect(mode(cache)).toBe(0o555);
+    } finally {
+      execFileSync('chmod', ['-R', 'u+w', base]);
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('cleanup never chmods through a read-only link into the cache', () => {
+    const script = buildContextCleanupScript(revision, 'run-1');
+    expect(script).toContain('[ -L "$ROOT" ] || chmod -R u+w "$ROOT"');
+  });
+
+  it('the sweep removes abandoned writable copies, never links', () => {
+    const script = buildContextAcquireScript(revision, 'run-1');
+    expect(script).toContain('for STALE in "/workspace/.moca-context"/runs/*');
+    expect(script).toContain('[ -d "$STALE" ] && [ ! -L "$STALE" ]');
   });
 });

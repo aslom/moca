@@ -146,7 +146,7 @@ export class WorkloadsClient {
         method: 'PUT',
         headers: {
           authorization: `Bearer ${grant.token}`,
-          'content-type': CONTEXT_MEDIA_TYPE,
+          'content-type': grant.contentType,
           'content-length': String(size),
         },
         body: Readable.toWeb(stream) as ReadableStream<Uint8Array>,
@@ -241,6 +241,8 @@ function asGrant(body: unknown): UploadGrant {
     typeof g.token !== 'string' ||
     !g.token ||
     typeof g.expiresAt !== 'string' ||
+    // The only media type Context Service accepts: a grant naming another is not one to follow.
+    g.contentType !== CONTEXT_MEDIA_TYPE ||
     typeof g.maxBytes !== 'number' ||
     !Number.isSafeInteger(g.maxBytes) ||
     g.maxBytes <= 0
@@ -252,7 +254,7 @@ function asGrant(body: unknown): UploadGrant {
     token: g.token,
     expiresAt: g.expiresAt,
     method: 'PUT',
-    contentType: typeof g.contentType === 'string' ? g.contentType : CONTEXT_MEDIA_TYPE,
+    contentType: g.contentType,
     maxBytes: g.maxBytes,
   };
 }

@@ -411,6 +411,8 @@ paths:
         session token's user must own the workload (docs/context-service.md). With workloads off,
         or for any async run, it is refused with 501 workload_runs_unavailable rather than run on
         the default pool; a synchronous one without a token is 401 token_required.
+        `contextWritable: true` gives that run its own writable copy of the context instead,
+        discarded when the run ends.
       security:
         - sessionToken: []
       requestBody:
@@ -437,7 +439,8 @@ paths:
             session_mismatch · subject_conflict · credential_required · credential_ambiguous ·
             endpoint_unresolved (the control-plane exchange refused the caller's credential or
             its endpoint) · workload_run_requires_prompt (a run naming a workloadId must be a
-            prompt run)
+            prompt run) · context_writable_invalid (contextWritable is not a boolean) ·
+            context_writable_requires_workload (contextWritable true without a workloadId)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -841,6 +844,14 @@ components:
             kind: { type: string, enum: [prompt] }
             sessionId: { type: string }
             prompt: { type: string, description: The free-form prompt to run. }
+            workloadId:
+              type: string
+              description: Run on this workload's frozen context. Synchronous runs only.
+            contextWritable:
+              type: boolean
+              description: |
+                Give the run its own writable copy of the workload's context, discarded when the
+                run ends, instead of a read-only view. true needs workloadId; false is ignored.
     LeafItem:
       type: object
       required: [item_id, file, pattern]

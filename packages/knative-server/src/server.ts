@@ -837,6 +837,24 @@ function rejectWorkloadRun(res: ServerResponse): void {
 }
 
 /**
+ * `contextWritable` asks for a writable per-run copy of a workload's context, so it must be a
+ * boolean, and `true` needs a `workloadId` (`false` asks for nothing and is ignored). Writes the 400
+ * and returns true when the request must not proceed.
+ */
+function rejectInvalidContextWritable(body: any, res: ServerResponse): boolean {
+  if (body?.contextWritable === undefined) return false;
+  const error =
+    typeof body.contextWritable !== 'boolean'
+      ? 'context_writable_invalid'
+      : body.contextWritable && body.workloadId === undefined
+        ? 'context_writable_requires_workload'
+        : null;
+  if (!error) return false;
+  res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error }));
+  return true;
+}
+
+/**
  * Resolve the workload a synchronous run names into the trusted `internalContext` the harness
  * delivers to the sandbox. The caller's session token must belong to the workload's owner. The
  * bundle is downloaded lazily, only when the selected sandbox lacks the revision. Writes the
@@ -880,6 +898,7 @@ async function resolveRunWorkload(
       revision,
       cacheScope,
       loadBundle: () => downloadContextBundle(contextName, revision, owner),
+      writable: body.contextWritable === true,
     },
   };
 }
@@ -1102,6 +1121,7 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
         res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'tenant_not_allowed' }));
         return;
       }
+      if (rejectInvalidContextWritable(parsed, res)) return;
 
       if (parsed && parsed.async === true) {
         // Before the gate below, so every asynchronous run naming a workload gets the same answer.

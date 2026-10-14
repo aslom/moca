@@ -210,6 +210,70 @@ describe('workloads create', () => {
     expect(calls).toEqual([]);
   });
 
+  it('generates the name client-side when --name is omitted', async () => {
+    const { fetch, calls } = scriptedFetch(
+      json({ ...workload('awaiting_upload'), upload: grant() }, 201),
+      json({ revision: REV }, 201),
+      json(workload('ready', { revision: REV })),
+    );
+    const code = await cmdWorkloadCreate(testRuntime({ fetchImpl: fetch }), io(), {
+      contextPath: contextFile(),
+      json: false,
+    });
+    expect(code).toBe(0);
+    // The harness's own pattern for a generated name: `wl-` and 8 hex, a valid workload id.
+    expect(calls[0]!.body).toEqual({ name: expect.stringMatching(/^wl-[a-f0-9]{8}$/) });
+  });
+
+  it('names the workload to delete when the POST reply is lost', async () => {
+    const { fetch } = scriptedFetch(new TypeError('fetch failed'));
+    const o = io();
+    const code = await cmdWorkloadCreate(testRuntime({ fetchImpl: fetch }), o, {
+      contextPath: contextFile(),
+      json: false,
+    });
+    expect(code).toBe(1);
+    expect(o.stderr.join('\n')).toMatch(
+      /workload (wl-[a-f0-9]{8}) may have been created: `mocactl workloads delete \1`/,
+    );
+  });
+
+  it('names the workload to delete when Ctrl-C interrupts the POST', async () => {
+    const ac = new AbortController();
+    const { fetch } = scriptedFetch(() => {
+      ac.abort();
+      throw new DOMException('aborted', 'AbortError');
+    });
+    const o = io();
+    const code = await cmdWorkloadCreate(testRuntime({ fetchImpl: fetch }), o, {
+      contextPath: contextFile(),
+      name: 'demo',
+      json: false,
+      signal: ac.signal,
+    });
+    expect(code).toBe(130);
+    expect(o.stderr.join('\n')).toContain(
+      'workload demo may have been created: `mocactl workloads delete demo`',
+    );
+  });
+
+  it("refuses a grant whose content type is not Context Service's", async () => {
+    for (const contentType of ['application/octet-stream', undefined]) {
+      const { fetch, calls } = scriptedFetch(
+        json({ ...workload('awaiting_upload'), upload: grant({ contentType }) }, 201),
+      );
+      const o = io();
+      const code = await cmdWorkloadCreate(testRuntime({ fetchImpl: fetch }), o, {
+        contextPath: contextFile(),
+        name: 'demo',
+        json: false,
+      });
+      expect(code).toBe(1);
+      expect(calls).toHaveLength(1);
+      expect(o.stderr.join('\n')).toContain('invalid upload grant');
+    }
+  });
+
   it('refuses when not logged in', async () => {
     const o = io();
     const code = await cmdWorkloadCreate(testRuntime({ auth: null }), o, {

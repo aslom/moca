@@ -3,6 +3,7 @@
  * with `contextctl ctx export`) that `mocactl spawn --workload` runs prompts on. The harness has no
  * route that lists workloads, so there is no list command.
  */
+import { randomBytes } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { ApiError, TOKEN_CODES } from './api/errors.js';
@@ -77,6 +78,11 @@ function aborted(signal: AbortSignal | undefined): boolean {
   return signal?.aborted === true;
 }
 
+/** A name for `create` without `--name`, in the harness's own pattern (`wl-` and 8 hex). */
+export function generateWorkloadId(): string {
+  return `wl-${randomBytes(4).toString('hex')}`;
+}
+
 // --- create ---
 
 export interface CreateOptions extends WorkloadOptions {
@@ -89,7 +95,8 @@ export interface CreateOptions extends WorkloadOptions {
  * POST /workloads, PUT the context file to the grant, then activate the revision the upload
  * returned. A grant that has expired, or that the upload rejects with 401, is replaced once via
  * POST .../uploads. On any failure after the workload exists, it is deleted again (best effort) so
- * it does not hold a slot of the per-user quota.
+ * it does not hold a slot of the per-user quota. Without `--name` the name is generated here, not by
+ * the harness, so the id is known even when the reply to the POST never arrives.
  */
 export async function cmdWorkloadCreate(rt: Runtime, io: Io, opts: CreateOptions): Promise<number> {
   if (opts.name !== undefined && !validWorkloadId(opts.name)) {
@@ -121,12 +128,22 @@ export async function cmdWorkloadCreate(rt: Runtime, io: Io, opts: CreateOptions
   const client = opts.client ?? clientFor(rt);
   const { signal } = opts;
 
+  const name = opts.name ?? generateWorkloadId();
+  // The POST may have landed even though its reply did not: name the workload to delete.
+  const mayExist = () =>
+    io.err(
+      `workload ${sanitizeRemote(name)} may have been created: \`mocactl workloads delete ${sanitizeRemote(name)}\``,
+    );
   let created: Workload & { upload: UploadGrant };
   try {
-    created = await client.create(opts.name ? { name: opts.name } : {}, signal);
+    created = await client.create({ name }, signal);
   } catch (err) {
-    if (aborted(signal)) return 130;
-    io.err(describeWorkloadError(err, opts.name));
+    if (aborted(signal)) {
+      mayExist();
+      return 130;
+    }
+    io.err(describeWorkloadError(err, name));
+    if (err instanceof ApiError && err.status === 0) mayExist();
     return 1;
   }
   const id = created.workloadId;
