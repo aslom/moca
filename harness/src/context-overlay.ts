@@ -7,8 +7,9 @@ import type { SandboxTransport } from '@moca/k8s-sandbox';
  * registers a ref on it and gets its own view at `runs/<session>`. The bundle crosses the relay only
  * on a miss. A writable run gets its own copy of the cached revision there instead of a link, which
  * it may change and which cleanup removes; the cached copy stays read-only. Keying the cache by
- * owner means two users never share a copy, even when both uploaded identical content. The owner's part of the key is an HMAC under a secret agents never see, so an
- * agent cannot derive another user's key from their name and plant a copy for a revision it knows.
+ * owner means two users never share a copy, even when both uploaded identical content. The owner's
+ * part of the key is an HMAC under a secret agents never see, so an agent cannot derive another
+ * user's key from their name and plant a copy for a revision it knows.
  * It is not isolation: every agent runs as the same uid as these files, so it can still alter any
  * copy it can see, and learn that copy's scope from its name. The read-only modes stop accidents,
  * not a determined agent. Isolation between users needs separate sandboxes (rossoctl/moca#476,

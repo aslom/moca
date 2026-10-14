@@ -93,7 +93,8 @@ the export timeout for budget to come free. A bundle over the size ceiling, that
 expanded ceiling, or with an incomplete gzip stream is refused and never cached. The harness copies
 the raw bytes over SandboxExec in 8 MiB chunks, checks their sha256 in the sandbox, refuses an
 archive with more entries than the entry limit, extracts it read-only (write permission removed;
-directories stay traversable and executable files keep their exec bit) and publishes the revision atomically under `flock`.
+directories stay traversable and executable files keep their exec bit) and publishes the revision
+atomically under `flock`.
 The run gets its own view at `/workspace/.moca-context/runs/<session>`, and the prompt tells the
 agent that path. Each user's copy is cached separately, so two users never share one, even for
 identical content. Only P6 sandboxes (Moca's long-running sandbox workers, reached through the
@@ -130,10 +131,10 @@ same Linux user, one after another. Per-user sandboxes come with #476.
 
 After the run, its view, or its writable copy, is removed and, by default, so is any revision no
 run still uses. A writable copy left by a harness that died is swept a day later, as abandoned
-uploads are. Shared
-sandboxes serve several users, so a user's context should not stay on them for the next user's
-task. `MOCA_CONTEXT_SANDBOX_RETAIN_MINUTES` keeps unused revisions longer, which saves a transfer
-for repeated runs at the cost of leaving that context on the sandbox for the period.
+uploads are. Shared sandboxes serve several users, so a user's context should not stay on them for
+the next user's task. `MOCA_CONTEXT_SANDBOX_RETAIN_MINUTES` keeps unused revisions longer, which
+saves a transfer for repeated runs at the cost of leaving that context on the sandbox for the
+period.
 
 ## Names are per user
 
