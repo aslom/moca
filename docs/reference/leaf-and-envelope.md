@@ -45,8 +45,9 @@ resolved, and a bad digest comes back as a 200 `failed` result with reason `erro
 400 `tenant_not_allowed`.
 
 `workloadId` runs a synchronous prompt on that workload's frozen context (see
-[Context Service and workloads](../context-service.md#runs)). An async run that names one, with or
-without a token, and any run while workloads are off, returns 501 `workload_runs_unavailable`.
+[Context Service and workloads](../context-service.md#runs)). An async run that names one, and any
+run while workloads are off, returns 501 `workload_runs_unavailable`, unless the deployment requires
+a token and none was sent (401 `token_required` first).
 
 `sessionId` is mapped to a safe internal id: a `tenant/` prefix if any, every character outside
 `[A-Za-z0-9._-]` becomes `-`, and leading and trailing non-alphanumerics are trimmed.

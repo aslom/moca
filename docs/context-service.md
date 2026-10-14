@@ -76,9 +76,11 @@ A run on a workload is a synchronous prompt run (`"kind": "prompt"`) with a `wor
 a session token (scope `turn:write`). The token's user must own the workload: another user's
 workload, like a missing one, is `404 workload_not_found`. A workload that is not `ready` answers
 `409 workload_not_ready`, and another kind of run `400 workload_run_requires_prompt`. A synchronous
-run with no token is `401 token_required`. Asynchronous runs on a workload, with or without a token,
-and every workload run while the routes are off, answer `501 workload_runs_unavailable`; an
-asynchronous run gets it before the general `501 async_runs_unavailable` for tokened callers. The
+run with no token is `401 token_required`. Asynchronous runs on a workload, and every workload run
+while the routes are off, answer `501 workload_runs_unavailable`; an asynchronous run gets it before
+the general `501 async_runs_unavailable` for tokened callers. Authentication still comes first: on a
+deployment with `SH_REQUIRE_AUTH=true` (as `deploy/k8s` sets), a request with no token is
+`401 token_required` before either check. The
 sandbox tier is the session's, chosen as for any other run.
 
 Delivery is lazy. Moca downloads the frozen bundle from Context Service's trusted export
