@@ -26,6 +26,14 @@ Context Service:
    the workload's frozen revision available read-only.
 5. **Delete:** `DELETE /workloads/{id}` deletes the Context, then the workload.
 
+`mocactl` is the client for this flow
+([#495](https://github.com/rossoctl/moca/issues/495), one CLI for delegating subagent tasks;
+[#517](https://github.com/rossoctl/moca/issues/517), seed sandbox files before a leaf runs):
+`mocactl workloads create --context FILE` does steps 1 to 3, `mocactl spawn --kind prompt --workload ID`
+step 4, and `mocactl workloads delete ID` step 5. It does not build the context file:
+`contextctl ctx export` does. See "Delegate with context" in
+[`packages/mocactl/README.md`](../packages/mocactl/README.md).
+
 The routes are off by default. With them off, every `/workloads` route answers
 `501 workloads_unavailable`.
 

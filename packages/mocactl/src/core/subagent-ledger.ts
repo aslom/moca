@@ -26,12 +26,15 @@ export interface LedgerEnvelope {
   repoUrl?: string;
   ref?: string;
   configRef?: string;
+  workloadId?: string;
 }
 
 export interface LedgerRecord {
   sessionId: string;
   tag?: string;
   bundle?: string;
+  /** The workload the run was sent to (`spawn --workload`). */
+  workloadId?: string;
   envelope: LedgerEnvelope;
   submittedAt: number;
   /** The detached worker's pid. Absent until the child is forked. */

@@ -102,6 +102,13 @@ mocactl spawn "prompt" [--config sha256:…] --kind prompt|solve \
   [--repo URL --ref REF] [--tag T] [--json]  # fork a detached subagent; prints its sessionId
 mocactl subagents [--tag T] [--json]        # list spawned subagents + current honest state
 mocactl get SESSIONID [--out DIR] [--json]  # write result files + bounded summary
+mocactl spawn "prompt" --kind prompt --workload ID [...]  # run it on a workload's context
+```
+
+```bash
+mocactl workloads create --context FILE [--name NAME] [--json]  # upload a context; prints its id
+mocactl workloads get ID [--json]           # status, context type, size and frozen revision
+mocactl workloads delete ID [--json]        # delete the workload and its context
 ```
 
 `mocactl spawn` creates a session (pinned to the bundle if `--config` is given), writes a record
@@ -160,6 +167,36 @@ Exit codes, for every command: `0` it worked, `1` it failed (the turn, or the co
 refused), `2` a usage or setup problem (bad flags, not logged in, no destination for the turn),
 `130` cancelled (Ctrl-C, which also stops a listing or a stdin read that is waiting).
 
+### Delegate with context
+
+A workload gives a subagent files to work from: a context, uploaded once and available read-only
+to every run on it ([`docs/context-service.md`](../../docs/context-service.md)). Build the context
+file with `contextctl` (`mocactl` never calls it), then:
+
+```bash
+contextctl ctx export ... -o ctx.context
+id=$(mocactl workloads create --context ctx.context --name demo)
+sid=$(mocactl spawn "summarize the repo in the context" --kind prompt --workload "$id")
+mocactl get "$sid"                          # once `mocactl subagents` says done
+mocactl workloads delete "$id"
+```
+
+`workloads create` creates the workload (`POST /workloads` on the harness, with your API token),
+uploads the file straight to Context Service with the one-time grant it returns, then activates the
+revision the upload reports, which freezes it. It checks that the file exists before it starts, and
+that it is no larger than the grant allows before it uploads; the upload streams from disk. A grant
+that has expired, or that the upload refuses with `401`, is replaced once
+(`POST /workloads/ID/uploads`). The grant's URL must be HTTPS (plain HTTP only on loopback). If
+anything fails after the workload exists, `create` deletes it again, so it does not count against
+your quota (5 live workloads by default), and exits `1`. `--name` is a lowercase Kubernetes name of
+at most 50 characters; without one the harness generates it. The harness has no route that lists
+workloads, so there is no `mocactl workloads` listing: keep the id `create` prints.
+
+`spawn --workload ID` adds `workloadId` to the run and records it in the ledger row
+(`mocactl subagents --json` shows it as `workload`). Only prompt runs can use a workload, so
+`--workload` needs `--kind prompt`. A workload that is not `ready`, or not yours, fails the run
+(`workload_not_ready`, `workload_not_found`), as `mocactl subagents` then shows.
+
 ### Output
 
 stdout carries only the result; every message goes to stderr, including "no sessions" for an
@@ -175,8 +212,11 @@ their own shapes. These shapes are stable: fields may be added, but none is rena
 | `credentials add`    | `{"name","status":"stored"}`                                                                       |
 | `credentials delete` | `{"name","status":"deleted"}`                                                                      |
 | `spawn`              | `{"type":"session","sessionId","pid"}`                                                             |
-| `subagents`          | `{"subagents":[{"sessionId","tag","kind","state","detail","bundle","submittedAt"}]}`               |
+| `subagents`          | `{"subagents":[{"sessionId","tag","kind","state","detail","bundle","workload","submittedAt"}]}`    |
 | `get`                | `{"sessionId","status","files":["<path>",…],"reason"?,"message"?}`                                 |
+| `workloads create`   | `{"workloadId","status","contextType","revision","files","bytes"}`                                 |
+| `workloads get`      | `{"workloadId","status","contextType","workspace","revision"}`, `null` for what is not set         |
+| `workloads delete`   | `{"workloadId","status":"deleted"}`                                                                |
 
 `createdAt` and `lastTurnAt` are epoch milliseconds as the control plane sends them (`lastTurnAt`
 is `null` before the first turn); `endpoint` is `null` when the deployment default applies.

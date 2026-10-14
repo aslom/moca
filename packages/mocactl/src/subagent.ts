@@ -3,6 +3,7 @@ import { spawn as spawnChild } from 'node:child_process';
 import { writeFileSync, mkdirSync, existsSync, openSync, closeSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ApiError } from './api/errors.js';
+import { validWorkloadId } from './api/workloads.js';
 import type { ControlPlaneApi, CreateSessionRequest } from './api/types.js';
 import { describeError } from './core/messages.js';
 import { sanitizeRemote } from './core/sanitize.js';
@@ -72,6 +73,8 @@ export interface SpawnOptions {
   repoUrl?: string;
   ref?: string;
   tag?: string;
+  /** A ready workload whose context the run sees; prompt runs only (the harness refuses others). */
+  workloadId?: string;
   json: boolean;
   /** Test seams: fork + ledger injection. */
   forkFn?: (
@@ -109,6 +112,16 @@ export async function cmdSpawn(rt: Runtime, io: Io, opts: SpawnOptions): Promise
     io.err('--repo and --ref are only meaningful with --kind solve');
     return 2;
   }
+  if (opts.workloadId !== undefined) {
+    if (opts.kind !== 'prompt') {
+      io.err('--workload needs --kind prompt: the harness runs only prompts on a workload');
+      return 2;
+    }
+    if (!validWorkloadId(opts.workloadId)) {
+      io.err(`invalid workload id '${sanitizeRemote(opts.workloadId)}'`);
+      return 2;
+    }
+  }
 
   let session: SpawnedSession;
   try {
@@ -131,6 +144,7 @@ export async function cmdSpawn(rt: Runtime, io: Io, opts: SpawnOptions): Promise
     ...(opts.tag ? { tag: opts.tag } : {}),
     envelope: envelopeForLedger(opts),
     ...(opts.configRef ? { bundle: opts.configRef } : {}),
+    ...(opts.workloadId ? { workloadId: opts.workloadId } : {}),
     ...(opts.repoUrl ? { repoUrl: opts.repoUrl } : {}),
     ...(opts.ref ? { ref: opts.ref } : {}),
     submittedAt: rt.now(),
@@ -183,7 +197,13 @@ function buildEnvelope(sessionId: string, opts: SpawnOptions): LeafEnvelope {
   // `/runs` reads configRef from the body (not the session); the harness builds the solve prompt
   // itself from `problemStatement`.
   if (opts.configRef) base.configRef = opts.configRef;
-  if (opts.kind === 'prompt') return { ...base, prompt: opts.prompt };
+  if (opts.kind === 'prompt') {
+    return {
+      ...base,
+      prompt: opts.prompt,
+      ...(opts.workloadId ? { workloadId: opts.workloadId } : {}),
+    };
+  }
   return { ...base, problemStatement: opts.prompt, repoUrl: opts.repoUrl!, ref: opts.ref! };
 }
 
@@ -194,6 +214,7 @@ function envelopeForLedger(opts: SpawnOptions): LedgerEnvelope {
     ...(opts.repoUrl ? { repoUrl: opts.repoUrl } : {}),
     ...(opts.ref ? { ref: opts.ref } : {}),
     ...(opts.configRef ? { configRef: opts.configRef } : {}),
+    ...(opts.workloadId ? { workloadId: opts.workloadId } : {}),
   };
 }
 
@@ -440,6 +461,7 @@ export async function cmdSubagents(rt: Runtime, io: Io, opts: SubagentsOptions):
           state: view.state,
           detail: view.detail ?? null,
           bundle: record.bundle ?? null,
+          workload: record.workloadId ?? null,
           submittedAt: record.submittedAt,
         })),
       }) + '\n',

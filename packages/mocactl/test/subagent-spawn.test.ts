@@ -333,3 +333,65 @@ describe('cmdSpawn — failure paths that must not create a ledger orphan', () =
 
 // Imported late to keep the file's top imports stable.
 type LedgerRecord = ReturnType<Ledger['readAll']>[number];
+
+/* --- --workload --- */
+
+describe('cmdSpawn — --workload', () => {
+  it('sends workloadId in the run envelope and records it in the ledger row', async () => {
+    const { rt } = makeRt();
+    const ledger = withLedger(rt);
+    const { io } = makeIo();
+    let seenEnvelope: LeafEnvelope | undefined;
+    const forkFn: SpawnOptions['forkFn'] = (_sid, _tok, env) => {
+      seenEnvelope = env;
+      return 7;
+    };
+    const r = await cmdSpawn(rt, io, baseOpts({ workloadId: 'demo', forkFn, ledger }));
+    expect(r).toBe(0);
+    expect(seenEnvelope).toEqual({
+      sessionId: 'sess-abc',
+      kind: 'prompt',
+      prompt: 'summarize the repo',
+      workloadId: 'demo',
+    });
+    const row = openLedger(ledgerPath).readAll()[0]!;
+    expect(row.workloadId).toBe('demo');
+    expect(row.envelope.workloadId).toBe('demo');
+  });
+
+  it('refuses --workload with --kind solve, and an invalid workload id, before creating a session', async () => {
+    for (const over of [
+      { kind: 'solve' as const, repoUrl: 'https://x', ref: 'main', workloadId: 'demo' },
+      { workloadId: 'Bad/Id' },
+    ]) {
+      const { rt, cp } = makeRt();
+      const { io, err } = makeIo();
+      const r = await cmdSpawn(
+        rt,
+        io,
+        baseOpts({ ...over, forkFn: () => 1, ledger: withLedger(rt) }),
+      );
+      expect(r).toBe(2);
+      expect(cp.createSession).not.toHaveBeenCalled();
+      expect(err.join('\n')).toMatch(/--workload needs --kind prompt|invalid workload id/);
+    }
+  });
+
+  it('the worker transport puts workloadId in the POST /v1/runs body', async () => {
+    const { LeafTransport } = await import('../src/transport/leaf-turn.js');
+    const bodies: unknown[] = [];
+    const fetchImpl = (async (_url: string, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)));
+      return new Response(JSON.stringify({ status: 'responded', text: 'ok' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    const transport = new LeafTransport({ baseUrl: async () => 'https://harness.test' }, fetchImpl);
+    await transport.submitLeafTurn(
+      { sessionId: 's', kind: 'prompt', prompt: 'p', workloadId: 'demo' },
+      'tok',
+    );
+    expect(bodies[0]).toMatchObject({ kind: 'prompt', workloadId: 'demo' });
+  });
+});
