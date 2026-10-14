@@ -490,6 +490,39 @@ describe('workloads and spawn --workload', () => {
     expect(o.errs.join('\n')).toContain('--workload only applies to `mocactl spawn`');
   });
 
+  it('spawn routes --writable through to cmdSpawn; --writable is refused elsewhere', async () => {
+    const mod = await import('../src/subagent.js');
+    const stub = vi.fn(async (..._a: unknown[]) => 0);
+    const spy = vi.spyOn(mod, 'cmdSpawn').mockImplementation(stub);
+    onTestFinished(() => spy.mockRestore());
+    const argv = ['spawn', 'p', '--kind', 'prompt', '--workload', 'demo', '--writable'];
+    expect(await main(argv, {}, io(), { buildRuntime: fakeBuild })).toBe(0);
+    expect(stub.mock.calls[0][2]).toMatchObject({ workloadId: 'demo', writable: true });
+    expect(
+      await main(['spawn', 'p', '--kind', 'prompt', '--workload', 'demo'], {}, io(), {
+        buildRuntime: fakeBuild,
+      }),
+    ).toBe(0);
+    expect(stub.mock.calls[1][2]).toMatchObject({ writable: false });
+    const o = io();
+    expect(await main(['run', 'p', '--writable'], {}, o, { buildRuntime: fakeBuild })).toBe(2);
+    expect(o.errs.join('\n')).toContain('--writable only applies to `mocactl spawn`');
+  });
+
+  it('spawn --writable without --workload exits 2 before spawning', async () => {
+    const mod = await import('../src/subagent.js');
+    const spy = vi.spyOn(mod, 'cmdSpawn');
+    onTestFinished(() => spy.mockRestore());
+    const o = io();
+    expect(
+      await main(['spawn', 'p', '--kind', 'prompt', '--writable'], {}, o, {
+        buildRuntime: fakeBuild,
+      }),
+    ).toBe(2);
+    expect(o.errs.join('\n')).toContain('--writable needs --workload ID');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
   it('routes workloads create, get and delete; --context and --name only on create', async () => {
     const mod = await import('../src/workloads.js');
     const create = vi.fn(async (..._a: unknown[]) => 0);

@@ -102,7 +102,7 @@ mocactl spawn "prompt" [--config sha256:…] --kind prompt|solve \
   [--repo URL --ref REF] [--tag T] [--json]  # fork a detached subagent; prints its sessionId
 mocactl subagents [--tag T] [--json]        # list spawned subagents + current honest state
 mocactl get SESSIONID [--out DIR] [--json]  # write result files + bounded summary
-mocactl spawn "prompt" --kind prompt --workload ID [...]  # run it on a workload's context
+mocactl spawn "prompt" --kind prompt --workload ID [--writable] [...]  # run it on a workload's context
 ```
 
 ```bash
@@ -189,13 +189,23 @@ that has expired, or that the upload refuses with `401`, is replaced once
 (`POST /workloads/ID/uploads`). The grant's URL must be HTTPS (plain HTTP only on loopback). If
 anything fails after the workload exists, `create` deletes it again, so it does not count against
 your quota (5 live workloads by default), and exits `1`. `--name` is a lowercase Kubernetes name of
-at most 50 characters; without one the harness generates it. The harness has no route that lists
-workloads, so there is no `mocactl workloads` listing: keep the id `create` prints.
+at most 50 characters; without one `create` generates one (`wl-` and 8 hex) before it sends the
+request, so if the reply is lost (Ctrl-C, a dropped connection) it can still name the workload to
+delete. The harness has no route that lists workloads, so there is no `mocactl workloads` listing:
+keep the id `create` prints.
 
 `spawn --workload ID` adds `workloadId` to the run and records it in the ledger row
 (`mocactl subagents --json` shows it as `workload`). Only prompt runs can use a workload, so
-`--workload` needs `--kind prompt`. A workload that is not `ready`, or not yours, fails the run
-(`workload_not_ready`, `workload_not_found`), as `mocactl subagents` then shows.
+`--workload` needs `--kind prompt`. Before it creates the session, `spawn` checks the workload
+(`GET /workloads/ID`) and exits `1` when it is missing, not yours, or not `ready` (naming its
+status). A workload that stops being ready after that fails the run (`workload_not_ready`,
+`workload_not_found`), as `mocactl subagents` then shows.
+
+`spawn --workload ID --writable` gives the run its own writable copy of the context instead, for a
+subagent that edits files or reruns tests. The copy is discarded when the run ends, so ask the
+subagent to return its changes (a diff, test output) in its answer. It sends `contextWritable: true`
+and records `writable` in the ledger row, which `mocactl subagents --json` shows as `"writable": true`
+on that row only. `--writable` without `--workload` exits `2`.
 
 ### Output
 

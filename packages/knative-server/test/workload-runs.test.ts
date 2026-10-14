@@ -271,4 +271,67 @@ describe('a run on a workload', () => {
     expect(await run(null, prompt('demo', { async: true }))).toEqual(unavailable);
     expect(runLeaf).not.toHaveBeenCalled();
   });
+
+  it('passes contextWritable through to the harness as internalContext.writable', async () => {
+    await seed(alice, 'demo', 'ready', REVISION);
+    expect(await run(alice, prompt('demo', { contextWritable: true }))).toMatchObject({
+      status: 200,
+    });
+    expect(await run(alice, prompt('demo', { contextWritable: false }))).toMatchObject({
+      status: 200,
+    });
+    expect(await run(alice, prompt('demo'))).toMatchObject({ status: 200 });
+    const writable = runLeaf.mock.calls.map(
+      ([env]) => (env as { internalContext: { writable: boolean } }).internalContext.writable,
+    );
+    expect(writable).toEqual([true, false, false]);
+  });
+
+  it('never takes the writable flag from a caller-supplied internalContext', async () => {
+    await seed(alice, 'demo', 'ready', REVISION);
+    await run(alice, prompt('demo', { internalContext: { writable: true } }));
+    expect(runLeaf.mock.calls[0]![0].internalContext.writable).toBe(false);
+  });
+
+  it.each([['yes'], [1], [null], [{}]])(
+    'answers 400 context_writable_invalid for contextWritable %j',
+    async (value) => {
+      await seed(alice, 'demo', 'ready', REVISION);
+      expect(await run(alice, prompt('demo', { contextWritable: value }))).toEqual({
+        status: 400,
+        body: { error: 'context_writable_invalid' },
+      });
+      expect(runLeaf).not.toHaveBeenCalled();
+    },
+  );
+
+  it('answers 400 context_writable_requires_workload without a workloadId', async () => {
+    const bare = { sessionId: `s-${randomUUID()}`, kind: 'prompt', prompt: 'Hi.' };
+    for (const extra of [{}, { async: true }]) {
+      expect(await run(alice, { ...bare, ...extra, contextWritable: true })).toEqual({
+        status: 400,
+        body: { error: 'context_writable_requires_workload' },
+      });
+    }
+    expect(runLeaf).not.toHaveBeenCalled();
+  });
+
+  it('accepts and ignores contextWritable false without a workloadId', async () => {
+    const res = await run(alice, {
+      sessionId: `s-${randomUUID()}`,
+      kind: 'prompt',
+      prompt: 'Hi.',
+      contextWritable: false,
+    });
+    expect(res).toEqual({ status: 200, body: { status: 'responded', text: 'ok' } });
+    expect(runLeaf.mock.calls[0]![0].internalContext).toBeUndefined();
+  });
+
+  it('still answers 400 context_writable_invalid without a workloadId', async () => {
+    const bare = { sessionId: `s-${randomUUID()}`, kind: 'prompt', prompt: 'Hi.' };
+    expect(await run(alice, { ...bare, contextWritable: 'false' })).toEqual({
+      status: 400,
+      body: { error: 'context_writable_invalid' },
+    });
+  });
 });

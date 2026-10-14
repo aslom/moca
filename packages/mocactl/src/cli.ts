@@ -42,8 +42,9 @@ export const USAGE = `usage:
   mocactl credentials delete NAME [--json]
   mocactl spawn "prompt" [--config DIGEST] --kind prompt|solve
       [--repo URL --ref REF] [--tag T] [--json]   fork a detached subagent (solve needs --repo/--ref)
-  mocactl spawn "prompt" --kind prompt --workload ID [...]
+  mocactl spawn "prompt" --kind prompt --workload ID [--writable] [...]
                                                  run the subagent on a workload's context
+                                                 (--writable: its own copy, discarded after)
   mocactl subagents [--tag T] [--json]            list spawned subagents + current state
   mocactl get SESSIONID [--out DIR] [--json]      write result files + bounded summary
   mocactl workloads create --context FILE [--name NAME] [--json]
@@ -117,6 +118,7 @@ export async function main(
         tag: { type: 'string' },
         out: { type: 'string' },
         workload: { type: 'string' },
+        writable: { type: 'boolean' },
         context: { type: 'string' },
         name: { type: 'string' },
         help: { type: 'boolean', short: 'h' },
@@ -178,6 +180,14 @@ export async function main(
   }
   if (values.workload !== undefined && command !== 'spawn') {
     io.err(`--workload only applies to \`mocactl spawn\`\n${USAGE}`);
+    return 2;
+  }
+  if (values.writable !== undefined && command !== 'spawn') {
+    io.err(`--writable only applies to \`mocactl spawn\`\n${USAGE}`);
+    return 2;
+  }
+  if (values.writable && values.workload === undefined) {
+    io.err(`--writable needs --workload ID: only a workload's context is copied\n${USAGE}`);
     return 2;
   }
   const workloadsCreate = command === 'workloads' && rest[0] === 'create';
@@ -315,6 +325,7 @@ export async function main(
         ref: values.ref,
         tag: values.tag,
         workloadId: values.workload,
+        writable: values.writable === true,
         json,
       });
     }

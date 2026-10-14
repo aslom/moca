@@ -27,6 +27,7 @@ export interface LedgerEnvelope {
   ref?: string;
   configRef?: string;
   workloadId?: string;
+  contextWritable?: boolean;
 }
 
 export interface LedgerRecord {
@@ -35,6 +36,8 @@ export interface LedgerRecord {
   bundle?: string;
   /** The workload the run was sent to (`spawn --workload`). */
   workloadId?: string;
+  /** The run had its own writable copy of the workload's context (`spawn --writable`). */
+  writable?: boolean;
   envelope: LedgerEnvelope;
   submittedAt: number;
   /** The detached worker's pid. Absent until the child is forked. */
