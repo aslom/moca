@@ -474,7 +474,7 @@ export class ActiveSession {
   }
 
   /** Set while recovering a POST that dropped before any frame: which turn counts as ours. */
-  private recovering?: { notTurnId?: string };
+  private recovering?: { notTurnId?: string; onAccept: () => void };
 
   private attachStream(
     controller: AbortController,
@@ -500,6 +500,8 @@ export class ActiveSession {
           first = false;
           if (frame.type !== 'turn' || frame.ended || frame.turnId === recovering.notTurnId)
             throw new ApiError('harness', 404, 'turn_not_found');
+          // The turn is ours: record the prompt before its frames reach the transcript.
+          recovering.onAccept();
         }
         yield frame;
       }
@@ -515,8 +517,9 @@ export class ActiveSession {
     controller: AbortController,
     ids: Cursor,
     original: ApiError,
+    record: () => void,
   ): Promise<boolean> {
-    this.recovering = { notTurnId: this.lastTurnId };
+    this.recovering = { notTurnId: this.lastTurnId, onAccept: record };
     try {
       return await this.reattach(controller, ids);
     } catch (err) {
@@ -644,7 +647,7 @@ export class ActiveSession {
             err instanceof ApiError &&
             err.code === 'connection_dropped'
           )
-            return await this.recoverDroppedStart(controller, ids, err);
+            return await this.recoverDroppedStart(controller, ids, err, record);
           // Once frames have flowed the status code is spent; never re-send a half-run turn.
           if (!(err instanceof ApiError) || err.source !== 'harness' || streamed) throw err;
           this.pending = false;

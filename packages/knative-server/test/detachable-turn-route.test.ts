@@ -822,6 +822,10 @@ describe('SH_TURN_REGISTRY_TIMEOUT_MS', () => {
     }
   });
   describe('first-frame flush deadline (a proxy idle timeout must not cut a slow first frame)', () => {
+    afterEach(() => {
+      delete process.env.SH_TURN_STREAM_FIRST_FRAME_FLUSH_MS;
+    });
+
     const slowTurn = (gate: { open: boolean }, hold: number, fail?: Error) =>
       vi.mocked(executeTurn).mockImplementationOnce(async () => {
         await new Promise((r) => setTimeout(r, hold));
@@ -841,7 +845,6 @@ describe('SH_TURN_REGISTRY_TIMEOUT_MS', () => {
       expect(res.status).toBe(200);
       expect(res.before).toMatch(/^id: .+\nevent: turn\n/);
       expect(res.after).toContain('event: done');
-      delete process.env.SH_TURN_STREAM_FIRST_FRAME_FLUSH_MS;
     });
 
     it('a non-detachable SSE turn gets headers and a keepalive comment at the deadline', async () => {
@@ -851,7 +854,6 @@ describe('SH_TURN_REGISTRY_TIMEOUT_MS', () => {
       const res = await result;
       expect(res.status).toBe(200);
       expect(res.before).toBe(': keepalive\n\n');
-      delete process.env.SH_TURN_STREAM_FIRST_FRAME_FLUSH_MS;
     });
 
     it('a failure after the deadline ends the stream with an error frame, not a status', async () => {
@@ -864,19 +866,32 @@ describe('SH_TURN_REGISTRY_TIMEOUT_MS', () => {
       const res = await result;
       expect(res.status).toBe(200);
       expect(res.after).toContain('event: error');
-      delete process.env.SH_TURN_STREAM_FIRST_FRAME_FLUSH_MS;
     });
 
-    it('a failure before the deadline keeps its status, and nothing flushes after it', async () => {
-      process.env.SH_TURN_STREAM_FIRST_FRAME_FLUSH_MS = '300';
+    it('a failure before the deadline keeps its status, and clears the flush timer', async () => {
+      process.env.SH_TURN_STREAM_FIRST_FRAME_FLUSH_MS = '4321';
+      // The timer's callback bails on an ended response, so a leak is invisible on the wire:
+      // capture the flush timer itself and check it was cleared.
+      const real = globalThis.setTimeout;
+      const flushTimers: Array<{ _destroyed?: boolean }> = [];
+      const spy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+        fn: () => void,
+        ms?: number,
+        ...rest: unknown[]
+      ) => {
+        const t = real(fn, ms, ...rest);
+        if (ms === 4321) flushTimers.push(t as unknown as { _destroyed?: boolean });
+        return t;
+      }) as typeof setTimeout);
       vi.mocked(executeTurn).mockRejectedValueOnce(new Error('no session in backend for id x'));
       const res = await sse(
         { sessionId, prompt: 'p', detachable: true },
         { Authorization: `Bearer ${mint(sessionId)}` },
       );
+      spy.mockRestore();
       expect(res.status).toBe(404);
-      await new Promise((r) => setTimeout(r, 400)); // a leaked timer would throw on the ended response
-      delete process.env.SH_TURN_STREAM_FIRST_FRAME_FLUSH_MS;
+      expect(flushTimers).toHaveLength(1);
+      expect(flushTimers[0]!._destroyed).toBe(true);
     });
 
     it('SH_TURN_STREAM_FIRST_FRAME_FLUSH_MS=0 disables the flush', async () => {
@@ -885,7 +900,6 @@ describe('SH_TURN_REGISTRY_TIMEOUT_MS', () => {
       slowTurn(gate, 200);
       const res = await result;
       expect(res.before).toBe('');
-      delete process.env.SH_TURN_STREAM_FIRST_FRAME_FLUSH_MS;
     });
   });
 });

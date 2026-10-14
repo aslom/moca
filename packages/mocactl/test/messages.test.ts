@@ -19,7 +19,7 @@ describe('describeError', () => {
     ],
     [
       new ApiError('harness', 0, 'connection_dropped', 'fetch failed'),
-      'the harness connection was dropped before the response began (a proxy idle timeout?)',
+      'the harness closed the connection (a proxy idle timeout?)',
     ],
     [
       new ApiError('harness', 503, 'saturated', undefined, 4),

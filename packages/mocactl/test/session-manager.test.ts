@@ -448,9 +448,11 @@ describe('detachable turns', () => {
     const cut = () => new ApiError('harness', 0, 'connection_dropped', 'fetch failed');
 
     it('attaches by session, follows the running turn, and never sends the prompt twice', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'sm-'));
+      const transcripts = new TranscriptStore(dir, { subject: 'u', controlPlaneUrl: 'http://cp' });
       const { session, harness, ends } = await started(
         [{ frames: [], error: cut() }],
-        { detachable: true },
+        { detachable: true, transcripts },
         [{ frames: [turnF, text('b'), doneFrame()], ids: ['t1:1-0', 't1:2-0', 't1:3-0'] }],
       );
       session.submit('go');
@@ -458,6 +460,13 @@ describe('detachable turns', () => {
       expect(harness.turns.map((t) => t.prompt)).toEqual(['go']);
       expect(harness.attaches).toHaveLength(1);
       expect(ends()).toMatchObject([{ outcome: 'done' }]);
+      // The question is saved before its answer, as on the normal path.
+      expect(transcripts.load('s1')!.entries.map((e) => e.kind)).toEqual([
+        'prompt',
+        'turn',
+        'frame',
+        'frame',
+      ]);
     });
 
     it('surfaces the original error when the session has no turn to attach to', async () => {
