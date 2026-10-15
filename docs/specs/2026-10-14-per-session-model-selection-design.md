@@ -113,8 +113,9 @@ reaches:
 session's turns run on, resolved exactly as the exchange resolves it. It is what `/model` uses: the
 session view does not name the session's credential, and need not.
 
-- `credential` omitted means the operator fallback (#368) when it is enabled, and `credential_required`
-  otherwise — the same rule as `POST /v1/sessions` with no credential.
+- `credential` omitted resolves exactly as `POST /v1/sessions` with no credential: the subject's only
+  inference credential; the operator fallback (#368) when the subject has none and the fallback is
+  enabled; otherwise `credential_required` (none) or `credential_ambiguous` (several).
 - The credential must be the caller's own, with consumer `inference`. Its endpoint resolves as in the
   exchange: the credential's own, else `SH_DEFAULT_INFERENCE_ENDPOINT`.
 - The limits other than `id` are optional: a gateway that reports none yields `{ "id": "…" }`.
