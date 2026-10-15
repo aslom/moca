@@ -53,7 +53,7 @@ describe('compactIfOverflowing', () => {
 
   it('skips, silently, when the window is no larger than reserveTokens + keepRecentTokens', async () => {
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const s = { ...session(1_500), messages: [{ ...big[0] }] as never[] };
+    const s = session(1_500);
     expect(await compactIfOverflowing(s)).toBe(false);
     expect(s.compact).not.toHaveBeenCalled();
     expect(log).not.toHaveBeenCalled();
