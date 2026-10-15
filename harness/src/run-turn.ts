@@ -44,6 +44,7 @@ import { sseExtension, type TurnStreamFrame } from './turn-stream.js';
 import { promotedLoaderOptions, type PromotedConfig } from './config-resolver.js';
 import { leaseTimings } from './lease-timings.js';
 import { attachPromotedConfig, type AttachedPromotedConfig } from './promoted-config.js';
+import { compactIfOverflowing } from './pre-prompt-compaction.js';
 
 // Re-exported because they are now part of executeTurn's CONTRACT: since /turn leases from the pool,
 // every caller of executeTurn can be handed these errors and needs to distinguish them from a generic
@@ -1035,6 +1036,9 @@ async function executeTurnCore(
   });
 
   if (input.signal) wireAbort(input.signal, session);
+
+  // Per-session model spec §5.3: a switch to a smaller window compacts here, not after a failed request.
+  await compactIfOverflowing(session as never);
 
   await session.prompt(prompt);
 
