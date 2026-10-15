@@ -854,7 +854,7 @@ prediction sealed before E8's next rung, since it sits on the hot path.
   first slice that multiplexes users (S2).
 - **Per-user admission quota** (rossoctl/moca#360). `packages/supervisor/src/admission.ts` bounds the worker as a whole,
   so one user can use every slot. This belongs with S2's grants, which name the user.
-  **Closed in-product 2026-10-15:** the subject is known to the worker after `resolveTurnAuth`, and only there, so the
+  **Closed in-product 2026-10-15 (rossoctl/moca#542):** the subject is known to the worker after `resolveTurnAuth`, and only there, so the
   cap is enforced at that point (`packages/knative-server/src/subject-quota.ts`, wired into `handleTurn`): a subject
   over `SH_TURNS_PER_SUBJECT` in-flight turns — default half the per-worker slots, `max(1, ⌊S/2⌋)` — is refused with
   `429 subject_quota_exceeded` plus `Retry-After`, distinct from the supervisor's pool-wide `overloaded` so a client
