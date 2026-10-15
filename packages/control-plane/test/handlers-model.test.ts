@@ -23,7 +23,11 @@ function gateway(down = false): typeof fetch {
 }
 
 async function deps(down = false): Promise<TestDeps> {
-  const d = makeDeps({ fetchImpl: gateway(down) });
+  // The seeded credential's endpoint is litellm.internal: allow-listed as an operator would (R1).
+  const d = makeDeps({
+    fetchImpl: gateway(down),
+    config: { modelCatalogHosts: ['litellm.internal'] },
+  });
   await seedCredential(d);
   return d;
 }
@@ -134,6 +138,119 @@ describe('PATCH /v1/sessions/{id}', () => {
     await create(d, {});
     await d.index.tombstone('sid-fixed');
     expect(await codeOf(() => patch(d, { model: 'claude-opus-4-8' }))).toBe('session_not_found');
+  });
+});
+
+// PR #540 review R1: the catalog contacts only allow-listed hosts; an unlisted one is not fetched
+// and reads exactly like an unreadable catalog.
+describe('the catalog host allow-list (R1)', () => {
+  const spy = () => {
+    const calls: string[] = [];
+    const f = (async (url: string) => {
+      calls.push(url);
+      return new Response(JSON.stringify(INFO), { status: 200 });
+    }) as unknown as typeof fetch;
+    return { calls, f };
+  };
+  const quiet = () => vi.spyOn(console, 'error').mockImplementation(() => {});
+
+  it('accepts the model unverified, without a fetch, on a host not allow-listed', async () => {
+    const { calls, f } = spy();
+    const d = makeDeps({ fetchImpl: f });
+    await seedCredential(d);
+    const log = quiet();
+    const res = await create(d, { model: 'gpt-x' });
+    log.mockRestore();
+    expect(res.body).toMatchObject({ model: 'gpt-x', modelVerified: false });
+    expect(calls).toEqual([]);
+  });
+
+  it('503s the list routes on a host not allow-listed, without a fetch', async () => {
+    const { calls, f } = spy();
+    const d = makeDeps({ fetchImpl: f });
+    await seedCredential(d);
+    const log = quiet();
+    let err: { code?: string; message?: string } = {};
+    try {
+      await HANDLERS.listModels!(ctx({ principal: alice, query: new URLSearchParams() }), d);
+    } catch (e) {
+      err = e as typeof err;
+    }
+    log.mockRestore();
+    expect(err.code).toBe('model_catalog_unavailable');
+    expect(err.message).toBe('the inference endpoint could not list its models');
+    expect(calls).toEqual([]);
+  });
+
+  it('fetches from the default endpoint host without SH_MODEL_CATALOG_HOSTS', async () => {
+    const { calls, f } = spy();
+    const d = makeDeps({
+      fetchImpl: f,
+      config: { defaultInferenceEndpoint: 'https://litellm.internal' },
+    });
+    await seedCredential(d);
+    expect((await create(d, { model: 'claude-opus-4-8' })).body).toMatchObject({
+      modelVerified: true,
+    });
+    expect(calls).toEqual(['https://litellm.internal/v1/model/info']);
+  });
+
+  it('fetches from a host SH_MODEL_CATALOG_HOSTS adds', async () => {
+    const { calls, f } = spy();
+    const d = makeDeps({ fetchImpl: f, config: { modelCatalogHosts: ['litellm.internal'] } });
+    await seedCredential(d);
+    await create(d, { model: 'claude-opus-4-8' });
+    expect(calls).toEqual(['https://litellm.internal/v1/model/info']);
+  });
+});
+
+// PR #540 review R8: the catalog answer can take seconds; the record is re-read before the write.
+describe('PATCH racing a DELETE (R8)', () => {
+  it('refuses, and writes nothing, when the session is tombstoned while the catalog answers', async () => {
+    let d!: TestDeps;
+    const slow = (async () => {
+      await d.index.tombstone('sid-fixed');
+      return new Response(JSON.stringify(INFO), { status: 200 });
+    }) as unknown as typeof fetch;
+    d = makeDeps({ fetchImpl: slow, config: { modelCatalogHosts: ['litellm.internal'] } });
+    await seedCredential(d);
+    await create(d, {});
+    const setModel = vi.spyOn(d.index, 'setModel');
+    expect(await codeOf(() => patch(d, { model: 'claude-opus-4-8' }))).toBe('session_not_found');
+    expect(setModel).not.toHaveBeenCalled();
+    expect((await d.index.get('sid-fixed'))?.model).toBeUndefined();
+  });
+
+  it('refuses when the session is gone entirely while the catalog answers', async () => {
+    let d!: TestDeps;
+    const slow = (async () => {
+      vi.spyOn(d.index, 'get').mockResolvedValue(null);
+      return new Response(JSON.stringify(INFO), { status: 200 });
+    }) as unknown as typeof fetch;
+    d = makeDeps({ fetchImpl: slow, config: { modelCatalogHosts: ['litellm.internal'] } });
+    await seedCredential(d);
+    await create(d, {});
+    const setModel = vi.spyOn(d.index, 'setModel');
+    expect(await codeOf(() => patch(d, { model: 'claude-opus-4-8' }))).toBe('session_not_found');
+    expect(setModel).not.toHaveBeenCalled();
+  });
+
+  it('audits fromModel from the record as it is after the catalog answered', async () => {
+    let d!: TestDeps;
+    const slow = (async () => {
+      // An overlapping PATCH landed while this one waited on the catalog.
+      await d.index.setModel('sid-fixed', 'meta-llama/Llama-3.1-8B-Instruct');
+      return new Response(JSON.stringify(INFO), { status: 200 });
+    }) as unknown as typeof fetch;
+    d = makeDeps({ fetchImpl: slow, config: { modelCatalogHosts: ['litellm.internal'] } });
+    await seedCredential(d);
+    await create(d, {});
+    await patch(d, { model: 'claude-opus-4-8' });
+    expect((d.streams.get('sh:cp:audit') ?? []).at(-1)).toMatchObject({
+      decision: 'model_changed',
+      model: 'claude-opus-4-8',
+      fromModel: 'meta-llama/Llama-3.1-8B-Instruct',
+    });
   });
 });
 

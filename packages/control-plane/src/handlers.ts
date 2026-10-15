@@ -38,7 +38,12 @@ import {
   viewTier,
 } from './exchange.js';
 import { MODEL_ID_RE } from './models.js';
-import { chooseModel, fetchModelCatalog, type ModelChoice } from './model-catalog.js';
+import {
+  catalogAllowList,
+  chooseModel,
+  fetchModelCatalog,
+  type ModelChoice,
+} from './model-catalog.js';
 import type { RunKubectl } from './kubectl.js';
 import { DEFAULT_PAGE_SIZE, type OwnershipIndex, type SessionRecord } from './ownership.js';
 import type { IdentityProvider } from './identity.js';
@@ -61,6 +66,11 @@ export interface CpConfig {
   exchangeToken?: string;
   /** Deployment-level gateway origin, used when a credential carries no `endpoint` (spec §6.2). */
   defaultInferenceEndpoint?: string;
+  /**
+   * Hosts the model catalog may contact besides api.anthropic.com and defaultInferenceEndpoint's
+   * host (`SH_MODEL_CATALOG_HOSTS`, per-session model spec §4.1): exact, lower-case hostnames.
+   */
+  modelCatalogHosts?: string[];
   /** The operator's own key, resolved at EXCHANGE time behind allowOperatorFallback (spec §6.4). */
   operatorInferenceToken?: string;
   /**
@@ -395,8 +405,12 @@ async function chooseFor(
   // The catalog sends the real secret in every mode, so the exchange's direct-mode refusal applies
   // here unconditionally: a misdirected secret must not leave even to list models (final review F1).
   refuseMisdirectedSecret(r, rec.sessionId);
-  return chooseModel(targetOf(r), model, r.credentialName, deps.fetchImpl);
+  return chooseModel(targetOf(r), model, r.credentialName, catalogHostsOf(deps), deps.fetchImpl);
 }
+
+/** The hosts the catalog may contact (spec §4.1): never a user-chosen endpoint unvetted (R1). */
+const catalogHostsOf = (deps: CpDeps) =>
+  catalogAllowList(deps.config.modelCatalogHosts ?? [], deps.config.defaultInferenceEndpoint);
 
 /** The catalog body for the credential `rec` runs on (per-session model spec §4.1). */
 async function catalogFor(
@@ -410,7 +424,7 @@ async function catalogFor(
     body: {
       credential: r.credentialName,
       // Wildcard routes are not models (final review F8): the body keeps its `{ credential, models }`.
-      models: (await fetchModelCatalog(targetOf(r), deps.fetchImpl)).models,
+      models: (await fetchModelCatalog(targetOf(r), catalogHostsOf(deps), deps.fetchImpl)).models,
     },
   };
 }
@@ -684,15 +698,22 @@ export const HANDLERS: Record<string, Handler> = {
       body.model === null
         ? { model: '', verified: true }
         : await chooseFor(rec, modelParam(body.model)!, deps);
+    // The catalog can take seconds (R8): a DELETE in that window must not be undone by an HSET
+    // that recreates `session:<id>` with only model fields -- a key nothing reads and nothing
+    // cleans up -- and an overlapping PATCH must not audit a stale `fromModel`. So re-read here.
+    const fresh = await deps.index.get(rec.sessionId);
+    if (!fresh || fresh.owner !== rec.owner || fresh.tombstone) {
+      throw new CpError('session_not_found', undefined, rec.sessionId);
+    }
     await deps.index.setModel(rec.sessionId, choice.model, choice.limits);
     await deps.index.audit({
       subject: rec.owner,
       sessionId: rec.sessionId,
       decision: 'model_changed',
       model: choice.model || 'default',
-      fromModel: rec.model || 'default',
+      fromModel: fresh.model || 'default',
     });
-    const updated: SessionRecord = { ...rec, model: choice.model, modelLimits: choice.limits };
+    const updated: SessionRecord = { ...fresh, model: choice.model, modelLimits: choice.limits };
     return {
       status: 200,
       body: { ...(await sessionView(updated, deps)), modelVerified: choice.verified },

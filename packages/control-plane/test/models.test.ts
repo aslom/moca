@@ -32,6 +32,23 @@ describe('sanitizeLimits', () => {
     expect(sanitizeLimits({ contextWindow: -1, maxTokens: 1.5, reasoning: 'yes' })).toBeUndefined();
   });
 
+  // PR #540 review R9: a bogus gateway limit must not reach every request's max_tokens.
+  it('drops a context window above 10M', () => {
+    expect(sanitizeLimits({ contextWindow: 1e300, reasoning: true })).toEqual({ reasoning: true });
+    expect(sanitizeLimits({ contextWindow: 10_000_001 })).toBeUndefined();
+    expect(sanitizeLimits({ contextWindow: 10_000_000 })).toEqual({ contextWindow: 10_000_000 });
+  });
+
+  it('clamps maxTokens down to the context window when both are present', () => {
+    expect(sanitizeLimits({ contextWindow: 8000, maxTokens: 32000 })).toEqual({
+      contextWindow: 8000,
+      maxTokens: 8000,
+    });
+    expect(sanitizeLimits({ maxTokens: 32000 })).toEqual({ maxTokens: 32000 });
+    // A dropped window leaves maxTokens unclamped: there is nothing left to clamp it to.
+    expect(sanitizeLimits({ contextWindow: 2e7, maxTokens: 64000 })).toEqual({ maxTokens: 64000 });
+  });
+
   it('is undefined for anything that is not an object', () => {
     expect(sanitizeLimits(null)).toBeUndefined();
     expect(sanitizeLimits('x')).toBeUndefined();
