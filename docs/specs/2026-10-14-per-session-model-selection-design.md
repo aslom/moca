@@ -131,10 +131,17 @@ makes):
   `model_info.mode` is `chat` or absent. Map `model_name` → `id`, `model_info.max_input_tokens` →
   `contextWindow`, `max_output_tokens` → `maxTokens`, `supports_reasoning` → `reasoning`,
   `supports_vision` → `vision`. Dedupe on `model_name` (LiteLLM lists one entry per deployment of a
-  load-balanced model) keeping the smallest limits.
+  load-balanced model) keeping the smallest limits. A `model_name` holding `*` (a wildcard route such
+  as `anthropic/*`) is not listed; it is kept as a pattern instead, and an id it matches as a whole
+  string (`*` is any run of characters) is accepted at §4.2 as verified, with no limits.
 
-Each call has a 5-second timeout. The secret is sent only to the endpoint the credential is already
-bound to. Responses are not cached in this slice.
+Each call has a 5-second timeout, and a body over 4 MiB is refused as unavailable. The secret is sent
+only to the endpoint the credential is already bound to, and never on a triple the exchange would
+refuse as misdirected (a raw Anthropic key resolving anywhere but `api.anthropic.com`, a Bearer token
+resolving to it): the catalog sends the real secret in every mode, so that refusal applies before
+any catalog call, with the exchange's own codes. An upstream refusal reaches the caller as a generic
+`model_catalog_unavailable`; its status is logged with the upstream host only, so the route is no
+probe of the control plane's network. Responses are not cached in this slice.
 
 ### 4.2 Creating a session with a model
 
@@ -223,18 +230,25 @@ cannot fit. In `executeTurn`, after the agent session is built and before `promp
 switch having happened, so it needs no stored "previous window". It runs through pi's own compaction,
 so the M5 checkpoint extension sees it as it sees any other.
 
+As built, the estimate is the sum of pi's exported `estimateTokens` (chars/4) over the messages:
+`estimateContextTokens` is not exported from pi's package entry. A compaction the turn's own abort
+cancels is logged as cancelled, not as a failure.
+
 ## 6. `mocactl`
 
 - **The `model` session option.** A third entry in `SESSION_OPTION_FIELDS`, resolved after
   `inferenceCredential`. Its choices depend on the credential already chosen, so `source` gains the
   values resolved so far: `source(api, values)`. It calls `GET /v1/models?credential=<chosen>`,
   and labels choices `claude-opus-4-8  200k ctx` (the id alone when the catalog reports no limits).
-  The last-used model is preselected. Like the tier, it is
-  `serverMayResolve` and `serverDefaults`: with no catalog (an older control plane's 404, or 503) the
+  The first choice is always the deployment default (sending no `model`), so a single listed model
+  is never pinned unasked; it is preselected unless a model was used last, which is then preselected.
+  Like the tier, it is
+  `serverMayResolve` and `serverDefaults`: with no catalog (an older control plane's 404, or any 503) the
   field is skipped and the session runs on the deployment default. Presets and `run --option model=…`
   gain it with no other change.
 - **The `/model` command** (`ctrl+x m`, in a session only). It opens a list of the session
-  credential's models with the current one marked and calls `PATCH /v1/sessions/{id}` on selection;
+  credential's models with the current one marked (a current id the catalog no longer lists gets its
+  own `(not listed)` row, under the cursor) and calls `PATCH /v1/sessions/{id}` on selection;
   `/model <id>` switches directly. The PATCH is sent at once, even while a turn streams: that turn
   read its model at its exchange, so the switch applies from the next one, and the toast says so.
   The list comes from `GET /v1/sessions/{id}/models`.
@@ -246,17 +260,18 @@ so the M5 checkpoint extension sees it as it sees any other.
 
 ## 7. Failure modes
 
-| Situation                                              | Behaviour                                                                                                                               |
-| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
-| Gateway down when listing                              | `503 model_catalog_unavailable`; mocactl skips the field and creates the session on the default.                                        |
-| Gateway down at create or switch with an explicit id   | Accepted unverified (`modelVerified: false`); environment limits apply; a wrong id fails at the first turn with the gateway's error.    |
-| Gateway down during a turn                             | Unchanged from today: the turn fails. Running sessions never consult the catalog.                                                       |
-| Id dropped from the key's model access after selection | The turn fails with the gateway's error; the user switches with `/model`.                                                               |
-| Credential deleted mid-session                         | Unchanged: the exchange refuses (`credential_required`). The model is irrelevant.                                                       |
-| Switch to a smaller window                             | The next turn compacts first (§5.3).                                                                                                    |
-| Switch across model families behind LiteLLM            | LiteLLM translates the stored Anthropic-format history; provider-specific blocks it cannot carry (thinking signatures) are its to drop. |
-| Older mocactl, newer control plane                     | No `model` sent; the session runs on the default.                                                                                       |
-| Newer mocactl, older control plane                     | `/v1/models` 404s; the field is skipped. `/model` reports that the control plane does not support switching.                            |
+| Situation                                              | Behaviour                                                                                                                                                               |
+| ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Gateway down when listing                              | `503 model_catalog_unavailable`; mocactl skips the field and creates the session on the default.                                                                        |
+| Gateway down at create or switch with an explicit id   | Accepted unverified (`modelVerified: false`); environment limits apply; a wrong id fails at the first turn with the gateway's error.                                    |
+| Gateway down during a turn                             | Unchanged from today: the turn fails. Running sessions never consult the catalog.                                                                                       |
+| Id dropped from the key's model access after selection | The turn fails with the gateway's error; the user switches with `/model`.                                                                                               |
+| Credential deleted mid-session                         | Unchanged: the exchange refuses (`credential_required`). The model is irrelevant.                                                                                       |
+| Switch to a smaller window                             | The next turn compacts first (§5.3).                                                                                                                                    |
+| Switch to a window smaller than the conversation       | Pi compacts with the new model, so a history larger than its whole window cannot be summarized and every turn fails; switch back with `/model`, or start a new session. |
+| Switch across model families behind LiteLLM            | LiteLLM translates the stored Anthropic-format history; provider-specific blocks it cannot carry (thinking signatures) are its to drop.                                 |
+| Older mocactl, newer control plane                     | No `model` sent; the session runs on the default.                                                                                                                       |
+| Newer mocactl, older control plane                     | `/v1/models` 404s; the field is skipped. `/model` reports that the control plane does not support switching.                                                            |
 
 ## 8. Testing
 
@@ -280,3 +295,6 @@ so the M5 checkpoint extension sees it as it sees any other.
 - A MOCA-side model allowlist or per-model cost policy: the gateway key's model access is the policy.
 - Caching the catalog.
 - Cost display: the client still does not know model pricing.
+
+**Follow-up.** Compacting with the outgoing model at switch time, so a switch to a window smaller than
+the conversation can succeed (§7), is planned; this slice compacts with the model the turn runs on.

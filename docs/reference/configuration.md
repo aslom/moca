@@ -188,6 +188,12 @@ These settings are checked per request, not at boot: a missing `CONTEXT_SERVICE_
 | `SH_INJECTOR_CONFIGURED`                                                                                                                                 | off                       | No template sets it                                                                                              | Skips the direct-mode mismatch check                    |
 | `SH_SANDBOX_NAMESPACE`                                                                                                                                   | `default`                 | Used on Kubernetes paths                                                                                         | Sandbox namespace                                       |
 
+**Outbound calls.** Besides the credential store and Redis, the control plane calls inference credential endpoints over
+HTTPS when models are listed or chosen (`GET /v1/models`, `GET /v1/sessions/{id}/models`, `POST /v1/sessions` with a
+`model`, `PATCH /v1/sessions/{id}`): `<endpoint>/model/info` for a gateway, `https://api.anthropic.com/v1/models` for
+an Anthropic key. Egress policies must allow them; if they are blocked, listing returns `model_catalog_unavailable` and
+a chosen model is accepted unverified. A refused call is logged with the upstream host and status only.
+
 ## Sandbox workers (Go)
 
 ### Container sandbox (`remote-worker/cmd/worker`)

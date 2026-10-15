@@ -187,12 +187,21 @@ A session runs on the deployment's default model unless it names one. Name it wh
 mocactl run --new --option model=claude-opus-4-8 "…"
 ```
 
-`mocactl` lists the models from the session credential's endpoint; with several and no `model` given, an interactive run
-asks and a script leaves the deployment default. In the TUI, `/model` (or `ctrl+x m`) lists the session's models and
+`mocactl` lists the models from the session credential's endpoint, with the deployment default first; with no `model`
+given, an interactive run asks (the deployment default preselected) and a script leaves the deployment default. In the TUI, `/model` (or `ctrl+x m`) lists the session's models and
 switches to the one you pick, `/model ID` switches directly, and `/model default` returns to the deployment default. A
 switch applies from the next turn; the status line shows `model <id>` or `model default`.
 
 A LiteLLM key's own model access decides which models are listed: a key limited to some models lists only those.
+
+A switch to a model with a smaller context window compacts the conversation first. If the conversation is already much
+larger than the new model's whole window, it cannot be compacted and every turn fails: switch back with `/model`, or
+start a new session.
+
+Operator note: listing or choosing a model makes the control plane call the credential's endpoint over HTTPS
+(`<endpoint>/model/info`, or `https://api.anthropic.com/v1/models` for an Anthropic key). Egress policies must allow
+those calls; if they are blocked, listing fails with `model_catalog_unavailable` and a chosen model is accepted
+unverified. See [Configuration: control plane](../reference/configuration.md#control-plane).
 
 ## 6. Revoke access
 
