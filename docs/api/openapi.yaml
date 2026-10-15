@@ -149,6 +149,7 @@ components:
             format: { type: string }
         endpoint:
           type: [string, 'null']
+          maxLength: 2048
           description: full gateway origin; meaningful only for consumer `inference`
     ModelList:
       type: object
@@ -449,6 +450,13 @@ paths:
         Asked of the credential's own endpoint: LiteLLM's /model/info, or Anthropic's /v1/models for
         api.anthropic.com (ids only). `credential` omitted means the credential a new session would
         use: the only inference credential, or the operator fallback when the subject has none.
+
+        The control plane asks only an allow-listed host: api.anthropic.com, the deployment default
+        endpoint's host, or a host in SH_MODEL_CATALOG_HOSTS. Any other host is not contacted and
+        answers 503 `model_catalog_unavailable`, as an unreachable endpoint does; every catalog
+        failure carries the same message. Lists only concrete models: a LiteLLM wildcard route
+        (e.g. `anthropic/*`) is not listed, though `model` on createSession / updateSession accepts
+        an id it matches.
       security: [{ sessionToken: [] }]
       parameters:
         - { name: credential, in: query, required: false, schema: { type: string } }
@@ -466,7 +474,9 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '503':
-          description: '`model_catalog_unavailable`: the endpoint could not list its models'
+          description: |
+            `model_catalog_unavailable`: the endpoint could not list its models (unreachable,
+            refused, an unreadable body, or a host outside the catalog allow-list)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -483,8 +493,13 @@ paths:
         default is recorded. A 400 `invalid_request` names the declared tiers. `sandbox`, when
         present, must be an object; any tier is a 400 on a deployment that declares none.
 
-        `model`, when given, is checked against the credential's catalog: `model_unavailable` when it
-        is not listed; accepted unverified when the catalog cannot be read.
+        `model`, when given, is checked against the credential's catalog (GET /v1/models):
+        - listed → recorded with its limits, `modelVerified: true`;
+        - not listed, but a LiteLLM wildcard route (e.g. `anthropic/*`) matches it as a whole string
+          → recorded without limits, `modelVerified: true`;
+        - the catalog cannot be read, or the endpoint's host is not in the catalog allow-list (see
+          listModels) → recorded without limits, `modelVerified: false`;
+        - otherwise → 400 `model_unavailable`.
       security: [{ sessionToken: [] }]
       requestBody:
         required: false
@@ -505,7 +520,9 @@ paths:
                 model:
                   type: string
                   pattern: '^[\x21-\x7e]{1,256}$'
-                  description: a model id the credential's endpoint lists (GET /v1/models)
+                  description: |
+                    a model id the credential's endpoint lists (GET /v1/models), or one its
+                    wildcard routes match
       responses:
         '201':
           description: created
@@ -597,9 +614,17 @@ paths:
       operationId: updateSession
       summary: Switch the session's model
       description: |
-        `model` is a model id the session's credential lists, or null for the deployment default.
+        `model` is a model id, checked against the session's credential's catalog exactly as on
+        createSession, or null for the deployment default:
+        - listed → stored with its limits, `modelVerified: true`;
+        - not listed, but a LiteLLM wildcard route (e.g. `anthropic/*`) matches it as a whole string
+          → stored without limits, `modelVerified: true`;
+        - the catalog cannot be read, or the endpoint's host is not in the catalog allow-list (see
+          listModels) → stored without limits, `modelVerified: false`;
+        - otherwise → 400 `model_unavailable`.
         A turn already running keeps its model; the next turn uses the new one. Any other field is
-        `invalid_request`. Audited as `model_changed`.
+        `invalid_request`. A session deleted while the catalog answered is `session_not_found`, and
+        nothing is written. Audited as `model_changed`.
       security: [{ sessionToken: [] }]
       parameters: [{ $ref: '#/components/parameters/sessionId' }]
       requestBody:
@@ -622,7 +647,12 @@ paths:
                   - { $ref: '#/components/schemas/Session' }
                   - type: object
                     properties:
-                      modelVerified: { type: boolean }
+                      modelVerified:
+                        type: boolean
+                        description: |
+                          false when the catalog could not be read (or its host is not
+                          allow-listed) and the id was accepted unchecked; true for null
+                          (the deployment default)
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }

@@ -10,11 +10,12 @@ type Msg = Parameters<typeof estimateTokens>[0];
 
 /**
  * Pi checks for compaction after each reply and again inside prompt(), before sending
- * (`_checkCompaction(lastAssistant, false)`) -- but both checks read the LAST REPLY's usage, which
- * a previous model produced against its own window, and on an overflow error pi compacts and
- * retries. After a switch to a smaller model (per-session model spec §5.3) the next request could
- * therefore be sent knowing it cannot fit. This check does not depend on a reply's usage: the
- * loaded history, estimated as pi estimates it (chars/4), against the CURRENT model's window.
+ * (`_checkCompaction(lastAssistant, false)`), against the current model's window -- but both read
+ * the LAST REPLY's reported usage: counted by whichever model produced it (after a switch, the old
+ * one), and not consulted at all when that reply predates the latest compaction. On an overflow
+ * error pi compacts and retries. After a switch to a smaller model (per-session model spec §5.3)
+ * the next request could therefore be sent knowing it cannot fit. This check reads no reply's
+ * usage: the loaded history, estimated as pi estimates it (chars/4), against the CURRENT window.
  * It does not depend on a switch having happened, so no "previous window" is stored anywhere.
  */
 export function promptWouldOverflow(

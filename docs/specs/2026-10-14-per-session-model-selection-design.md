@@ -1,6 +1,6 @@
 # Per-session model selection — choose and switch the model behind one inference credential — Design
 
-**Date:** 2026-10-14 · **Status:** Proposed · **Issue:** none yet (owed item 3 of the
+**Date:** 2026-10-14 · **Status:** Implemented · **Issue:** none yet (owed item 3 of the
 [mocactl spec §13](2026-09-25-mocactl-control-plane-client-design.md))
 **Builds on (reuse, no redesign):** [multi-user-control-plane-design](2026-09-08-multi-user-control-plane-design.md)
 (MU1: the credential store, the exchange, the `SessionRecord`);
@@ -135,13 +135,27 @@ makes):
   as `anthropic/*`) is not listed; it is kept as a pattern instead, and an id it matches as a whole
   string (`*` is any run of characters) is accepted at §4.2 as verified, with no limits.
 
-Each call has a 5-second timeout, and a body over 4 MiB is refused as unavailable. The secret is sent
-only to the endpoint the credential is already bound to, and never on a triple the exchange would
-refuse as misdirected (a raw Anthropic key resolving anywhere but `api.anthropic.com`, a Bearer token
-resolving to it): the catalog sends the real secret in every mode, so that refusal applies before
-any catalog call, with the exchange's own codes. An upstream refusal reaches the caller as a generic
-`model_catalog_unavailable`; its status is logged with the upstream host only, so the route is no
-probe of the control plane's network. Responses are not cached in this slice.
+One 5-second bound covers the whole catalog call, all pages included, and a body over 4 MiB is
+refused as unavailable. At most 64 wildcard routes are kept from one catalog; the rest are dropped
+with a log line. The request URL is built with the URL API: the endpoint's query and fragment are
+dropped, so neither can swallow the `/model/info` or `/v1/models` suffix, and an existing path prefix
+(`/v1`) is kept. The secret is sent only to the endpoint the credential is already bound to, and
+never on a triple the exchange would refuse as misdirected (a raw Anthropic key resolving anywhere
+but `api.anthropic.com`, a Bearer token resolving to it): the catalog sends the real secret in every
+mode, so that refusal applies before any catalog call, with the exchange's own codes. Responses are
+not cached in this slice.
+
+**Host allow-list.** The endpoint is the user's to choose, so the catalog contacts a host only if it
+is `api.anthropic.com`, the host of `SH_DEFAULT_INFERENCE_ENDPOINT`, or listed in the operator's
+`SH_MODEL_CATALOG_HOSTS` (comma-separated hostnames, matched exactly and case-insensitively against
+the endpoint's parsed hostname; a malformed entry refuses to boot). Refusing private or loopback
+ranges instead would break the primary case, LiteLLM in-cluster on a private address. A host outside
+the allow-list is not fetched: it is treated exactly as an unreadable catalog (the list routes 503;
+create and switch accept the id unverified, §4.2), and one server-side line names the host. Every
+caller-facing catalog failure — not allow-listed, refused, did not answer, not JSON, no data list, too
+large — carries the same message, "the inference endpoint could not list its models"; the host and
+the specific reason are logged, never the path, the query or the secret. So the route is no probe
+of the control plane's network.
 
 ### 4.2 Creating a session with a model
 
@@ -150,7 +164,10 @@ probe of the control plane's network. Responses are not cached in this slice.
 - **The id is in the catalog** → stored with its limits.
 - **The id is not in the catalog** → `400 model_unavailable`, naming the credential and the id, never the
   key.
-- **The catalog cannot be read** (timeout, non-2xx, a gateway without `/model/info`) → the id is
+- **The id is not listed, but a wildcard route matches it** (§4.1) → stored without limits,
+  `"modelVerified": true`.
+- **The catalog cannot be read** (timeout, non-2xx, a gateway without `/model/info`, or an endpoint
+  host outside the catalog allow-list, §4.1) → the id is
   accepted **without limits** and the response carries `"modelVerified": false`. The harness then falls
   back to the environment's limits (§5.2), and a wrong id fails on the first turn with the gateway's
   own error. Refusing here would make a gateway outage block every new session.
@@ -164,7 +181,9 @@ session to the deployment default. Any other body field is `invalid_request`. Th
 (`decision: 'model_changed'`, with the old and new ids).
 
 A turn already in flight read its model at its exchange and keeps it; the next turn's exchange
-returns the new one. The response is the session view (§4.5).
+returns the new one. The response is the session view (§4.5). The record is re-read after the
+catalog answers: a session deleted in that window is `session_not_found` and nothing is written, and
+the audit's old id is the one stored at write time.
 
 ### 4.4 Stored data
 
@@ -173,6 +192,9 @@ Two new fields on `SessionRecord`, read tolerantly:
 - `model?: string` — the chosen id; `''` or absent means the deployment default.
 - `modelLimits?: { contextWindow?: number; maxTokens?: number; reasoning?: boolean; vision?: boolean }`
   — the snapshot from the catalog; absent when unverified.
+  Kept only with the right types: a `contextWindow` above 10,000,000 is dropped, and `maxTokens` is
+  clamped down to `contextWindow` when both are present (it becomes every request's `max_tokens`).
+  The data plane refuses a window above the same bound as a malformed model.
 
 The previous release ignores both, so a rollback leaves sessions on the deployment default.
 
@@ -200,7 +222,7 @@ configuration.
 
 `TurnAuth` (`packages/knative-server/src/turn-auth.ts:26`) gains `model?` as the exchange returned it.
 `buildConfig(auth)` copies it into a new `TurnConfig.sessionModel`. It does **not** set
-`TurnConfig.model`: `/runs` reads that field too (`run-leaf.ts:384`) and would then hand pi's registry
+`TurnConfig.model`: `/runs` reads that field too (`run-leaf.ts:400`, `runPromptLeaf`) and would then hand pi's registry
 an id it may not know. Only the interactive turn (`executeTurn`) reads `sessionModel`.
 
 ### 5.2 Building the model
@@ -221,10 +243,13 @@ none, `requireModel` runs unchanged. With one:
 
 ### 5.3 Compacting before a prompt that would not fit
 
-Pi decides on compaction after a reply, against the active model's window
-(`pi-fork/packages/coding-agent/src/core/agent-session.ts:1872`), and on an overflow error it compacts
-and retries. After a switch to a smaller window the first turn could therefore send a request that
-cannot fit. In `executeTurn`, after the agent session is built and before `prompt()`
+Pi checks for compaction after each reply and again inside `prompt()` before sending
+(`_checkCompaction(lastAssistant, false)`,
+`pi-fork/packages/coding-agent/src/core/agent-session.ts:1068`), against the active model's window, and
+on an overflow error it compacts and retries. Both checks read the last reply's reported usage:
+counted by whichever model produced it — after a switch, the old one — and not consulted at all when
+that reply predates the latest compaction. After a switch to a smaller window the first turn could
+therefore send a request that cannot fit. In `executeTurn`, after the agent session is built and before `prompt()`
 (`run-turn.ts:978` onward): when compaction is enabled and `estimateContextTokens(messages)` exceeds
 `model.contextWindow − reserveTokens`, call `session.compact()` first. The check does not depend on a
 switch having happened, so it needs no stored "previous window". It runs through pi's own compaction,
@@ -232,7 +257,16 @@ so the M5 checkpoint extension sees it as it sees any other.
 
 As built, the estimate is the sum of pi's exported `estimateTokens` (chars/4) over the messages:
 `estimateContextTokens` is not exported from pi's package entry. A compaction the turn's own abort
-cancels is logged as cancelled, not as a failure.
+cancels is logged as cancelled, not as a failure. The check is skipped, silently, when compacting
+cannot help: the branch already ends in a compaction (pi would throw "Already compacted"), or the
+window is no larger than `reserveTokens + keepRecentTokens` (it stays over the threshold even after
+compacting).
+
+A turn whose model differs from the last one recorded on the branch (the latest `model_change` or
+assistant reply) appends a `model_change` through pi's `SessionManager.appendModelChange` before
+`prompt()`: pi records only a new session's model, so without it the transcript and
+`buildSessionContext().model` would go on naming the first one. Resumption never depended on it —
+the model is always passed explicitly.
 
 ## 6. `mocactl`
 
@@ -290,7 +324,7 @@ cancels is logged as cancelled, not as a failure.
 
 ## 9. Scope — explicitly not building
 
-- A model choice on `/runs` envelopes: they already carry `model` (`run-leaf.ts:384`).
+- A model choice on `/runs` envelopes: they already carry `model` (`run-leaf.ts:400`, `runPromptLeaf`).
 - A per-session wire API: `SH_MODEL_API` stays deployment-wide.
 - A MOCA-side model allowlist or per-model cost policy: the gateway key's model access is the policy.
 - Caching the catalog.

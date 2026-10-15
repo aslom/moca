@@ -187,8 +187,12 @@ A session runs on the deployment's default model unless it names one. Name it wh
 mocactl run --new --option model=claude-opus-4-8 "…"
 ```
 
-`mocactl` lists the models from the session credential's endpoint, with the deployment default first; with no `model`
-given, an interactive run asks (the deployment default preselected) and a script leaves the deployment default. In the TUI, `/model` (or `ctrl+x m`) lists the session's models and
+`mocactl` lists the models from the session credential's endpoint, with the deployment default first. The TUI's New
+Session form asks (the deployment default preselected); `mocactl run` never asks, and with no `model` given it leaves
+the deployment default. `mocactl run --option model=ID` with an id the catalog does not list exits 2 (`unknown model
+'ID'; declared: …`). That includes an id a LiteLLM wildcard route (such as `anthropic/*`) would accept: the catalog
+lists only concrete models. Pick such an id with `/model ID` in the TUI instead, which the server checks against the
+routes too. In the TUI, `/model` (or `ctrl+x m`) lists the session's models and
 switches to the one you pick, `/model ID` switches directly, and `/model default` returns to the deployment default. A
 switch applies from the next turn; the status line shows `model <id>` or `model default`.
 
@@ -198,9 +202,11 @@ A switch to a model with a smaller context window compacts the conversation firs
 larger than the new model's whole window, it cannot be compacted and every turn fails: switch back with `/model`, or
 start a new session.
 
-Operator note: listing or choosing a model makes the control plane call the credential's endpoint over HTTPS
-(`<endpoint>/model/info`, or `https://api.anthropic.com/v1/models` for an Anthropic key). Egress policies must allow
-those calls; if they are blocked, listing fails with `model_catalog_unavailable` and a chosen model is accepted
+Operator note: listing or choosing a model makes the control plane call the credential's endpoint, with the endpoint's
+own scheme (`<endpoint>/v1/models` when its host is `api.anthropic.com`, `<endpoint>/model/info` for any other host).
+It calls only `api.anthropic.com`, the default endpoint's host, and the hosts in `SH_MODEL_CATALOG_HOSTS`: add each
+other gateway host your users' credentials name. Egress policies must allow those calls. A host outside the
+allow-list, or a call that fails, lists nothing (`model_catalog_unavailable`), and a chosen model is accepted
 unverified. See [Configuration: control plane](../reference/configuration.md#control-plane).
 
 ## 6. Revoke access

@@ -187,12 +187,25 @@ These settings are checked per request, not at boot: a missing `CONTEXT_SERVICE_
 | `SH_SESSION_TOKEN_PUBLIC_KEYS`                                                                                                                           | empty                     | Malformed throws                                                                                                 | Extra public keys for rotation                          |
 | `SH_INJECTOR_CONFIGURED`                                                                                                                                 | off                       | No template sets it                                                                                              | Skips the direct-mode mismatch check                    |
 | `SH_SANDBOX_NAMESPACE`                                                                                                                                   | `default`                 | Used on Kubernetes paths                                                                                         | Sandbox namespace                                       |
+| `SH_MODEL_CATALOG_HOSTS`                                                                                                                                 | empty                     | Comma-separated bare hostnames, case-insensitive; a URL, port or path refuses to boot                            | Extra hosts the model catalog may contact               |
 
-**Outbound calls.** Besides the credential store and Redis, the control plane calls inference credential endpoints over
-HTTPS when models are listed or chosen (`GET /v1/models`, `GET /v1/sessions/{id}/models`, `POST /v1/sessions` with a
-`model`, `PATCH /v1/sessions/{id}`): `<endpoint>/model/info` for a gateway, `https://api.anthropic.com/v1/models` for
-an Anthropic key. Egress policies must allow them; if they are blocked, listing returns `model_catalog_unavailable` and
-a chosen model is accepted unverified. A refused call is logged with the upstream host and status only.
+**Outbound calls.** Besides the credential store and Redis, the control plane calls inference credential endpoints
+when models are listed or chosen (`GET /v1/models`, `GET /v1/sessions/{id}/models`, `POST /v1/sessions` with a
+`model`, `PATCH /v1/sessions/{id}`), with the endpoint's own scheme: `<endpoint>/v1/models` when the endpoint's host is
+`api.anthropic.com`, `<endpoint>/model/info` for any other host. The endpoint's query and fragment are dropped.
+
+The endpoint is the user's to choose, so these calls go only to an allow-listed host: `api.anthropic.com`, the host of
+`SH_DEFAULT_INFERENCE_ENDPOINT`, and the hosts in `SH_MODEL_CATALOG_HOSTS`. Without the allow-list, any user with a
+credential could make the control plane probe its own network (Redis, the identity provider, the Kubernetes API).
+Private addresses are not refused as such, because an in-cluster gateway is usually on one. Add each gateway host your
+users' credentials name, other than the default endpoint's, to `SH_MODEL_CATALOG_HOSTS` (for example
+`litellm.team-a.svc,gw.example.com`). A host outside the allow-list is not contacted: listing returns
+`model_catalog_unavailable` and a chosen model is accepted unverified, exactly as when the endpoint is down, and the
+control plane logs the host with `not in the catalog allow-list (SH_MODEL_CATALOG_HOSTS)`.
+
+Egress policies must allow these calls. Every failure gives the caller the same message, `the inference endpoint could
+not list its models`; the log names the host and the reason (its status, no answer, not JSON, too large), never the
+path, the query or the secret.
 
 ## Sandbox workers (Go)
 
