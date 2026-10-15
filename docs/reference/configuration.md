@@ -38,6 +38,7 @@
 | Variable                       | Default                         | Required / notes                                                                                     | Meaning                                            |
 | ------------------------------ | ------------------------------- | ---------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
 | `SH_TURNS_PER_WORKER`          | none                            | **Required**, at least 1; blank refuses to boot                                                      | S, the in-flight turn cap per worker               |
+| `SH_TURNS_PER_SUBJECT`         | half of S, min 1                | Integer at least 1; a malformed value falls back to the default; unset with no S means no quota      | Per-subject in-flight turn cap per worker (#360)   |
 | `PORT`                         | `8080`                          | Integer 0-65535                                                                                      | Data-path listen port                              |
 | `SH_ADMIN_PORT`                | `8081`                          | Must differ from `PORT` unless 0                                                                     | Admin listener (`/metrics`, `/healthz`, `/readyz`) |
 | `SH_ADMIN_HOST`                | `127.0.0.1`                     | IP literal only. The admin listener is unauthenticated; widen it only behind your own access control | Admin bind address                                 |
