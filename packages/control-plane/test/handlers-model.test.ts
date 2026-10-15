@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { HANDLERS } from '../src/handlers.js';
 import { exchangeCredential } from '../src/exchange.js';
 import { makeDeps, ctx, alice, codeOf, seedCredential, type TestDeps } from './helpers/deps.js';
@@ -211,4 +211,100 @@ describe('the catalog routes', () => {
       ),
     ).toBe('session_not_found');
   });
+});
+
+describe('a misdirected secret never reaches the catalog (final review F1)', () => {
+  // The catalog always sends the real secret, so the exchange's direct-mode check applies to it
+  // whatever the mode: a raw Anthropic key must not go to a gateway, a Bearer token not to Anthropic.
+  const RAW_KEY = 'sk-ant-api03-not-a-real-key'; // notsecret
+  const spy = () => {
+    const calls: string[] = [];
+    const f = (async (url: string) => {
+      calls.push(url);
+      return new Response(JSON.stringify(INFO), { status: 200 });
+    }) as unknown as typeof fetch;
+    return { calls, f };
+  };
+
+  const cases = [
+    {
+      name: 'a raw Anthropic key resolving to a gateway default',
+      endpoint: 'https://litellm.internal',
+      over: {
+        kind: 'api-key',
+        destination: { hosts: ['api.anthropic.com'] },
+        endpoint: undefined,
+        secret: { key: RAW_KEY },
+      },
+      text: 'set its endpoint to https://api.anthropic.com',
+      secret: RAW_KEY,
+    },
+    {
+      name: 'a Bearer token resolving to api.anthropic.com',
+      endpoint: 'https://api.anthropic.com',
+      over: { endpoint: undefined, destination: { hosts: ['api.anthropic.com'] } },
+      text: "store the key with kind 'api-key'",
+      secret: 'sk-fake',
+    },
+  ];
+
+  const routes = {
+    'POST with a model': (d: TestDeps) => create(d, { model: 'claude-opus-4-8' }),
+    PATCH: async (d: TestDeps) => {
+      await create(d, {});
+      return patch(d, { model: 'claude-opus-4-8' });
+    },
+    'GET /v1/models': (d: TestDeps) =>
+      HANDLERS.listModels!(ctx({ principal: alice, query: new URLSearchParams() }), d),
+    'GET /v1/sessions/{id}/models': async (d: TestDeps) => {
+      await create(d, {});
+      return HANDLERS.listSessionModels!(ctx({ principal: alice, params: { id: 'sid-fixed' } }), d);
+    },
+  };
+
+  for (const c of cases) {
+    for (const [route, call] of Object.entries(routes)) {
+      it(`${route}: refuses ${c.name} without fetching`, async () => {
+        const { calls, f } = spy();
+        const d = makeDeps({ fetchImpl: f, config: { defaultInferenceEndpoint: c.endpoint } });
+        await seedCredential(d, 'github:1234', 'my-anthropic', c.over);
+        let err: { code?: string; message?: string } = {};
+        try {
+          await call(d);
+        } catch (e) {
+          err = e as typeof err;
+        }
+        expect(err.code).toBe('credential_required');
+        expect(err.message).toContain(c.text);
+        expect(err.message).not.toContain(c.secret);
+        expect(calls).toEqual([]);
+      });
+    }
+  }
+
+  it.each([
+    [RAW_KEY, 'https://litellm.internal'],
+    ['op-gw-token', 'https://api.anthropic.com'], // notsecret
+  ])(
+    'GET /v1/models: a misconfigured operator fallback is credential_unavailable',
+    async (token, endpoint) => {
+      const { calls, f } = spy();
+      const d = makeDeps({
+        fetchImpl: f,
+        config: {
+          allowOperatorFallback: true,
+          operatorInferenceToken: token,
+          defaultInferenceEndpoint: endpoint,
+        },
+      });
+      const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        expect(await codeOf(() => routes['GET /v1/models'](d))).toBe('credential_unavailable');
+        expect(log.mock.calls.join('\n')).not.toContain(token);
+      } finally {
+        log.mockRestore();
+      }
+      expect(calls).toEqual([]);
+    },
+  );
 });

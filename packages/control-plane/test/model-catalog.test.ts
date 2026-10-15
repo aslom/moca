@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   chooseModel,
   fetchModelCatalog,
@@ -68,7 +68,7 @@ const INFO = {
 
 describe('parseLiteLLMModelInfo', () => {
   it('maps, filters non-chat and invalid names, and dedupes keeping the smaller limits', () => {
-    expect(parseLiteLLMModelInfo(INFO)).toEqual([
+    expect(parseLiteLLMModelInfo(INFO).models).toEqual([
       {
         id: 'claude-opus-4-8',
         contextWindow: 150000,
@@ -78,6 +78,20 @@ describe('parseLiteLLMModelInfo', () => {
       },
       { id: 'granite-4.1-8b' },
     ]);
+  });
+
+  it('keeps wildcard routes out of the list, as patterns (final review F8)', () => {
+    const body = {
+      data: [
+        ...INFO.data,
+        { model_name: 'anthropic/*', model_info: {} },
+        { model_name: 'openai/gpt-*', model_info: { mode: 'chat' } },
+        { model_name: 'embed/*', model_info: { mode: 'embedding' } },
+      ],
+    };
+    const { models, patterns } = parseLiteLLMModelInfo(body);
+    expect(models.map((m) => m.id)).toEqual(['claude-opus-4-8', 'granite-4.1-8b']);
+    expect(patterns).toEqual(['anthropic/*', 'openai/gpt-*']);
   });
 
   it('refuses a body with no data array', async () => {
@@ -90,7 +104,7 @@ describe('parseLiteLLMModelInfo', () => {
 describe('fetchModelCatalog — LiteLLM', () => {
   it('calls /model/info with the credential as Bearer', async () => {
     const { f, calls } = fakeFetch(json(INFO));
-    const models = await fetchModelCatalog(litellm, f);
+    const { models } = await fetchModelCatalog(litellm, f);
     expect(models.map((m) => m.id)).toEqual(['claude-opus-4-8', 'granite-4.1-8b']);
     expect(calls[0]!.url).toBe('https://litellm.internal/model/info');
     expect(calls[0]!.headers.authorization).toBe('Bearer sk-litellm');
@@ -137,6 +151,39 @@ describe('fetchModelCatalog — LiteLLM', () => {
     expect(message).not.toContain('sk-litellm');
   });
 
+  it('tells the caller nothing of the upstream status; logs it with the host only (final review F2)', async () => {
+    const { f } = fakeFetch(() => new Response('nope', { status: 403 }));
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    let message = '';
+    try {
+      await fetchModelCatalog({ ...litellm, baseUrl: 'https://litellm.internal/v1?tenant=t1' }, f);
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    const logged = log.mock.calls.map((c) => c.join(' ')).join('\n');
+    log.mockRestore();
+    expect(message).toMatch(/could not list models/);
+    expect(message).not.toContain('403');
+    expect(message).not.toContain('litellm.internal');
+    expect(logged).toContain('litellm.internal');
+    expect(logged).toContain('403');
+    expect(logged).not.toContain('tenant=t1');
+    expect(logged).not.toContain('/model/info');
+    expect(logged).not.toContain('sk-litellm');
+  });
+
+  it('refuses a body over 4 MiB (final review F9)', async () => {
+    const big = JSON.stringify({ data: [], pad: 'x'.repeat(4 * 1024 * 1024) });
+    const { f } = fakeFetch(() => new Response(big, { status: 200 }));
+    expect(await codeOf(() => fetchModelCatalog(litellm, f))).toBe('model_catalog_unavailable');
+  });
+
+  it('reads a body just under the cap', async () => {
+    const body = JSON.stringify({ ...INFO, pad: 'x'.repeat(4 * 1024 * 1024 - 2000) });
+    const { f } = fakeFetch(() => new Response(body, { status: 200 }));
+    expect((await fetchModelCatalog(litellm, f)).models).toHaveLength(2);
+  });
+
   it('times out a gateway that never answers', async () => {
     const hang = (async (_u: string, init?: RequestInit) =>
       new Promise((_, reject) =>
@@ -162,10 +209,10 @@ describe('fetchModelCatalog — Anthropic', () => {
       json({ data: [{ id: 'claude-opus-4-8' }], has_more: true, last_id: 'claude-opus-4-8' }),
       json({ data: [{ id: 'claude-haiku-4-5' }], has_more: false, last_id: 'claude-haiku-4-5' }),
     );
-    expect(await fetchModelCatalog(anthropic, f)).toEqual([
-      { id: 'claude-opus-4-8' },
-      { id: 'claude-haiku-4-5' },
-    ]);
+    expect(await fetchModelCatalog(anthropic, f)).toEqual({
+      models: [{ id: 'claude-opus-4-8' }, { id: 'claude-haiku-4-5' }],
+      patterns: [],
+    });
     expect(calls[0]!.url).toBe('https://api.anthropic.com/v1/models?limit=1000');
     expect(calls[1]!.url).toBe(
       'https://api.anthropic.com/v1/models?limit=1000&after_id=claude-opus-4-8',
@@ -225,6 +272,38 @@ describe('chooseModel', () => {
     expect(await chooseModel(litellm, 'gpt-x', 'litellm-prod', f)).toEqual({
       model: 'gpt-x',
       verified: false,
+    });
+  });
+
+  describe('wildcard routes (final review F8)', () => {
+    const WILD = {
+      data: [...INFO.data, { model_name: 'anthropic/*', model_info: { max_input_tokens: 1 } }],
+    };
+    it('accepts an unlisted id a wildcard route matches, verified, without limits', async () => {
+      const { f } = fakeFetch(json(WILD));
+      expect(await chooseModel(litellm, 'anthropic/claude-opus-4-8', 'litellm-prod', f)).toEqual({
+        model: 'anthropic/claude-opus-4-8',
+        verified: true,
+      });
+    });
+    it.each(['openai/gpt-x', 'xanthropic/claude', 'anthropic'])(
+      'still refuses %s, which no route matches as a whole string',
+      async (id) => {
+        const { f } = fakeFetch(json(WILD));
+        expect(await codeOf(() => chooseModel(litellm, id, 'litellm-prod', f))).toBe(
+          'model_unavailable',
+        );
+      },
+    );
+    it('prefers the exact listing, with its limits', async () => {
+      const body = { data: [...INFO.data, { model_name: '*', model_info: {} }] };
+      const { f } = fakeFetch(json(body));
+      expect((await chooseModel(litellm, 'claude-opus-4-8', 'litellm-prod', f)).limits).toEqual({
+        contextWindow: 150000,
+        maxTokens: 32000,
+        reasoning: true,
+        vision: true,
+      });
     });
   });
 });

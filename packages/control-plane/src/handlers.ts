@@ -32,6 +32,7 @@ import {
 import {
   exchangeCredential,
   OPERATOR_FALLBACK_NAME,
+  refuseMisdirectedSecret,
   resolveInference,
   targetOf,
   viewTier,
@@ -391,6 +392,9 @@ async function chooseFor(
   deps: CpDeps,
 ): Promise<ModelChoice> {
   const r = await resolveInference(rec, deps);
+  // The catalog sends the real secret in every mode, so the exchange's direct-mode refusal applies
+  // here unconditionally: a misdirected secret must not leave even to list models (final review F1).
+  refuseMisdirectedSecret(r, rec.sessionId);
   return chooseModel(targetOf(r), model, r.credentialName, deps.fetchImpl);
 }
 
@@ -400,11 +404,13 @@ async function catalogFor(
   deps: CpDeps,
 ) {
   const r = await resolveInference(rec, deps);
+  refuseMisdirectedSecret(r, rec.sessionId); // as in chooseFor
   return {
     status: 200,
     body: {
       credential: r.credentialName,
-      models: await fetchModelCatalog(targetOf(r), deps.fetchImpl),
+      // Wildcard routes are not models (final review F8): the body keeps its `{ credential, models }`.
+      models: (await fetchModelCatalog(targetOf(r), deps.fetchImpl)).models,
     },
   };
 }

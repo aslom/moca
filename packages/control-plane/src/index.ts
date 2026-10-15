@@ -93,6 +93,7 @@ export {
   checkExchangeAuth,
   exchangeCredential,
   placeholderFor,
+  refuseMisdirectedSecret,
   resolveInference,
   targetOf,
   type CredentialMode,

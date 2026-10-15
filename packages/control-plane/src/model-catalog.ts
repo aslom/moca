@@ -22,6 +22,9 @@ const MAX_ANTHROPIC_PAGES = 20;
 const unavailable = (why: string) =>
   new CpError('model_catalog_unavailable', `the inference endpoint could not list models: ${why}`);
 
+/** A catalog body larger than this is refused unread (final review F9): no model list is near it. */
+export const MAX_CATALOG_BODY_BYTES = 4 * 1024 * 1024;
+
 async function getJson(
   url: string,
   headers: Record<string, string>,
@@ -31,25 +34,77 @@ async function getJson(
   // redirect: 'error' prevents cross-origin redirects from forwarding the x-api-key header
   // (Fetch spec strips only Authorization on cross-origin redirects, not custom headers).
   const res = await fetchImpl(url, { headers, signal, redirect: 'error' });
-  if (!res.ok) throw unavailable(`it answered ${res.status}`);
+  if (!res.ok) {
+    // The status stays server-side: echoed to the caller it would make this route a reachability
+    // oracle into the control plane's network (final review F2). The log names the host only --
+    // never the path or query, which may carry tenant detail, and never the secret.
+    const host = URL.parse(url)?.hostname ?? 'an unparseable URL';
+    console.error(`[control-plane] model catalog: ${host} answered ${res.status}`);
+    throw unavailable('it refused the request');
+  }
+  const text = await readCapped(res, MAX_CATALOG_BODY_BYTES);
+  if (text === undefined) throw unavailable('it answered with a body that is too large');
   try {
-    return await res.json();
+    return JSON.parse(text);
   } catch {
     throw unavailable('it answered with a body that is not JSON');
   }
 }
 
-/** LiteLLM's `/model/info` → entries, chat models only, one per name with the smallest limits. */
-export function parseLiteLLMModelInfo(body: unknown): ModelEntry[] {
+/** The body as text, or undefined once it passes `cap` bytes -- read no further than that. */
+async function readCapped(res: Response, cap: number): Promise<string | undefined> {
+  const declared = Number(res.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > cap) {
+    await res.body?.cancel().catch(() => {});
+    return undefined;
+  }
+  if (!res.body) return '';
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > cap) {
+      await reader.cancel().catch(() => {});
+      return undefined;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+/**
+ * What a credential reaches: the listed models, and the wildcard routes (LiteLLM `model_name`s with
+ * a `*`, e.g. `anthropic/*`) that are not models but accept any id they match (final review F8).
+ * Only `models` is shown to a caller (GET /v1/models); `patterns` only widens chooseModel.
+ */
+export interface ModelCatalog {
+  models: ModelEntry[];
+  patterns: string[];
+}
+
+/**
+ * LiteLLM's `/model/info` → entries, chat models only, one per name with the smallest limits.
+ * Wildcard routes go to `patterns`, not the list: listed literally they are an id no request can
+ * use, and a concrete id they route would fail as unlisted.
+ */
+export function parseLiteLLMModelInfo(body: unknown): ModelCatalog {
   const data = (body as { data?: unknown } | null)?.data;
   if (!Array.isArray(data)) throw unavailable('its /model/info has no data list');
   const byId = new Map<string, ModelEntry>();
+  const patterns = new Set<string>();
   for (const raw of data) {
     const row = (raw ?? {}) as { model_name?: unknown; model_info?: Record<string, unknown> };
     const id = row.model_name;
     if (typeof id !== 'string' || !MODEL_ID_RE.test(id)) continue;
     const info = row.model_info ?? {};
     if (info.mode !== undefined && info.mode !== null && info.mode !== 'chat') continue;
+    if (id.includes('*')) {
+      patterns.add(id);
+      continue;
+    }
     const limits =
       sanitizeLimits({
         contextWindow: info.max_input_tokens,
@@ -60,7 +115,16 @@ export function parseLiteLLMModelInfo(body: unknown): ModelEntry[] {
     const prev = byId.get(id);
     byId.set(id, prev ? { id, ...smaller(prev, limits) } : { id, ...limits });
   }
-  return [...byId.values()];
+  return { models: [...byId.values()], patterns: [...patterns] };
+}
+
+/** `*` is any run of characters (none included); the rest literal; the whole id must match. */
+function matchesPattern(id: string, pattern: string): boolean {
+  const re = pattern
+    .split('*')
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('.*');
+  return new RegExp(`^${re}$`).test(id);
 }
 
 /** Two deployments behind one name: the request must fit both, so take the smaller of each. */
@@ -82,7 +146,7 @@ export async function fetchModelCatalog(
   target: InferenceTarget,
   fetchImpl: typeof fetch = fetch,
   timeoutMs = CATALOG_TIMEOUT_MS,
-): Promise<ModelEntry[]> {
+): Promise<ModelCatalog> {
   const base = target.baseUrl.replace(/\/+$/, '');
   const isAnthropic = URL.parse(base)?.hostname === ANTHROPIC_HOST;
   const headers: Record<string, string> =
@@ -96,6 +160,7 @@ export async function fetchModelCatalog(
     if (!isAnthropic) {
       return parseLiteLLMModelInfo(await getJson(`${base}/model/info`, headers, fetchImpl, signal));
     }
+    // Anthropic has no wildcard routes.
     const out: ModelEntry[] = [];
     let after: string | undefined;
     for (let page = 0; page < MAX_ANTHROPIC_PAGES; page++) {
@@ -114,7 +179,7 @@ export async function fetchModelCatalog(
       if (body.has_more !== true || typeof body.last_id !== 'string') break;
       after = body.last_id;
     }
-    return out;
+    return { models: out, patterns: [] };
   } catch (err) {
     if (err instanceof CpError) throw err;
     // A network failure or a timeout. The error's own text can carry the URL, never the secret,
@@ -126,7 +191,8 @@ export async function fetchModelCatalog(
 export type ModelChoice = { model: string; limits?: ModelLimits; verified: boolean };
 
 /**
- * Check a model id against the credential's catalog (spec §4.2). Listed: its limits. Not listed:
+ * Check a model id against the credential's catalog (spec §4.2). Listed: its limits. Not listed but
+ * matched by a wildcard route: accepted verified, with no limits (the route names none). Neither:
  * `model_unavailable`. Catalog unreadable: accepted unverified, so a gateway outage never blocks a
  * new session; a wrong id then fails its first turn with the gateway's own error.
  */
@@ -136,7 +202,7 @@ export async function chooseModel(
   credential: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<ModelChoice> {
-  let catalog: ModelEntry[];
+  let catalog: ModelCatalog;
   try {
     catalog = await fetchModelCatalog(target, fetchImpl);
   } catch (err) {
@@ -145,11 +211,15 @@ export async function chooseModel(
     }
     throw err;
   }
-  const hit = catalog.find((m) => m.id === id);
+  const hit = catalog.models.find((m) => m.id === id);
   if (!hit) {
+    // An id that itself holds a `*` is a route, not a model: it never matches one (F8).
+    if (!id.includes('*') && catalog.patterns.some((p) => matchesPattern(id, p))) {
+      return { model: id, verified: true };
+    }
     throw new CpError(
       'model_unavailable',
-      `credential '${credential}' does not offer model '${id}' (it offers ${catalog.length} models; list them with GET /v1/models)`,
+      `credential '${credential}' does not offer model '${id}' (it offers ${catalog.models.length} models; list them with GET /v1/models)`,
     );
   }
   const { id: _id, ...limits } = hit;

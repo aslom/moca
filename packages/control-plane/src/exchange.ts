@@ -236,6 +236,54 @@ export async function resolveInference(
   return { secretValue, credentialName, baseUrl, authHeader, usedOperatorFallback };
 }
 
+/**
+ * Refuse a resolved (header, secret, endpoint) triple that would misdirect the secret or 401
+ * upstream (#368, spec §6.2). Shared by the direct-mode exchange and the model catalog (per-session
+ * model spec §4.1), which ALWAYS sends the real secret, so it applies the check in every mode: one
+ * set of codes and messages for both. Messages name the credential or the settings, never the value.
+ */
+export function refuseMisdirectedSecret(r: ResolvedInference, sessionId?: string): void {
+  const { secretValue, credentialName, baseUrl, authHeader, usedOperatorFallback } = r;
+  const host = URL.parse(baseUrl)?.hostname;
+  const mismatch = directModeMismatch(authHeader, secretValue, baseUrl);
+  // configFromEnv's boot check (main.ts checkInferenceConfig) refuses a misconfigured fallback
+  // before any turn, so this branch is reached only by a config built without it (tests, or a
+  // future caller). Kept as defence in depth.
+  if (mismatch && usedOperatorFallback) {
+    // The operator's token, not the caller's: the caller cannot re-store `operator-fallback`, so the
+    // message names the settings and the code blames the deployment (PR #372 review). The data
+    // plane shows the caller only "control plane returned 503" (turn-auth admits caller-attributable
+    // codes only), so the log line is how the operator finds out. It names settings, never the value.
+    const why =
+      mismatch === 'bearer-to-anthropic'
+        ? 'the operator fallback token (SH_OPERATOR_INFERENCE_TOKEN) is sent as Bearer, but ' +
+          'SH_DEFAULT_INFERENCE_ENDPOINT is api.anthropic.com, which reads API keys from ' +
+          'x-api-key; the deployment operator must set SH_OPERATOR_INFERENCE_HEADER=x-api-key or ' +
+          'point SH_DEFAULT_INFERENCE_ENDPOINT at a gateway'
+        : 'the operator fallback token (SH_OPERATOR_INFERENCE_TOKEN) is an Anthropic API key, but ' +
+          `SH_DEFAULT_INFERENCE_ENDPOINT resolves to ${host ?? 'an unparseable URL'}; the ` +
+          'deployment operator must fix the pair, or you can store your own inference credential';
+    console.error(`[control-plane] operator fallback misconfigured: ${why}`);
+    throw new CpError('credential_unavailable', why, sessionId);
+  }
+  if (mismatch === 'bearer-to-anthropic') {
+    throw new CpError(
+      'credential_required',
+      `credential '${credentialName}' is a Bearer token, but its endpoint resolves to ` +
+        "api.anthropic.com, which reads API keys from x-api-key: store the key with kind 'api-key'",
+      sessionId,
+    );
+  }
+  if (mismatch === 'raw-key-elsewhere') {
+    throw new CpError(
+      'credential_required',
+      `credential '${credentialName}' is an Anthropic API key, but its endpoint resolves to ` +
+        `${host ?? 'an unparseable URL'}: set its endpoint to https://api.anthropic.com`,
+      sessionId,
+    );
+  }
+}
+
 export const targetOf = (r: ResolvedInference): InferenceTarget => ({
   baseUrl: r.baseUrl,
   secret: r.secretValue,
@@ -262,8 +310,8 @@ export async function exchangeCredential(
   // The tombstone check is what stops a DELETED session starting a new turn (spec §5.3, §7.3).
   if (rec.tombstone) throw new CpError('session_not_found', undefined, claims.sid);
 
-  const { secretValue, credentialName, baseUrl, authHeader, usedOperatorFallback } =
-    await resolveInference(rec, deps);
+  const resolved = await resolveInference(rec, deps);
+  const { secretValue, credentialName, baseUrl, authHeader, usedOperatorFallback } = resolved;
 
   // Placeholder mode WINS whenever the deployment has an injector, so adding one strictly narrows
   // what the harness may hold; direct mode is reachable only when none is configured, and MU3 deletes
@@ -275,44 +323,7 @@ export async function exchangeCredential(
   // cannot see the deployment default it may resolve to here. In placeholder mode the injector, not
   // the harness, picks the upstream header (AB1's `inject_header`), so none of this applies (#368).
   if (mode === 'direct') {
-    const host = URL.parse(baseUrl)?.hostname;
-    const mismatch = directModeMismatch(authHeader, secretValue, baseUrl);
-    // configFromEnv's boot check (main.ts checkInferenceConfig) refuses a misconfigured fallback
-    // before any turn, so this branch is reached only by a config built without it (tests, or a
-    // future caller). Kept as defence in depth.
-    if (mismatch && usedOperatorFallback) {
-      // The operator's token, not the caller's: the caller cannot re-store `operator-fallback`, so the
-      // message names the settings and the code blames the deployment (PR #372 review). The data
-      // plane shows the caller only "control plane returned 503" (turn-auth admits caller-attributable
-      // codes only), so the log line is how the operator finds out. It names settings, never the value.
-      const why =
-        mismatch === 'bearer-to-anthropic'
-          ? 'the operator fallback token (SH_OPERATOR_INFERENCE_TOKEN) is sent as Bearer, but ' +
-            'SH_DEFAULT_INFERENCE_ENDPOINT is api.anthropic.com, which reads API keys from ' +
-            'x-api-key; the deployment operator must set SH_OPERATOR_INFERENCE_HEADER=x-api-key or ' +
-            'point SH_DEFAULT_INFERENCE_ENDPOINT at a gateway'
-          : 'the operator fallback token (SH_OPERATOR_INFERENCE_TOKEN) is an Anthropic API key, but ' +
-            `SH_DEFAULT_INFERENCE_ENDPOINT resolves to ${host ?? 'an unparseable URL'}; the ` +
-            'deployment operator must fix the pair, or you can store your own inference credential';
-      console.error(`[control-plane] operator fallback misconfigured: ${why}`);
-      throw new CpError('credential_unavailable', why, rec.sessionId);
-    }
-    if (mismatch === 'bearer-to-anthropic') {
-      throw new CpError(
-        'credential_required',
-        `credential '${credentialName}' is a Bearer token, but its endpoint resolves to ` +
-          "api.anthropic.com, which reads API keys from x-api-key: store the key with kind 'api-key'",
-        rec.sessionId,
-      );
-    }
-    if (mismatch === 'raw-key-elsewhere') {
-      throw new CpError(
-        'credential_required',
-        `credential '${credentialName}' is an Anthropic API key, but its endpoint resolves to ` +
-          `${host ?? 'an unparseable URL'}: set its endpoint to https://api.anthropic.com`,
-        rec.sessionId,
-      );
-    }
+    refuseMisdirectedSecret(resolved, rec.sessionId);
   }
 
   await deps.index.audit({
