@@ -402,8 +402,12 @@ ensure_sandbox_network() {
 # netavark leaves IPv6 enabled on the bridge and in every container, so link-local IPv6 reaches the
 # host even though the network has no IPv6 subnet, and everything on the bridge that is not one of
 # the three accepts (established/related replies, and the two IPv4 ones) -- IPv6 included -- is
-# dropped. Forwarded (internet) traffic is
-# untouched in S1; MI1 S5 routes it through moca-egress. The declare/delete/redeclare idiom makes
+# dropped. The forward chain drops only link-local destinations (169.254.0.0/16 and the IPv6
+# metadata address fd00:ec2::254) arriving from the sandbox bridge: forwarded traffic is the path
+# a sandbox takes to cloud instance metadata, which on a cloud VM can hand out the instance role's
+# credentials -- they belong to the host, not to any session (rossoctl/moca#357). General
+# forwarded (internet) traffic is still untouched; MI1 S5 routes it through moca-egress. The
+# declare/delete/redeclare idiom makes
 # `nft -f` replace the table atomically, so a re-run never stacks duplicate rules. The checked-in
 # unit carries an @SH_ENV_DIR@ placeholder rather than a literal path -- SH_ENV_DIR is itself
 # overridable, so this renders the placeholder into the real value before installing the unit. The
@@ -426,6 +430,11 @@ table inet moca_sandbox {
     iifname "$MOCA_SANDBOX_BRIDGE" ip saddr $MOCA_SANDBOX_SUBNET meta l4proto { tcp, udp } th dport 53 accept
     iifname "$MOCA_SANDBOX_BRIDGE" counter drop
     ip saddr $MOCA_SANDBOX_SUBNET counter drop
+  }
+  chain forward {
+    type filter hook forward priority filter; policy accept;
+    iifname "$MOCA_SANDBOX_BRIDGE" ip daddr 169.254.0.0/16 counter drop
+    iifname "$MOCA_SANDBOX_BRIDGE" ip6 daddr fd00:ec2::254 counter drop
   }
 }
 NFT
