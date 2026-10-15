@@ -46,10 +46,15 @@ function sessionTokenFor(sub: string, sid: string): string {
 
 let server: ReturnType<typeof startServer>;
 let base: string;
-/** Lets a test release the held turn (and so the subject's slot) when it chooses. */
-let releaseHeld!: () => void;
+// Held-turn plumbing, shared with the run-turn mock implementations set in beforeEach. Module
+// scope (not inside beforeEach) so a test can disarm the hold (`holdNext = false`) when its turns
+// must resolve at once.
+let holdNext = false;
+let releaseHeld: () => void = () => undefined;
 /** Resolves once the held turn has actually begun — the signal that the slot is taken. */
 let started!: Promise<void>;
+/** When set, the scripted control plane holds its reply until `open` settles (a departure test). */
+let cpGate: { reached: () => void; open: Promise<void> } | undefined;
 const saved: Record<string, string | undefined> = {};
 
 function post(
@@ -101,11 +106,11 @@ beforeEach(async () => {
   // `turnStarted` fires on every call so a test can await "the turn actually began" before sending
   // the request whose outcome depends on the slot being held.
   let held!: Promise<void>;
-  releaseHeld = () => undefined;
   held = new Promise<void>((r) => (releaseHeld = r));
   let turnStarted!: () => void;
   started = new Promise<void>((r) => (turnStarted = r));
-  let holdNext = true;
+  holdNext = true;
+  cpGate = undefined;
   vi.mocked(executeTurn).mockImplementation(async (input: { sessionId?: string }) => {
     turnStarted();
     if (holdNext) {
@@ -129,7 +134,12 @@ beforeEach(async () => {
   const cp = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on('data', (c: Buffer) => chunks.push(c));
-    req.on('end', () => {
+    req.on('end', async () => {
+      // A departure test arms cpGate so the exchange reply lands only when it chooses.
+      if (cpGate) {
+        cpGate.reached();
+        await cpGate.open;
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(
         JSON.stringify({
@@ -145,6 +155,11 @@ beforeEach(async () => {
   process.env.SH_CONTROL_PLANE_URL = `http://127.0.0.1:${(cp.address() as { port: number }).port}`;
   process.env.SH_EXCHANGE_TOKEN = 'shared-abc'; // notsecret
   process.env.SH_TURNS_PER_SUBJECT = '1';
+  // Cleared AFTER the implementations are (re)armed and BEFORE the server starts, so each test
+  // counts only its own turns — a held turn from the previous test resolves during that test's
+  // own afterEach, but its CALL was counted then.
+  vi.mocked(executeTurn).mockClear();
+  vi.mocked(runTurn).mockClear();
   server = startServer(0);
   await new Promise<void>((r) => server.once('listening', () => r()));
   base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -246,5 +261,39 @@ describe('per-subject admission quota (#360)', () => {
     expect(anon2.status).toBe(200);
     releaseHeld();
     await anon1;
+  });
+
+  it('a client that leaves during the credential exchange does not leak the subject slot', async () => {
+    // Review round 1's blocking finding: `resolveTurnAuth` awaits the exchange, a client can be
+    // gone by the time it answers, and the acquire that follows pushed its release onto a slot
+    // that had already ended (worker path) — or onto a 'close' listener registered after the
+    // event fired, which never runs (standalone path). The subject's count then stays up for the
+    // life of the process: with cap 1, one abandoned request locked that user out of the worker.
+    // The synchronization (gate, destroy, timed waits) mirrors the turn-counter's own
+    // departure-during-exchange test in detachable-turn-route.test.ts.
+    holdNext = false; // this test's hold is the EXCHANGE's; its turns resolve at once
+    let open!: () => void;
+    let reached!: () => void;
+    const inExchange = new Promise<void>((r) => (reached = r));
+    cpGate = { reached, open: new Promise<void>((r) => (open = r)) };
+
+    const req = http.request(new URL('/turn', base), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...aliceHeaders },
+    });
+    req.on('error', () => {}); // the destroy below is the error; nothing to do with it
+    req.end(JSON.stringify({ sessionId: 'a-1', prompt: 'hi' }));
+    await inExchange;
+    req.destroy(); // the client leaves while the control plane is still answering
+    await new Promise((r) => setTimeout(r, 100)); // the server sees the close first
+    open(); // the exchange answers — to a response that is already gone
+    await new Promise((r) => setTimeout(r, 300)); // resolveTurnAuth lands on the dead request
+
+    // The departed client's turn never ran...
+    expect(vi.mocked(executeTurn)).not.toHaveBeenCalled();
+    // ...and its subject's slot went with it: a FRESH turn for the same subject is admitted,
+    // not locked out until restart.
+    const a2 = await post({ sessionId: 'a-1', prompt: 'again' }, aliceHeaders);
+    expect(a2.status).toBe(200);
   });
 });

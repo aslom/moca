@@ -266,6 +266,11 @@ async function handleTurn(req: IncomingMessage, res: ServerResponse): Promise<vo
   // full". The slot rides the turn's own lifecycle (turn-slot.ts): released on response close, or
   // on adoption for a detachable turn. An unauthenticated caller has no subject and no slot.
   if (auth) {
+    // A client that left during the exchange above answers nothing, and the turn was never going
+    // to be read — return BEFORE the acquire, or the subject's slot leaks: their response's slot
+    // has already ended (turn-slot.ts's late-attach guard is the net for this; this is the door).
+    // The detachable branch returns early on the same signal, for the same reason.
+    if (res.destroyed) return;
     const cap = turnsPerSubjectCap(process.env);
     if (cap !== undefined) {
       const release = subjectCounter.acquire(auth.subject, cap);
