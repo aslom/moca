@@ -6,6 +6,7 @@ import {
   resolveSessionOptions,
   fieldRefusedByServer,
   sandboxTierField,
+  modelField,
 } from '../src/core/session-options.js';
 import { ApiError } from '../src/api/errors.js';
 import { credential, fakeControlPlane } from './helpers/fakes.js';
@@ -114,7 +115,10 @@ describe('sandboxTierField (P6.3)', () => {
 
   it('offers the declared tiers, marking the default', async () => {
     expect(
-      await sandboxTierField.source(api({ names: ['container', 'microvm'], default: 'container' })),
+      await sandboxTierField.source(
+        api({ names: ['container', 'microvm'], default: 'container' }),
+        {},
+      ),
     ).toEqual([
       { value: 'container', label: 'container', isDefault: true },
       { value: 'microvm', label: 'microvm' },
@@ -207,7 +211,7 @@ describe('sandboxTierField (P6.3)', () => {
       const cp = fakeControlPlane({
         discovery: async () => ({ harnessUrl: null, sandboxTiers: bad as never }),
       });
-      expect(await sandboxTierField.source(cp)).toEqual([]);
+      expect(await sandboxTierField.source(cp, {})).toEqual([]);
       const r = await resolveSessionOptions(cp, [sandboxTierField], {}, {});
       expect(r).toEqual({ status: 'ready', values: {}, request: {} });
     }
@@ -229,12 +233,12 @@ describe('presets', () => {
   it('splits known fields from stale ones', () => {
     expect(
       checkPreset(
-        { name: 'p', values: { inferenceCredential: 'a', model: 'x' } },
+        { name: 'p', values: { inferenceCredential: 'a', unknown: 'x' } },
         SESSION_OPTION_FIELDS,
       ),
     ).toEqual({
       values: { inferenceCredential: 'a' },
-      stale: ['model'],
+      stale: ['unknown'],
     });
   });
 });
@@ -249,5 +253,105 @@ describe('parseOptionFlags', () => {
 
   it('rejects a flag without =', () => {
     expect(() => parseOptionFlags(['oops'])).toThrow('--option expects key=value, got "oops"');
+  });
+});
+
+describe('the model field', () => {
+  const withModels = (models: Array<{ id: string; contextWindow?: number }>, names = ['c1']) =>
+    fakeControlPlane({
+      listCredentials: async () => names.map((n) => credential(n)),
+      listModels: async (cred) => ({ credential: cred ?? 'c1', models }),
+    });
+
+  it('lists the chosen credentials models, labelled with their window', async () => {
+    const seen: Array<string | undefined> = [];
+    const api = fakeControlPlane({
+      listCredentials: async () => [credential('c1'), credential('c2')],
+      listModels: async (cred) => {
+        seen.push(cred);
+        return { credential: cred!, models: [{ id: 'a', contextWindow: 200000 }, { id: 'b' }] };
+      },
+    });
+    const r = await resolveSessionOptions(
+      api,
+      SESSION_OPTION_FIELDS,
+      { inferenceCredential: 'c2' },
+      {},
+    );
+    expect(seen).toEqual(['c2']);
+    expect(r.status).toBe('needs-input');
+    if (r.status === 'needs-input') {
+      expect(r.field.key).toBe('model');
+      expect(r.choices.map((c) => c.label)).toEqual(['a  200k ctx', 'b']);
+    }
+  });
+
+  it('picks the only model and sends it', async () => {
+    const r = await resolveSessionOptions(
+      withModels([{ id: 'only' }]),
+      SESSION_OPTION_FIELDS,
+      {},
+      {},
+    );
+    expect(r).toMatchObject({ status: 'ready', request: { model: 'only' } });
+  });
+
+  it('preselects the last-used model', async () => {
+    const r = await resolveSessionOptions(
+      withModels([{ id: 'a' }, { id: 'b' }]),
+      SESSION_OPTION_FIELDS,
+      {},
+      { model: 'b' },
+    );
+    expect(r).toMatchObject({ status: 'needs-input', defaultValue: 'b' });
+  });
+
+  it('leaves the model to the server for a script that names none', async () => {
+    const r = await resolveSessionOptions(
+      withModels([{ id: 'a' }, { id: 'b' }]),
+      SESSION_OPTION_FIELDS,
+      {},
+      {},
+      { interactive: false },
+    );
+    expect(r).toMatchObject({ status: 'ready', request: {} });
+  });
+
+  it.each([
+    ['an older control plane', new ApiError('control-plane', 404, 'not_found')],
+    ['a catalog outage', new ApiError('control-plane', 503, 'model_catalog_unavailable')],
+    ['no credential at all', new ApiError('control-plane', 400, 'credential_required')],
+  ])('is skipped on %s', async (_n, err) => {
+    const api = fakeControlPlane({
+      listCredentials: async () => [credential('c1')],
+      listModels: async () => {
+        throw err;
+      },
+    });
+    expect(await resolveSessionOptions(api, SESSION_OPTION_FIELDS, {}, {})).toMatchObject({
+      status: 'ready',
+      request: {},
+    });
+  });
+
+  it('sends an explicit model as given when the catalog is unavailable', async () => {
+    const api = fakeControlPlane({
+      listCredentials: async () => [credential('c1')],
+      listModels: async () => {
+        throw new ApiError('control-plane', 503, 'model_catalog_unavailable');
+      },
+    });
+    const r = await resolveSessionOptions(api, SESSION_OPTION_FIELDS, { model: 'gpt-x' }, {});
+    expect(r).toMatchObject({ status: 'ready', request: { model: 'gpt-x' } });
+  });
+
+  it('rethrows a credential that does not exist, rather than hiding it', async () => {
+    const api = fakeControlPlane({
+      listCredentials: async () => [credential('c1')],
+      listModels: async () => {
+        throw new ApiError('control-plane', 404, 'credential_not_found');
+      },
+    });
+    await expect(resolveSessionOptions(api, [modelField], {}, {})).rejects.toThrow();
   });
 });
