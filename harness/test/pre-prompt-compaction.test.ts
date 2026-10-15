@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, afterEach } from 'vitest';
 import { compactIfOverflowing, promptWouldOverflow } from '../src/pre-prompt-compaction';
 
 // estimateTokens is chars/4: 16 000 characters is about 4 000 tokens.
@@ -22,11 +22,20 @@ describe('promptWouldOverflow', () => {
 });
 
 describe('compactIfOverflowing', () => {
-  const session = (contextWindow: number, compact = vi.fn(async () => ({}))) => ({
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const session = (
+    contextWindow: number,
+    compact = vi.fn(async () => ({})),
+    abortCompaction = vi.fn(() => {}),
+  ) => ({
     messages: big,
     model: { contextWindow },
     settingsManager: { getCompactionSettings: () => settings },
     compact,
+    abortCompaction,
   });
 
   it('compacts when the next prompt would not fit', async () => {
@@ -42,13 +51,60 @@ describe('compactIfOverflowing', () => {
   });
 
   it('lets the turn proceed when compaction fails', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const s = session(
       4_500,
       vi.fn(async () => {
         throw new Error('Nothing to compact (session too small)');
       }),
     );
-    vi.spyOn(console, 'error').mockImplementation(() => {});
     expect(await compactIfOverflowing(s)).toBe(false);
+    expect(spy).toHaveBeenCalledOnce();
+    expect(spy.mock.calls[0][0]).toContain('pre-prompt compaction failed');
+  });
+
+  it('returns false without compacting when signal is already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const s = session(4_500);
+    expect(await compactIfOverflowing(s, controller.signal)).toBe(false);
+    expect(s.compact).not.toHaveBeenCalled();
+  });
+
+  it('calls abortCompaction when signal aborts during compaction', async () => {
+    let resolveFakeCompact: () => void;
+    const fakeCompact = new Promise<{}>((resolve) => {
+      resolveFakeCompact = () => resolve({});
+    });
+    const s = session(
+      4_500,
+      vi.fn(async () => fakeCompact),
+    );
+    const controller = new AbortController();
+
+    const promise = compactIfOverflowing(s, controller.signal);
+    // Abort mid-compaction
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    controller.abort();
+    // Resolve the fake compact to let the operation complete
+    resolveFakeCompact!();
+    await promise;
+
+    expect(s.abortCompaction).toHaveBeenCalledOnce();
+  });
+
+  it('removes abort listener after normal compaction completes', async () => {
+    const s = session(4_500);
+    const controller = new AbortController();
+    const removeEventListenerSpy = vi.spyOn(controller.signal, 'removeEventListener');
+
+    await compactIfOverflowing(s, controller.signal);
+
+    // Listener should have been removed
+    expect(removeEventListenerSpy).toHaveBeenCalledWith('abort', expect.any(Function));
+
+    // Abort after compaction should not call abortCompaction
+    controller.abort();
+    expect(s.abortCompaction).not.toHaveBeenCalled();
   });
 });

@@ -1035,10 +1035,10 @@ async function executeTurnCore(
     settingsManager,
   });
 
-  if (input.signal) wireAbort(input.signal, session);
-
   // Per-session model spec §5.3: a switch to a smaller window compacts here, not after a failed request.
-  await compactIfOverflowing(session as never);
+  await compactIfOverflowing(session as never, input.signal);
+
+  if (input.signal) wireAbort(input.signal, session);
 
   await session.prompt(prompt);
 

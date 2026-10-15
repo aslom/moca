@@ -30,16 +30,34 @@ export interface CompactableSession {
   model?: { contextWindow?: number };
   settingsManager: { getCompactionSettings(): CompactionSettings };
   compact(): Promise<unknown>;
+  abortCompaction(): void;
 }
 
 /**
  * Compact first when the prompt would not fit. A failure (pi refuses a history too small to cut)
  * is logged and the turn proceeds: pi's own overflow path is still behind it.
+ *
+ * If signal is provided and already aborted, returns false without compacting. During compaction,
+ * if the signal aborts, calls session.abortCompaction() to cancel the operation.
  */
-export async function compactIfOverflowing(session: CompactableSession): Promise<boolean> {
+export async function compactIfOverflowing(
+  session: CompactableSession,
+  signal?: AbortSignal,
+): Promise<boolean> {
   const settings = session.settingsManager.getCompactionSettings();
   if (!promptWouldOverflow(session.messages, session.model?.contextWindow, settings)) return false;
+
+  // If signal is already aborted, don't attempt compaction
+  if (signal?.aborted) return false;
+
+  const abortListener = () => {
+    session.abortCompaction();
+  };
+
   try {
+    if (signal) {
+      signal.addEventListener('abort', abortListener);
+    }
     await session.compact();
     return true;
   } catch (err) {
@@ -47,5 +65,9 @@ export async function compactIfOverflowing(session: CompactableSession): Promise
       `[compaction] pre-prompt compaction failed; the turn proceeds: ${(err as Error)?.message ?? String(err)}`,
     );
     return false;
+  } finally {
+    if (signal) {
+      signal.removeEventListener('abort', abortListener);
+    }
   }
 }
