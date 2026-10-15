@@ -295,6 +295,32 @@ describe('chooseModel', () => {
         );
       },
     );
+    it.each([
+      ['a*b*c', 'axxbyyc', true],
+      ['*', 'anything', true],
+      ['a**b', 'ab', true],
+      ['*suffix', 'has-suffix', true],
+      ['prefix*', 'prefix', true],
+      ['a*b*c', 'axxbyy', false],
+      ['a*a', 'a', false],
+    ])('matches %s against %s as a whole string: %s', async (pattern, id, ok) => {
+      const body = { data: [{ model_name: pattern, model_info: {} }] };
+      const { f } = fakeFetch(json(body));
+      const run = () => chooseModel(litellm, id, 'litellm-prod', f);
+      if (ok) expect((await run()).verified).toBe(true);
+      else expect(await codeOf(run)).toBe('model_unavailable');
+    });
+    // The pattern comes from the credential's endpoint, which the user chooses: a backtracking
+    // regex over it let one request block the control plane's event loop for minutes.
+    it('refuses a many-star pattern against a 256-character id in linear time', async () => {
+      const body = { data: [{ model_name: '*a*a*a*a*a*a*a*a*b', model_info: {} }] };
+      const { f } = fakeFetch(json(body));
+      const started = Date.now();
+      expect(await codeOf(() => chooseModel(litellm, 'a'.repeat(256), 'litellm-prod', f))).toBe(
+        'model_unavailable',
+      );
+      expect(Date.now() - started).toBeLessThan(500);
+    });
     it('prefers the exact listing, with its limits', async () => {
       const body = { data: [...INFO.data, { model_name: '*', model_info: {} }] };
       const { f } = fakeFetch(json(body));

@@ -120,11 +120,30 @@ export function parseLiteLLMModelInfo(body: unknown): ModelCatalog {
 
 /** `*` is any run of characters (none included); the rest literal; the whole id must match. */
 function matchesPattern(id: string, pattern: string): boolean {
-  const re = pattern
-    .split('*')
-    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-    .join('.*');
-  return new RegExp(`^${re}$`).test(id);
+  // A glob match, not a RegExp: the pattern comes from the credential's endpoint, which the user
+  // chooses, and `.*`-per-star backtracking is exponential in the stars -- one request could block
+  // the event loop for minutes. Greedy two-pointer matching, backtracking only to the last star,
+  // is O(id × pattern).
+  let i = 0;
+  let p = 0;
+  let star = -1;
+  let mark = 0;
+  while (i < id.length) {
+    if (p < pattern.length && pattern[p] !== '*' && pattern[p] === id[i]) {
+      i++;
+      p++;
+    } else if (p < pattern.length && pattern[p] === '*') {
+      star = p++;
+      mark = i;
+    } else if (star !== -1) {
+      p = star + 1;
+      i = ++mark;
+    } else {
+      return false;
+    }
+  }
+  while (p < pattern.length && pattern[p] === '*') p++;
+  return p === pattern.length;
 }
 
 /** Two deployments behind one name: the request must fit both, so take the smaller of each. */
