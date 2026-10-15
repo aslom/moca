@@ -1,5 +1,6 @@
 import { render } from 'ink-testing-library';
 import { describe, expect, it, vi } from 'vitest';
+import { ApiError } from '../src/api/errors.js';
 import { ModelOverlay } from '../src/views/overlays/Model.js';
 import { KEY, inputReady, waitFor, withTheme } from './helpers/ink.js';
 
@@ -70,5 +71,67 @@ describe('ModelOverlay', () => {
     );
     await waitFor(() => (lastFrame() ?? '').includes('could not list'), 1000, lastFrame);
     expect(lastFrame()).toContain('/model <id>');
+  });
+
+  it('says an older control plane cannot switch, on a 404 not_found (final review F4)', async () => {
+    const { lastFrame } = render(
+      withTheme(
+        <ModelOverlay
+          load={async () => {
+            throw new ApiError('control-plane', 404, 'not_found');
+          }}
+          current={null}
+          onSelect={vi.fn()}
+          onCancel={vi.fn()}
+          onError={() => false}
+        />,
+      ),
+    );
+    await waitFor(() => (lastFrame() ?? '').includes('does not support'), 1000, lastFrame);
+    expect(lastFrame()).toContain('this control plane does not support switching models');
+    expect(lastFrame()).not.toContain('/model <id>');
+  });
+
+  it('keeps a gone session as such, not as an older control plane', async () => {
+    const { lastFrame } = render(
+      withTheme(
+        <ModelOverlay
+          load={async () => {
+            throw new ApiError('control-plane', 404, 'session_not_found');
+          }}
+          current={null}
+          onSelect={vi.fn()}
+          onCancel={vi.fn()}
+          onError={() => false}
+        />,
+      ),
+    );
+    await waitFor(() => (lastFrame() ?? '').includes('no longer exists'), 1000, lastFrame);
+    expect(lastFrame()).not.toContain('does not support');
+  });
+
+  it('marks a current model the catalog does not list, and lands on it (final review F6)', async () => {
+    const onSelect = vi.fn();
+    const { lastFrame, stdin } = render(
+      withTheme(
+        <ModelOverlay
+          load={list}
+          current="retired-model-1"
+          onSelect={onSelect}
+          onCancel={vi.fn()}
+          onError={() => false}
+        />,
+      ),
+    );
+    await waitFor(
+      () => (lastFrame() ?? '').includes('granite') && inputReady(stdin),
+      1000,
+      lastFrame,
+    );
+    expect(lastFrame()).toMatch(/retired-model-1 \(not listed\).*current/);
+    // One Enter keeps the current model rather than resetting it to the deployment default.
+    stdin.write(KEY.enter);
+    await waitFor(() => onSelect.mock.calls.length > 0, 1000, lastFrame);
+    expect(onSelect).toHaveBeenCalledWith('retired-model-1');
   });
 });

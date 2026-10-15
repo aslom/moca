@@ -120,9 +120,11 @@ export const modelField: SessionOptionField = {
       // named credential that does not exist), a gateway that cannot list, or a subject with no
       // credential at all (create then refuses with the credential field's own hint). The session
       // runs on the deployment default. Anything else is real.
+      // A 503 is skipped whatever its code (spec §6): an unavailable catalog, by any name.
       if (
         err instanceof ApiError &&
         ((err.status === 404 && err.code !== 'credential_not_found') ||
+          err.status === 503 ||
           err.code === 'model_catalog_unavailable' ||
           err.code === 'credential_required')
       ) {
@@ -130,15 +132,20 @@ export const modelField: SessionOptionField = {
       }
       throw err;
     }
-    return list.models.map((m) => {
+    const models = list.models.map((m) => {
       const id = sanitizeRemote(m.id);
       return {
         value: m.id,
         label: m.contextWindow ? `${id}  ${formatWindow(m.contextWindow)} ctx` : id,
       };
     });
+    // The deployment default is always a choice (final review F3): without it a one-model catalog
+    // would be auto-pinned, and New Session could never leave the model to the deployment. '' is
+    // never a model id (MODEL_ID_RE); it means "send no model", for a preset or last use too.
+    if (models.length === 0) return [];
+    return [{ value: '', label: 'deployment default', isDefault: true }, ...models];
   },
-  toRequest: (value, req) => ({ ...req, model: value }),
+  toRequest: (value, req) => (value === '' ? req : { ...req, model: value }),
 };
 
 export const SESSION_OPTION_FIELDS: readonly SessionOptionField[] = [

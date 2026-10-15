@@ -406,6 +406,27 @@ describe('App', () => {
     ]);
   });
 
+  it('/model against an older control plane says it cannot switch (final review F4)', async () => {
+    const rt = testRuntime({
+      cp: fakeControlPlane({
+        listCredentials: async () => [credential('anthropic')],
+        createSession: async () => ({ sessionId: 's-1', token: 'st', expiresAt: 4_000_000_000 }),
+        setSessionModel: async () => {
+          throw new ApiError('control-plane', 404, 'not_found');
+        },
+      }),
+    });
+    const { stdin, all, frame, until, ready } = mount(rt);
+    await ready();
+    await send(stdin, '/new');
+    await until(() => !frame().includes('New session') && frame().includes('s-1 · model default'));
+    await tick();
+    await send(stdin, '/model granite-4.1-8b');
+    await until(() => all().includes('does not support'));
+    expect(all()).toContain('this control plane does not support switching models');
+    expect(frame()).toContain('s-1 · model default');
+  });
+
   it('/promote toasts skills, commands and the warning count with the --dry-run hint', async () => {
     const dir = skillsDir();
     mkdirSync(join(dir, '.claude/commands'), { recursive: true });

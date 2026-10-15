@@ -12,7 +12,11 @@ import { CommandRegistry } from './commands/registry.js';
 import type { CachedAuth, TuiConfig } from './config.js';
 import { apiTokenValid, loginExpiryMinutes } from './core/auth.js';
 import { collectBannerInfo, type BannerInfo } from './core/banner.js';
-import { describeError } from './core/messages.js';
+import {
+  describeError,
+  isModelSwitchUnsupported,
+  MODEL_SWITCH_UNSUPPORTED,
+} from './core/messages.js';
 import {
   describeBundleSession,
   describePromotion,
@@ -471,7 +475,9 @@ export function App({ rt, opts, env, os, write }: AppProps) {
           r.modelVerified === false ? 'warning' : undefined,
         );
       } catch (err) {
-        if (!loginIfExpired(err, undefined)) notify(describeError(err), 'error');
+        // An older control plane 404s the PATCH route itself (spec §7): say so, not "not found".
+        if (isModelSwitchUnsupported(err)) notify(MODEL_SWITCH_UNSUPPORTED, 'error');
+        else if (!loginIfExpired(err, undefined)) notify(describeError(err), 'error');
       }
     },
     prefillInput: (text) => setPrefill((p) => ({ text, nonce: (p?.nonce ?? 0) + 1 })),

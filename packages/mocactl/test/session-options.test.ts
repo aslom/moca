@@ -282,18 +282,65 @@ describe('the model field', () => {
     expect(r.status).toBe('needs-input');
     if (r.status === 'needs-input') {
       expect(r.field.key).toBe('model');
-      expect(r.choices.map((c) => c.label)).toEqual(['a  200k ctx', 'b']);
+      expect(r.choices.map((c) => c.label)).toEqual(['deployment default', 'a  200k ctx', 'b']);
+      // Nothing used last: the deployment default is preselected (final review F3).
+      expect(r.defaultValue).toBe('');
     }
   });
 
-  it('picks the only model and sends it', async () => {
+  it('asks even with one model, the deployment default preselected (final review F3)', async () => {
     const r = await resolveSessionOptions(
       withModels([{ id: 'only' }]),
       SESSION_OPTION_FIELDS,
       {},
       {},
     );
-    expect(r).toMatchObject({ status: 'ready', request: { model: 'only' } });
+    expect(r.status).toBe('needs-input');
+    if (r.status === 'needs-input') {
+      expect(r.choices).toEqual([
+        { value: '', label: 'deployment default', isDefault: true },
+        { value: 'only', label: 'only' },
+      ]);
+      expect(r.defaultValue).toBe('');
+    }
+  });
+
+  it('does not pin the only model for a script that names none (final review F3)', async () => {
+    const r = await resolveSessionOptions(
+      withModels([{ id: 'only' }]),
+      SESSION_OPTION_FIELDS,
+      {},
+      {},
+      { interactive: false },
+    );
+    expect(r.status).toBe('ready');
+    expect(r.status === 'ready' && r.request.model).toBe(undefined);
+  });
+
+  it.each([
+    ['the deployment default chosen', { model: '' }, {}],
+    ['a preset or last use that stored the default', {}, { model: '' }],
+  ])('sends no model for %s (final review F3)', async (_n, given, lastUsed) => {
+    const api = withModels([{ id: 'a' }]);
+    const r = await resolveSessionOptions(api, SESSION_OPTION_FIELDS, given, lastUsed);
+    if (Object.keys(given).length > 0) {
+      expect(r.status).toBe('ready');
+      expect(r.status === 'ready' && r.request.model).toBe(undefined);
+      expect(r.status === 'ready' && 'model' in r.request).toBe(false);
+    } else {
+      expect(r).toMatchObject({ status: 'needs-input', defaultValue: '' });
+    }
+  });
+
+  it('still sends a model given with --option', async () => {
+    const r = await resolveSessionOptions(
+      withModels([{ id: 'a' }]),
+      SESSION_OPTION_FIELDS,
+      { model: 'a' },
+      {},
+      { interactive: false },
+    );
+    expect(r.status === 'ready' && r.request.model).toBe('a');
   });
 
   it('preselects the last-used model', async () => {
@@ -314,12 +361,17 @@ describe('the model field', () => {
       {},
       { interactive: false },
     );
-    expect(r).toMatchObject({ status: 'ready', request: {} });
+    expect(r.status).toBe('ready');
+    expect(r.status === 'ready' && r.request.model).toBe(undefined);
   });
 
   it.each([
     ['an older control plane', new ApiError('control-plane', 404, 'not_found')],
     ['a catalog outage', new ApiError('control-plane', 503, 'model_catalog_unavailable')],
+    [
+      'a 503 without the code (final review F10)',
+      new ApiError('control-plane', 503, 'unavailable'),
+    ],
     ['no credential at all', new ApiError('control-plane', 400, 'credential_required')],
   ])('is skipped on %s', async (_n, err) => {
     const api = fakeControlPlane({
@@ -328,10 +380,9 @@ describe('the model field', () => {
         throw err;
       },
     });
-    expect(await resolveSessionOptions(api, SESSION_OPTION_FIELDS, {}, {})).toMatchObject({
-      status: 'ready',
-      request: {},
-    });
+    const r = await resolveSessionOptions(api, SESSION_OPTION_FIELDS, {}, {});
+    expect(r.status).toBe('ready');
+    expect(r.status === 'ready' && r.request.model).toBe(undefined);
   });
 
   it('sends an explicit model as given when the catalog is unavailable', async () => {

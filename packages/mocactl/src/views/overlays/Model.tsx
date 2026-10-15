@@ -1,7 +1,11 @@
 import { Text } from 'ink';
 import { useEffect, useState } from 'react';
 import type { ModelList } from '../../api/types.js';
-import { describeError } from '../../core/messages.js';
+import {
+  describeError,
+  isModelSwitchUnsupported,
+  MODEL_SWITCH_UNSUPPORTED,
+} from '../../core/messages.js';
 import { sanitizeRemote } from '../../core/sanitize.js';
 import { SelectList } from '../SelectList.js';
 import { Spinner } from '../Spinner.js';
@@ -22,13 +26,19 @@ interface Props {
 export function ModelOverlay({ load, current, onSelect, onCancel, onError, onInputless }: Props) {
   const [list, setList] = useState<ModelList>();
   const [failed, setFailed] = useState<string>();
+  /** The control plane predates the catalog (spec §7): /model <id> would 404 too, so no hint. */
+  const [unsupported, setUnsupported] = useState(false);
 
   useEffect(() => {
     let live = true;
     load().then(
       (l) => live && setList(l),
       (err: unknown) => {
-        if (live && !onError(err)) setFailed(describeError(err));
+        if (!live) return;
+        if (isModelSwitchUnsupported(err)) {
+          setUnsupported(true);
+          setFailed(MODEL_SWITCH_UNSUPPORTED);
+        } else if (!onError(err)) setFailed(describeError(err));
       },
     );
     return () => {
@@ -41,6 +51,7 @@ export function ModelOverlay({ load, current, onSelect, onCancel, onError, onInp
     onInputless?.(inputless);
   }, [inputless]);
 
+  if (failed && unsupported) return <Text>{failed} (Esc to close)</Text>;
   if (failed) {
     return (
       <Text>
@@ -50,6 +61,19 @@ export function ModelOverlay({ load, current, onSelect, onCancel, onError, onInp
   }
   if (!list) return <Spinner label="loading models…" />;
   const mark = (id: string | null) => (id === current ? 'current' : undefined);
+  // A current model the catalog no longer lists (retired, or the key's access narrowed) still gets
+  // its row, marked and under the cursor: otherwise one Enter would reset it to the default (F6).
+  const unlisted =
+    current !== null && !list.models.some((m) => m.id === current)
+      ? [
+          {
+            key: current,
+            label: `${sanitizeRemote(current)} (not listed)`,
+            detail: 'current',
+            value: current,
+          },
+        ]
+      : [];
   return (
     <SelectList<string | null>
       title={`Model — ${sanitizeRemote(list.credential)}`}
@@ -57,6 +81,7 @@ export function ModelOverlay({ load, current, onSelect, onCancel, onError, onInp
       initialKey={current ?? '__default__'}
       items={[
         { key: '__default__', label: 'deployment default', detail: mark(null), value: null },
+        ...unlisted,
         ...list.models.map((m) => ({
           key: m.id,
           label: sanitizeRemote(m.id),
