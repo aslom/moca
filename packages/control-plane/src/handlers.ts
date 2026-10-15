@@ -37,7 +37,7 @@ import {
   viewTier,
 } from './exchange.js';
 import { MODEL_ID_RE } from './models.js';
-import { chooseModel, type ModelChoice } from './model-catalog.js';
+import { chooseModel, fetchModelCatalog, type ModelChoice } from './model-catalog.js';
 import type { RunKubectl } from './kubectl.js';
 import { DEFAULT_PAGE_SIZE, type OwnershipIndex, type SessionRecord } from './ownership.js';
 import type { IdentityProvider } from './identity.js';
@@ -394,6 +394,21 @@ async function chooseFor(
   return chooseModel(targetOf(r), model, r.credentialName, deps.fetchImpl);
 }
 
+/** The catalog body for the credential `rec` runs on (per-session model spec §4.1). */
+async function catalogFor(
+  rec: { owner: string; credentialName: string; sessionId?: string },
+  deps: CpDeps,
+) {
+  const r = await resolveInference(rec, deps);
+  return {
+    status: 200,
+    body: {
+      credential: r.credentialName,
+      models: await fetchModelCatalog(targetOf(r), deps.fetchImpl),
+    },
+  };
+}
+
 export const HANDLERS: Record<string, Handler> = {
   healthz: async () => ({ status: 200, body: 'ok' }),
 
@@ -474,6 +489,16 @@ export const HANDLERS: Record<string, Handler> = {
   getMe: async (ctx) => {
     const p = requirePrincipal(ctx);
     return { status: 200, body: { subject: p.sub, tenant: p.tenant, roles: p.roles ?? [] } };
+  },
+
+  listModels: async (ctx, deps) => {
+    const p = requirePrincipal(ctx);
+    const requested = ctx.query.get('credential') ?? undefined;
+    const descriptors = await deps.credentials.list(p.sub);
+    return catalogFor(
+      { owner: p.sub, credentialName: newSessionCredential(descriptors, requested, deps) },
+      deps,
+    );
   },
 
   createSession: async (ctx, deps) => {
@@ -838,6 +863,11 @@ export const HANDLERS: Record<string, Handler> = {
       rec.tenant,
     );
     return { status: 200, body: projectResources(rec, runtime, sandbox, deps.config.sandboxTiers) };
+  },
+
+  listSessionModels: async (ctx, deps) => {
+    const rec = await assertOwner(ctx.params.id!, ctx.principal, deps);
+    return catalogFor(rec, deps);
   },
 
   exchangeCredential: async (ctx, deps) => {

@@ -136,3 +136,63 @@ describe('PATCH /v1/sessions/{id}', () => {
     expect(await codeOf(() => patch(d, { model: 'claude-opus-4-8' }))).toBe('session_not_found');
   });
 });
+
+describe('the catalog routes', () => {
+  const list = (d: TestDeps, credential?: string) =>
+    HANDLERS.listModels!(
+      ctx({
+        principal: alice,
+        query: new URLSearchParams(credential ? { credential } : {}),
+      }),
+      d,
+    );
+
+  it('lists the models of a named credential', async () => {
+    const d = await deps();
+    const res = await list(d, 'my-anthropic');
+    expect(res.body).toEqual({
+      credential: 'my-anthropic',
+      models: [
+        { id: 'claude-opus-4-8', contextWindow: 200000, maxTokens: 32000 },
+        { id: 'meta-llama/Llama-3.1-8B-Instruct', contextWindow: 131072 },
+      ],
+    });
+  });
+
+  it('lists for the only inference credential when none is named', async () => {
+    const d = await deps();
+    expect((await list(d)).body).toMatchObject({ credential: 'my-anthropic' });
+  });
+
+  it('lists for the operator fallback for a subject with no credential', async () => {
+    const d = makeDeps({
+      fetchImpl: gateway(),
+      config: {
+        allowOperatorFallback: true,
+        operatorInferenceToken: 'op-tok', // notsecret
+        defaultInferenceEndpoint: 'https://litellm.internal',
+      },
+    });
+    expect((await list(d)).body).toMatchObject({ credential: 'operator-fallback' });
+  });
+
+  it('refuses a subject with no credential and no fallback', async () => {
+    const d = makeDeps({ fetchImpl: gateway() });
+    expect(await codeOf(() => list(d))).toBe('credential_required');
+  });
+
+  it('503s when the catalog is down', async () => {
+    const d = await deps(true);
+    expect(await codeOf(() => list(d, 'my-anthropic'))).toBe('model_catalog_unavailable');
+  });
+
+  it("lists a session's models from the credential it runs on", async () => {
+    const d = await deps();
+    await create(d, {});
+    const res = await HANDLERS.listSessionModels!(
+      ctx({ principal: alice, params: { id: 'sid-fixed' } }),
+      d,
+    );
+    expect(res.body).toMatchObject({ credential: 'my-anthropic' });
+  });
+});

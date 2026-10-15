@@ -150,6 +150,26 @@ components:
         endpoint:
           type: [string, 'null']
           description: full gateway origin; meaningful only for consumer `inference`
+    ModelList:
+      type: object
+      required: [credential, models]
+      properties:
+        credential:
+          {
+            type: string,
+            description: 'the credential listed for; operator-fallback for the fallback',
+          }
+        models:
+          type: array
+          items:
+            type: object
+            required: [id]
+            properties:
+              id: { type: string }
+              contextWindow: { type: integer }
+              maxTokens: { type: integer }
+              reasoning: { type: boolean }
+              vision: { type: boolean }
   responses:
     Unauthorized:
       description: no token, a bad token, or a failed exchange authentication
@@ -421,6 +441,31 @@ paths:
                   tenant: { type: string }
                   roles: { type: array, items: { type: string } }
         '401': { $ref: '#/components/responses/Unauthorized' }
+  /v1/models:
+    get:
+      operationId: listModels
+      summary: The models an inference credential reaches
+      description: |
+        Asked of the credential's own endpoint: LiteLLM's /model/info, or Anthropic's /v1/models for
+        api.anthropic.com (ids only). `credential` omitted means the credential a new session would
+        use: the only inference credential, or the operator fallback when the subject has none.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: credential, in: query, required: false, schema: { type: string } }
+      responses:
+        '200':
+          description: the catalog
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ModelList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503':
+          description: '`model_catalog_unavailable`: the endpoint could not list its models'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/sessions:
     post:
       operationId: createSession
@@ -631,6 +676,25 @@ paths:
                           from: { type: string, description: the sandbox the session left }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /v1/sessions/{id}/models:
+    get:
+      operationId: listSessionModels
+      summary: The models this session's credential reaches
+      security: [{ sessionToken: [] }]
+      parameters: [{ $ref: '#/components/parameters/sessionId' }]
+      responses:
+        '200':
+          description: the catalog
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ModelList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503':
+          description: '`model_catalog_unavailable`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/sessions/{id}/token:
     post:
       operationId: mintSessionToken

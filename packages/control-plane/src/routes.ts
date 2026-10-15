@@ -83,6 +83,13 @@ export const ROUTES: readonly RouteSpec[] = [
   },
   { method: 'GET', path: '/v1/me', auth: 'api', sessionScoped: false, operationId: 'getMe' },
   {
+    method: 'GET',
+    path: '/v1/models',
+    auth: 'api',
+    sessionScoped: false,
+    operationId: 'listModels',
+  },
+  {
     method: 'POST',
     path: '/v1/sessions',
     auth: 'api',
@@ -124,6 +131,13 @@ export const ROUTES: readonly RouteSpec[] = [
     auth: 'api',
     sessionScoped: true,
     operationId: 'getSessionResources',
+  },
+  {
+    method: 'GET',
+    path: '/v1/sessions/{id}/models',
+    auth: 'api',
+    sessionScoped: true,
+    operationId: 'listSessionModels',
   },
   {
     method: 'POST',
