@@ -21,7 +21,11 @@ describe('ModelOverlay', () => {
         />,
       ),
     );
-    await waitFor(() => (lastFrame() ?? '').includes('granite') && inputReady(stdin), 1000, lastFrame);
+    await waitFor(
+      () => (lastFrame() ?? '').includes('granite') && inputReady(stdin),
+      1000,
+      lastFrame,
+    );
     expect(lastFrame()).toContain('deployment default');
     expect(lastFrame()).toContain('claude-opus-4-8');
     expect(lastFrame()).toMatch(/granite-4\.1-8b.*current/);
@@ -31,10 +35,20 @@ describe('ModelOverlay', () => {
     const onSelect = vi.fn();
     const { lastFrame, stdin } = render(
       withTheme(
-        <ModelOverlay load={list} current={null} onSelect={onSelect} onCancel={vi.fn()} onError={() => false} />,
+        <ModelOverlay
+          load={list}
+          current={null}
+          onSelect={onSelect}
+          onCancel={vi.fn()}
+          onError={() => false}
+        />,
       ),
     );
-    await waitFor(() => (lastFrame() ?? '').includes('granite') && inputReady(stdin), 1000, lastFrame);
+    await waitFor(
+      () => (lastFrame() ?? '').includes('granite') && inputReady(stdin),
+      1000,
+      lastFrame,
+    );
     stdin.write(KEY.enter);
     await waitFor(() => onSelect.mock.calls.length > 0, 1000, lastFrame);
     expect(onSelect).toHaveBeenCalledWith(null);
