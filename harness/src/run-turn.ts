@@ -1040,21 +1040,27 @@ async function executeTurnCore(
 
   if (input.signal) wireAbort(input.signal, session);
 
-  await session.prompt(prompt);
-
-  const lastMessage = session.state.messages.at(-1) as AssistantMessage | undefined;
   let response = '';
   let stopReason = 'end_turn';
   let errorMessage: string | undefined;
 
-  if (lastMessage?.role === 'assistant') {
-    stopReason = lastMessage.stopReason ?? 'end_turn';
-    if (stopReason === 'error' || stopReason === 'aborted') {
-      errorMessage = lastMessage.errorMessage || `Request ${stopReason}`;
-    } else {
-      for (const content of lastMessage.content) {
-        if (content.type === 'text') {
-          response += content.text;
+  // An abort that landed before the prompt (e.g. during pre-prompt compaction) cannot reach a run
+  // that has not started: wireAbort's session.abort() is a no-op then. Report it, and spend nothing.
+  if (input.signal?.aborted) {
+    stopReason = 'aborted';
+    errorMessage = 'Request aborted';
+  } else {
+    await session.prompt(prompt);
+    const lastMessage = session.state.messages.at(-1) as AssistantMessage | undefined;
+    if (lastMessage?.role === 'assistant') {
+      stopReason = lastMessage.stopReason ?? 'end_turn';
+      if (stopReason === 'error' || stopReason === 'aborted') {
+        errorMessage = lastMessage.errorMessage || `Request ${stopReason}`;
+      } else {
+        for (const content of lastMessage.content) {
+          if (content.type === 'text') {
+            response += content.text;
+          }
         }
       }
     }
