@@ -314,6 +314,18 @@ export type UpstreamCredential =
   | { mode: 'placeholder'; value: string; header?: InferenceAuthHeader }
   | { mode: 'direct'; value: string; header?: InferenceAuthHeader };
 
+/**
+ * The model a control-plane session names, with the limits its catalog reported (per-session model
+ * spec §4.5). Plain data from the exchange; sessionModelFor turns it into a pi model.
+ */
+export interface SessionModelSpec {
+  id: string;
+  contextWindow?: number;
+  maxTokens?: number;
+  reasoning?: boolean;
+  vision?: boolean;
+}
+
 export interface TurnConfig {
   redisUrl?: string;
   cwd?: string;
@@ -339,6 +351,11 @@ export interface TurnConfig {
    * for every caller without a control plane; selectPoolSandbox then uses SH_SANDBOX_DEFAULT_TIER.
    */
   sandboxTier?: string;
+  /**
+   * The session's model, from the exchange (per-session model spec §5.1). Read by executeTurn only:
+   * `model` above is also read by /runs, which must not inherit an id pi's registry may not know.
+   */
+  sessionModel?: SessionModelSpec;
 }
 
 export interface ModelSelection {
@@ -549,6 +566,35 @@ export function requireModel(
     ? `Did you mean: ${suggestions.join(', ')}?`
     : `Known "${provider}" ids include: ${ids.slice(0, 12).join(', ')}${ids.length > 12 ? ', …' : ''}.`;
   throw new Error(`Unknown model "${provider}/${modelId}" — not in the pi-ai registry. ${hint}`);
+}
+
+/**
+ * Build a session's model (per-session model spec §5.2). `api.anthropic.com` keeps pi's registry,
+ * exactly as today. Any other endpoint is a gateway (LiteLLM) whose names pi may not know, so the
+ * model is always synthesized -- through requireModel's own SH_MODEL_CUSTOM path, with the session's
+ * limits overlaid on the environment's -- even when the registry happens to know the id.
+ */
+export function sessionModelFor(
+  m: SessionModelSpec,
+  baseUrl: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): ReturnType<typeof requireModel> {
+  if (baseUrl && URL.parse(baseUrl)?.hostname === 'api.anthropic.com') {
+    const { SH_MODEL_CUSTOM: _custom, ...registryEnv } = env;
+    return requireModel('anthropic', m.id, registryEnv);
+  }
+  const base = requireModel(env.SH_MODEL_PROVIDER ?? 'anthropic', m.id, {
+    ...env,
+    SH_MODEL_CUSTOM: '1',
+    ...(baseUrl ? { SH_MODEL_BASE_URL: baseUrl } : {}),
+    ...(m.contextWindow ? { SH_MODEL_CONTEXT_WINDOW: String(m.contextWindow) } : {}),
+    ...(m.maxTokens ? { SH_MODEL_MAX_TOKENS: String(m.maxTokens) } : {}),
+  });
+  return {
+    ...base,
+    ...(m.reasoning !== undefined ? { reasoning: m.reasoning } : {}),
+    ...(m.vision ? { input: ['text', 'image'] } : {}),
+  } as typeof base;
 }
 
 export interface TurnResult {
@@ -976,7 +1022,9 @@ async function executeTurnCore(
   await resourceLoader.reload();
 
   const { provider, modelId } = input.selection ?? resolveModelSelection(config);
-  const baseModel = requireModel(provider, modelId);
+  const baseModel = config?.sessionModel
+    ? sessionModelFor(config.sessionModel, config.anthropicBaseUrl)
+    : requireModel(provider, modelId);
   const model = applyModelGateway(baseModel, config);
 
   const { session } = await createAgentSession({
