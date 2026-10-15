@@ -319,7 +319,7 @@ describe('P6 context overlay', () => {
 
   it("roots every run's view at the revision's workspace/ directory when it has one", () => {
     const pick =
-      'SRC="$CACHE"; if [ -d "$CACHE/workspace" ] && [ ! -L "$CACHE/workspace" ]; then SRC="$CACHE/workspace"; fi';
+      'SRC="$CACHE"; if [ -d "$CACHE/workspace" ] && [ ! -L "$CACHE/workspace" ] && [ ! -e "$CACHE/harnesses" ] && [ ! -e "$CACHE/memory" ] && [ ! -e "$CACHE/knowledge" ] && [ ! -e "$CACHE/artifacts" ]; then SRC="$CACHE/workspace"; fi';
     const acquire = buildContextAcquireScript(revision, 'run-1');
     const populate = buildContextPopulateScript(revision, 'run-1', digest);
     const writable = buildContextWritableScript(revision, 'run-1');
@@ -393,6 +393,45 @@ describe('P6 context overlay', () => {
     }
   });
 
+  it('in a real shell, a revision with workspace/ and other roots shows the whole revision', () => {
+    const base = mkdtempSync(join(tmpdir(), 'moca-context-mixed-'));
+    const sh = (script: string) =>
+      execFileSync(
+        'bash',
+        ['-c', 'flock() { :; }\n' + script.replaceAll('/workspace/.moca-context', base)],
+        {
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      ).toString();
+    const cache = join(base, 'cache', revision);
+    const root = join(base, 'runs', 'run-m');
+    try {
+      mkdirSync(join(cache, 'workspace', 'src'), { recursive: true });
+      writeFileSync(join(cache, 'workspace', 'src', 'greet.py'), 'print("hi")\n');
+      mkdirSync(join(cache, 'memory'), { recursive: true });
+      writeFileSync(join(cache, 'memory', 'notes.md'), 'remember\n');
+      mkdirSync(join(base, 'used'), { recursive: true });
+      writeFileSync(join(base, 'used', revision), '');
+
+      expect(sh(buildContextAcquireScript(revision, 'run-m', 60))).toBe('hit');
+      expect(execFileSync('readlink', [root]).toString().trim()).toBe(cache);
+      const listing = execFileSync('ls', [root]).toString();
+      expect(listing).toContain('workspace\n');
+      expect(listing).toContain('memory\n');
+
+      sh(buildContextWritableScript(revision, 'run-m'));
+      expect(readFileSync(join(root, 'memory', 'notes.md'), 'utf8')).toBe('remember\n');
+      expect(readFileSync(join(root, 'workspace', 'src', 'greet.py'), 'utf8')).toBe(
+        'print("hi")\n',
+      );
+      sh(buildContextCleanupScript(revision, 'run-m', 0));
+      expect(() => lstatSync(root)).toThrow();
+    } finally {
+      execFileSync('chmod', ['-R', 'u+w', base]);
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
   it('in a real shell, a populated revision with workspace/ links the view to it', () => {
     const base = mkdtempSync(join(tmpdir(), 'moca-context-populate-'));
     const src = mkdtempSync(join(tmpdir(), 'moca-context-bundle-'));
@@ -410,7 +449,7 @@ describe('P6 context overlay', () => {
       // No flock(1) on macOS, and its sha256sum lacks --status; neither is under test here.
       execFileSync('bash', [
         '-c',
-        'flock() { :; }\nsha256sum() { :; }\n' +
+        'flock() { :; }\nsha256sum() { cat >/dev/null; }\n' +
           buildContextPopulateScript(revision, 'run-p', sha).replaceAll(
             '/workspace/.moca-context',
             base,

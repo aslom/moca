@@ -174,7 +174,7 @@ to every run on it ([`docs/context-service.md`](../../docs/context-service.md)).
 file with `contextctl` (`mocactl` never calls it), then:
 
 ```bash
-contextctl ctx pack ./repo --type workspace -o ctx.context
+contextctl ctx pack ./repo -o ctx.context
 id=$(mocactl workloads create --context ctx.context --name demo)
 sid=$(mocactl spawn "summarize the repo in the context" --kind prompt --workload "$id")
 mocactl get "$sid"                          # once `mocactl subagents` says done
@@ -182,10 +182,10 @@ mocactl workloads delete "$id"
 ```
 
 `ctx pack` puts the directory's files under the bundle's `workspace/` directory. It needs a Context
-Service version that has `pack` (coming in a Context Service PR). A run starts in its context: the
-agent's working directory shows the bundle's `workspace/` directory (`src/`, not `workspace/src/`),
-or the whole bundle when it has none. A read-only run gets the session's own directory,
-`/workspace/<session>`, as writable scratch space. See "Runs" in
+Service with [rossoctl/context-service#56](https://github.com/rossoctl/context-service/pull/56) (workspace bundles). A run starts in its context: the agent's working directory shows the
+bundle's `workspace/` directory (`src/`, not `workspace/src/`), or the whole bundle when it has
+other content too. A read-only run gets the session's own working directory (`/workspace/<session>`
+on container workers) as writable scratch space. See "Runs" in
 [`docs/context-service.md`](../../docs/context-service.md).
 
 `workloads create` creates the workload (`POST /workloads` on the harness, with your API token),

@@ -31,9 +31,9 @@ Context Service:
 [#517](https://github.com/rossoctl/moca/issues/517), seed sandbox files before a leaf runs):
 `mocactl workloads create --context FILE` does steps 1 to 3, `mocactl spawn --kind prompt --workload ID`
 step 4, and `mocactl workloads delete ID` step 5. It does not build the context file:
-`contextctl ctx pack <dir> --type workspace -o FILE` does, which packs the directory's files under
-the bundle's `workspace/` directory. `pack` needs a Context Service version that has it (coming in a
-Context Service PR). See "Delegate with context" in
+`contextctl ctx pack <dir> -o FILE` does, which packs the directory's files under the bundle's
+`workspace/` directory. `pack` needs a Context Service with [rossoctl/context-service#56](https://github.com/rossoctl/context-service/pull/56) (workspace bundles), on the server as well as
+the client. See "Delegate with context" in
 [`packages/mocactl/README.md`](../packages/mocactl/README.md).
 
 The routes are off by default. With them off, every `/workloads` route answers
@@ -99,12 +99,14 @@ directories stay traversable and executable files keep their exec bit) and publi
 atomically under `flock`.
 The run gets its own view at `/workspace/.moca-context/runs/<session>`, and the agent starts there:
 the view is the run's working directory, the directory its tools run commands in, as a solve leaf
-starts in its worktree. When the revision has a top-level `workspace/` directory, which is where
-`contextctl ctx pack` puts a directory's files, the view shows that directory, so `src/` sits at the
-root of the working directory. Otherwise the view shows the whole revision. Only a real directory
+starts in its worktree. When the revision's only content is a top-level `workspace/` directory,
+which is where `contextctl ctx pack` puts a directory's files, the view shows that directory, so
+`src/` sits at the root of the working directory. Otherwise, including when the revision also has
+`harnesses/`, `memory/`, `knowledge/` or `artifacts/`, the view shows the whole revision, so nothing
+is hidden. Only a real directory
 counts: a `workspace` link in the bundle is ignored. The prompt tells the agent its working
-directory and, for a read-only run, that the session's own directory, `/workspace/<session>`, is
-writable scratch space. Each user's copy is cached separately, so two users never share one, even
+directory and, for a read-only run, that the session's own working directory
+(`/workspace/<session>` on container workers) is writable scratch space. Each user's copy is cached separately, so two users never share one, even
 for identical content. Only P6 sandboxes (Moca's long-running sandbox workers, reached through the
 relay) are supported: a run whose sandbox is reached another way fails without running a turn.
 
@@ -118,7 +120,7 @@ Service's authenticated export for the revision's identity.
 the revision instead of a read-only view, for tasks that edit files, rerun tests or build
 ([#532](https://github.com/rossoctl/moca/pull/532) (writable per-run copy)). The harness first
 places the revision in the sandbox's read-only cache as usual, then copies what the view would show
-(its `workspace/` directory when it has one) with `cp -a` into a staging directory, makes the copy
+(its `workspace/` directory when that is its only content root) with `cp -a` into a staging directory, makes the copy
 writable for the agent, and renames it into place, so the run's path is a real directory, never a
 partial one. The cached copy stays read-only and is shared, ref-counted and swept as for any other
 run. The copy is the run's working directory. The prompt tells the agent the copy is writable and is

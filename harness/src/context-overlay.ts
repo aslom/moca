@@ -2,15 +2,15 @@ import { createHash } from 'node:crypto';
 import type { SandboxTransport } from '@moca/k8s-sandbox';
 
 /**
- * Delivers a workload's frozen Context Service revision into a shared P6 sandbox, read-only, for one
- * run. The sandbox keeps one extracted copy per owner and revision under `cache/`; each run
+ * Delivers a workload's frozen Context Service revision into a shared P6 sandbox, read-only, for
+ * one run. The sandbox keeps one extracted copy per owner and revision under `cache/`; each run
  * registers a ref on it and gets its own view at `runs/<session>`, rooted at the revision's
- * `workspace/` directory when it has one and at the whole revision otherwise. The bundle crosses
- * the relay only on a miss. A writable run gets its own copy of that root there instead of a link,
- * which it may change and which cleanup removes; the cached copy stays read-only. Keying the cache by
- * owner means two users never share a copy, even when both uploaded identical content. The owner's
- * part of the key is an HMAC under a secret agents never see, so an agent cannot derive another
- * user's key from their name and plant a copy for a revision it knows.
+ * `workspace/` directory when that is its only content root and at the whole revision otherwise.
+ * The bundle crosses the relay only on a miss. A writable run gets its own copy of that root there
+ * instead of a link, which it may change and which cleanup removes; the cached copy stays
+ * read-only. Keying the cache by owner means two users never share a copy, even when both uploaded
+ * identical content. The owner's part of the key is an HMAC under a secret agents never see, so an
+ * agent cannot derive another user's key from their name and plant a copy for a revision it knows.
  * It is not isolation: every agent runs as the same uid as these files, so it can still alter any
  * copy it can see, and learn that copy's scope from its name. The read-only modes stop accidents,
  * not a determined agent. Isolation between users needs separate sandboxes (rossoctl/moca#476,
@@ -88,13 +88,17 @@ const uploadPath = (rev: string, sid: string) => `${BASE}/incoming/${rev}.${sid}
 const writableStage = (sid: string) => `${BASE}/runs/.stage.${sid}`;
 
 /**
- * Set `SRC` to the directory a run's view shows: the revision's `workspace/` directory when it has
- * one (Context Service packs a directory's plain files there), else the whole revision. Only a real
- * directory counts: `[ -d ]` follows links, so a bundled `workspace` link is never followed out of
- * the cache.
+ * Set `SRC` to the directory a run's view shows: the revision's `workspace/` directory when that is
+ * its only content root (Context Service packs a directory's plain files there), else the whole
+ * revision, so a bundle that also carries `harnesses/`, `memory/`, `knowledge/` or `artifacts/`
+ * hides none of them. Only a real directory counts: `[ -d ]` follows links, so a bundled
+ * `workspace` link is never followed out of the cache.
  */
+const OTHER_CONTENT_ROOTS = ['harnesses', 'memory', 'knowledge', 'artifacts'];
 const VIEW_SOURCE =
-  'SRC="$CACHE"; if [ -d "$CACHE/workspace" ] && [ ! -L "$CACHE/workspace" ]; then SRC="$CACHE/workspace"; fi';
+  'SRC="$CACHE"; if [ -d "$CACHE/workspace" ] && [ ! -L "$CACHE/workspace" ]' +
+  OTHER_CONTENT_ROOTS.map((root) => ` && [ ! -e "$CACHE/${root}" ]`).join('') +
+  '; then SRC="$CACHE/workspace"; fi';
 
 /**
  * Remove revisions that no live run references and no run used within the retention window, plus

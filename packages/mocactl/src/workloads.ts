@@ -116,7 +116,7 @@ export async function cmdWorkloadCreate(rt: Runtime, io: Io, opts: CreateOptions
     size = st.size;
   } catch {
     io.err(
-      `--context ${opts.contextPath} does not exist (build one with \`contextctl ctx pack DIR --type workspace -o FILE\`)`,
+      `--context ${opts.contextPath} does not exist (build one with \`contextctl ctx pack DIR -o FILE\`)`,
     );
     return 2;
   }
