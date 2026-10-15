@@ -162,6 +162,8 @@ services:
       # on a token, header and endpoint that cannot work together (#368).
       SH_OPERATOR_INFERENCE_HEADER:
       SH_DEFAULT_INFERENCE_ENDPOINT:
+      # Extra hosts the model catalog may contact, beyond api.anthropic.com and the default endpoint's.
+      SH_MODEL_CATALOG_HOSTS:
       SH_API_TOKEN_TTL_SECONDS:
       SH_SESSION_TOKEN_TTL_SECONDS:
       SH_REFRESH_IDLE_TTL_SECONDS:
