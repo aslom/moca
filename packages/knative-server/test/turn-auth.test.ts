@@ -886,4 +886,49 @@ describe('configRef from the exchange', () => {
       ).rejects.toMatchObject({ code: 'credential_unavailable' });
     }
   });
+
+  const withModel = (model: unknown) =>
+    deps({
+      fetchImpl: fakeExchange({
+        status: 200,
+        body: {
+          mode: 'direct',
+          anthropicAuthToken: 'sk-alice', // notsecret
+          anthropicBaseUrl: 'https://litellm.internal',
+          sessionId: 'sid-1',
+          subject: 'github:1234',
+          model,
+        },
+      }).fetchImpl,
+    });
+
+  it('carries the session model from the exchange (per-session model spec §5.1)', async () => {
+    const auth = await resolveTurnAuth(
+      { authorization: `Bearer ${sessionToken()}` },
+      { sessionId: 'sid-1' },
+      withModel({ id: 'meta-llama/Llama-3.1-8B-Instruct', contextWindow: 131072 }),
+    );
+    expect(auth?.model).toEqual({ id: 'meta-llama/Llama-3.1-8B-Instruct', contextWindow: 131072 });
+  });
+
+  it('omits the model when the exchange names none', async () => {
+    const auth = await resolveTurnAuth(
+      { authorization: `Bearer ${sessionToken()}` },
+      { sessionId: 'sid-1' },
+      deps(),
+    );
+    expect(auth).not.toHaveProperty('model');
+  });
+
+  it.each([[{ contextWindow: 1 }], [{ id: 'has space' }], [{ id: 'm', contextWindow: -5 }], ['m']])(
+    'fails the turn on a malformed model %j rather than guessing',
+    async (model) => {
+      const err = await resolveTurnAuth(
+        { authorization: `Bearer ${sessionToken()}` },
+        { sessionId: 'sid-1' },
+        withModel(model),
+      ).catch((e: { code: string }) => e);
+      expect((err as { code: string }).code).toBe('credential_unavailable');
+    },
+  );
 });
