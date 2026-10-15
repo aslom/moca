@@ -194,5 +194,22 @@ describe('the catalog routes', () => {
       d,
     );
     expect(res.body).toMatchObject({ credential: 'my-anthropic' });
+    const body = res.body as { models: { id: string }[] };
+    expect(body.models.map((m) => m.id)).toEqual([
+      'claude-opus-4-8',
+      'meta-llama/Llama-3.1-8B-Instruct',
+    ]);
+  });
+
+  it('refuses a tombstoned session', async () => {
+    const d = await deps();
+    await create(d, {});
+    await d.index.tombstone('sid-fixed');
+    expect(await codeOf(() =>
+      HANDLERS.listSessionModels!(
+        ctx({ principal: alice, params: { id: 'sid-fixed' } }),
+        d,
+      ),
+    )).toBe('session_not_found');
   });
 });

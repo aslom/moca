@@ -867,6 +867,7 @@ export const HANDLERS: Record<string, Handler> = {
 
   listSessionModels: async (ctx, deps) => {
     const rec = await assertOwner(ctx.params.id!, ctx.principal, deps);
+    if (rec.tombstone) throw new CpError('session_not_found', undefined, rec.sessionId);
     return catalogFor(rec, deps);
   },
 
