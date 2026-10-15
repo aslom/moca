@@ -30,7 +30,8 @@ import {
 } from './turn-auth.js';
 import { warnKnativeDeprecation } from './deprecation.js';
 import { prepareServerProcess } from './server-process.js';
-import { adoptTurnSlot } from './turn-slot.js';
+import { adoptTurnSlot, attachTurnSlot } from './turn-slot.js';
+import { SubjectCounter, turnsPerSubjectCap } from './subject-quota.js';
 import { resolveVersion } from './version.js';
 import { handleWorkloads, resolveWorkloadRun, workloadsEnabled } from './workloads.js';
 import { assertContextServiceSettings, downloadContextBundle } from './context-service.js';
@@ -106,6 +107,11 @@ export function buildConfig(auth?: TurnAuth | null): TurnConfig {
 // Read per request so a Knative env change takes effect on the next request without a code path that
 // caches a stale keyset, matching how saturationWaitConfig() already behaves.
 const turnAuthDeps = () => turnAuthDepsFromEnv(process.env);
+
+// The per-subject in-flight count (#360, MI1 §13). Process-wide, like the turn registry: every
+// worker (and the standalone tier) holds its own, so the cap bounds a subject to `cap` slots per
+// worker rather than per host — see subject-quota.ts for why that trade is the right interim.
+const subjectCounter = new SubjectCounter();
 
 // Detachable turns (turn-reattach spec §4). Read per request, like the keyset: a deployment flips
 // it with an env change and a restart, and tests flip it per test.
@@ -252,6 +258,28 @@ async function handleTurn(req: IncomingMessage, res: ServerResponse): Promise<vo
   } catch (err) {
     writeAuthError(res, err, sessionId);
     return;
+  }
+
+  // The per-subject admission quota (#360). The supervisor's 429 bounds the POOL; this bounds one
+  // subject, here — the only place the subject is known before the turn runs. A DISTINCT code, not
+  // the supervisor's `overloaded`, so a client can tell "you are over your share" from "the host is
+  // full". The slot rides the turn's own lifecycle (turn-slot.ts): released on response close, or
+  // on adoption for a detachable turn. An unauthenticated caller has no subject and no slot.
+  if (auth) {
+    const cap = turnsPerSubjectCap(process.env);
+    if (cap !== undefined) {
+      const release = subjectCounter.acquire(auth.subject, cap);
+      if (release === null) {
+        res.writeHead(429, retryHeaders()).end(
+          JSON.stringify({
+            error: 'subject_quota_exceeded',
+            ...(sessionId ? { sessionId } : {}),
+          }),
+        );
+        return;
+      }
+      attachTurnSlot(res, release);
+    }
   }
 
   // §4.4: with detach on, a session runs one live turn at a time; a turn of any kind is refused

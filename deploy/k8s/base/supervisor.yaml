@@ -50,6 +50,9 @@ spec:
             - { name: SH_WORKERS, value: '2' }
             # A TRIAL value, as in deploy/compose: S's real value is an output of E8.
             - { name: SH_TURNS_PER_WORKER, value: '4' }
+            # Half of S, spelled out: the per-subject quota's default, made explicit so the two
+            # knobs move together (#360; MI1 §13).
+            - { name: SH_TURNS_PER_SUBJECT, value: '2' }
             - { name: SH_ROUTING_POLICY, value: leastInFlight }
             - { name: SH_WORKER_RESTART_BACKOFF_MS, value: '250' }
             - { name: SH_SANDBOX_DISCOVERY, value: records }
