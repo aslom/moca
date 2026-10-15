@@ -148,6 +148,11 @@ export const PASSTHROUGH = new Set([
 const optPositiveInt = (v: unknown) =>
   v === undefined || (Number.isInteger(v) && (v as number) > 0);
 const optBool = (v: unknown) => v === undefined || typeof v === 'boolean';
+/**
+ * The control plane's own ceiling (control-plane models.ts MAX_CONTEXT_WINDOW, PR #540 review R9):
+ * it never hands out a larger window, so one arriving anyway is a wrong shape, refused like the rest.
+ */
+const MAX_CONTEXT_WINDOW = 10_000_000;
 
 /** The exchange's `model`, checked field by field: a wrong shape fails the turn, never guesses. */
 function isSessionModel(v: unknown): v is SessionModelSpec {
@@ -157,6 +162,7 @@ function isSessionModel(v: unknown): v is SessionModelSpec {
     typeof m.id === 'string' &&
     MODEL_ID_RE.test(m.id) &&
     optPositiveInt(m.contextWindow) &&
+    (m.contextWindow === undefined || (m.contextWindow as number) <= MAX_CONTEXT_WINDOW) &&
     optPositiveInt(m.maxTokens) &&
     optBool(m.reasoning) &&
     optBool(m.vision)
