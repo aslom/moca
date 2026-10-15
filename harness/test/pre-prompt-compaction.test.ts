@@ -107,4 +107,20 @@ describe('compactIfOverflowing', () => {
     controller.abort();
     expect(s.abortCompaction).not.toHaveBeenCalled();
   });
+
+  it('does not log a cancelled compaction as a failure (final review F7)', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const controller = new AbortController();
+    const s = session(
+      4_500,
+      vi.fn(async () => {
+        controller.abort();
+        throw new Error('Compaction cancelled');
+      }),
+    );
+    expect(await compactIfOverflowing(s, controller.signal)).toBe(false);
+    expect(spy).not.toHaveBeenCalled();
+    expect(log.mock.calls.join('\n')).toContain('pre-prompt compaction cancelled');
+  });
 });

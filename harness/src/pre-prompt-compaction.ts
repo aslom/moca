@@ -61,6 +61,12 @@ export async function compactIfOverflowing(
     await session.compact();
     return true;
   } catch (err) {
+    // A cancelled turn aborts its compaction too: that is not a failure, and the turn does not
+    // proceed, so the failure line would mislead on both counts.
+    if (signal?.aborted) {
+      console.log('[compaction] pre-prompt compaction cancelled');
+      return false;
+    }
     console.error(
       `[compaction] pre-prompt compaction failed; the turn proceeds: ${(err as Error)?.message ?? String(err)}`,
     );
