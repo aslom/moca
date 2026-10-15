@@ -855,8 +855,14 @@ prediction sealed before E8's next rung, since it sits on the hot path.
 - **Per-user admission quota** (rossoctl/moca#360). `packages/supervisor/src/admission.ts` bounds the worker as a whole,
   so one user can use every slot. This belongs with S2's grants, which name the user.
 - **Tenant-scoped session listing** (rossoctl/moca#361). `RedisSessionBackend.list()`
-  (`packages/session-backend/src/redis-backend.ts`) returns every tenant's sessions. No route
-  exposes it to a caller today, but no caller-facing use may be added before S2 scopes it.
+  (`packages/session-backend/src/redis-backend.ts`) returned every tenant's sessions. No route
+  exposed it to a caller today, but no caller-facing use may be added before S2 scopes it.
+  **Closed in-product 2026-10-15 (rossoctl/moca#541):** `list()` is deleted from `LogStore` and
+  `RedisSessionBackend` (nothing called it, so no SCAN-based admin listing was kept), and
+  `BufferedRedisBackend.list()` — which Pi's `SessionStorageBackend` requires — now throws an error
+  naming the scoped path, making this §13 clause structural rather than advisory. The scoped listing
+  remains `OwnershipIndex.listByOwner` (§7.1-§7.3), with the cross-tenant isolation test in
+  `packages/control-plane/test/ownership.test.ts`.
 - **Blocking cloud instance metadata from sandboxes** on `deploy/vm` (rossoctl/moca#357). R8 filtered only the input
   hook, so a sandbox could reach `169.254.169.254` and, on an IMDSv1 or hop-limit-2 EC2 host, the
   instance role's credentials. **Closed in-product 2026-10-15 (rossoctl/moca#539):** the
