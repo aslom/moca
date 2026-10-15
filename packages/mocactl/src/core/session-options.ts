@@ -101,8 +101,25 @@ function isSandboxTiers(v: unknown): v is NonNullable<Discovery['sandboxTiers']>
   );
 }
 
-/** `200k` for 200000: the label's only job is telling a big window from a small one. */
-const formatWindow = (n: number): string => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
+/**
+ * `200k ctx` for 200000: the label's only job is telling a big window from a small one. A remote
+ * value, so undefined unless it is a finite positive number (PR #540 review R6) -- anything else
+ * would reach the label through String() unsanitized. Shared with the /model overlay.
+ */
+export function formatWindow(n: unknown): string | undefined {
+  if (typeof n !== 'number' || !Number.isFinite(n) || n <= 0) return undefined;
+  return `${n >= 1000 ? `${Math.round(n / 1000)}k` : String(n)} ctx`;
+}
+
+/** The catalog's entries with a string id; a body without a models array has none (R6). */
+function catalogEntries(list: unknown): Array<{ id: string; contextWindow?: unknown }> {
+  const models = (list as { models?: unknown } | null)?.models;
+  if (!Array.isArray(models)) return [];
+  return models.filter(
+    (m): m is { id: string; contextWindow?: unknown } =>
+      typeof m === 'object' && m !== null && typeof (m as { id?: unknown }).id === 'string',
+  );
+}
 
 export const modelField: SessionOptionField = {
   key: 'model',
@@ -132,12 +149,12 @@ export const modelField: SessionOptionField = {
       }
       throw err;
     }
-    const models = list.models.map((m) => {
+    // A remote body, shape-checked as sandboxTierField's is: a 200 without a models array skips the
+    // field rather than breaking New Session and `mocactl run` with a TypeError (R6).
+    const models = catalogEntries(list).map((m) => {
       const id = sanitizeRemote(m.id);
-      return {
-        value: m.id,
-        label: m.contextWindow ? `${id}  ${formatWindow(m.contextWindow)} ctx` : id,
-      };
+      const window = formatWindow(m.contextWindow);
+      return { value: m.id, label: window ? `${id}  ${window}` : id };
     });
     // The deployment default is always a choice (final review F3): without it a one-model catalog
     // would be auto-pinned, and New Session could never leave the model to the deployment. '' is

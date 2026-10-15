@@ -7,6 +7,7 @@ import {
   MODEL_SWITCH_UNSUPPORTED,
 } from '../../core/messages.js';
 import { sanitizeRemote } from '../../core/sanitize.js';
+import { formatWindow } from '../../core/session-options.js';
 import { SelectList } from '../SelectList.js';
 import { Spinner } from '../Spinner.js';
 
@@ -85,9 +86,7 @@ export function ModelOverlay({ load, current, onSelect, onCancel, onError, onInp
         ...list.models.map((m) => ({
           key: m.id,
           label: sanitizeRemote(m.id),
-          detail: [m.contextWindow ? `${Math.round(m.contextWindow / 1000)}k ctx` : '', mark(m.id)]
-            .filter(Boolean)
-            .join('  '),
+          detail: [formatWindow(m.contextWindow) ?? '', mark(m.id)].filter(Boolean).join('  '),
           value: m.id,
         })),
       ]}

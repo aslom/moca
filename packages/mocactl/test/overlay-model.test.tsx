@@ -32,6 +32,31 @@ describe('ModelOverlay', () => {
     expect(lastFrame()).toMatch(/granite-4\.1-8b.*current/);
   });
 
+  // PR #540 review R6: the same window label as New Session's -- not "0k ctx" under 500.
+  it('labels a window the way New Session does', async () => {
+    const { lastFrame, stdin } = render(
+      withTheme(
+        <ModelOverlay
+          load={async () => ({
+            credential: 'c',
+            models: [
+              { id: 'tiny', contextWindow: 400 },
+              { id: 'big', contextWindow: 131072 },
+            ],
+          })}
+          current={null}
+          onSelect={vi.fn()}
+          onCancel={vi.fn()}
+          onError={() => false}
+        />,
+      ),
+    );
+    await waitFor(() => (lastFrame() ?? '').includes('big') && inputReady(stdin), 1000, lastFrame);
+    expect(lastFrame()).toMatch(/tiny\s+400 ctx/);
+    expect(lastFrame()).toMatch(/big\s+131k ctx/);
+    expect(lastFrame()).not.toContain('0k ctx');
+  });
+
   it('selects a model on enter, and null for the default', async () => {
     const onSelect = vi.fn();
     const { lastFrame, stdin } = render(

@@ -406,6 +406,72 @@ describe('App', () => {
     ]);
   });
 
+  // PR #540 review R2: with a non-empty catalog, New Session preselects "deployment default" (value
+  // ''); keeping it attached the session with model '' -- a blank status line, and a bogus
+  // "(not listed)" row marked current in /model.
+  it('keeping the preselected deployment default attaches with no model', async () => {
+    const created: unknown[] = [];
+    const models = {
+      credential: 'anthropic',
+      models: [{ id: 'granite-4.1-8b', contextWindow: 131072 }, { id: 'claude-opus-4-8' }],
+    };
+    const rt = testRuntime({
+      cp: fakeControlPlane({
+        listCredentials: async () => [credential('anthropic')],
+        listModels: async () => models,
+        listSessionModels: async () => models,
+        createSession: async (req) => (
+          created.push(req),
+          { sessionId: 's-1', token: 'st', expiresAt: 4_000_000_000 }
+        ),
+      }),
+    });
+    const { stdin, frame, until, ready } = mount(rt);
+    await ready();
+    await send(stdin, '/new');
+    await until(() => frame().includes('deployment default'));
+    await tick();
+    stdin.write(KEY.enter);
+    await until(() => !frame().includes('New session') && frame().includes('s-1 · model default'));
+    expect(created).toEqual([{ credentials: { inference: 'anthropic' } }]);
+    await tick();
+    await send(stdin, '/model');
+    await until(() => frame().includes('granite-4.1-8b'));
+    expect(frame()).not.toContain('(not listed)');
+    expect(frame()).toMatch(/deployment default\s+current/);
+  });
+
+  // PR #540 review R5: a LiteLLM alias literally named `default` is a valid id; picked in the
+  // overlay, it must be switched to, not read as "the deployment default".
+  it('/model overlay switches to a model literally named default', async () => {
+    const set: Array<[string, string | null]> = [];
+    const base = fakeControlPlane();
+    const rt = testRuntime({
+      cp: fakeControlPlane({
+        listCredentials: async () => [credential('anthropic')],
+        listSessionModels: async () => ({ credential: 'anthropic', models: [{ id: 'default' }] }),
+        createSession: async () => ({ sessionId: 's-1', token: 'st', expiresAt: 4_000_000_000 }),
+        setSessionModel: async (id, model) => (
+          set.push([id, model]),
+          base.setSessionModel(id, model)
+        ),
+      }),
+    });
+    const { stdin, frame, until, ready } = mount(rt);
+    await ready();
+    await send(stdin, '/new');
+    await until(() => !frame().includes('New session') && frame().includes('s-1 · model default'));
+    await tick();
+    await send(stdin, '/model');
+    await until(() => frame().includes('deployment default'));
+    await tick();
+    stdin.write(KEY.down);
+    await tick();
+    stdin.write(KEY.enter);
+    await until(() => set.length > 0);
+    expect(set).toEqual([['s-1', 'default']]);
+  });
+
   it('/model against an older control plane says it cannot switch (final review F4)', async () => {
     const rt = testRuntime({
       cp: fakeControlPlane({

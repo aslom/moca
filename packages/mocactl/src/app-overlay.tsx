@@ -137,7 +137,7 @@ export function AppOverlay({
           current={currentModel ?? null}
           onSelect={(id) => {
             close();
-            void host.switchModel(id ?? 'default');
+            void host.switchModel(id);
           }}
           onCancel={close}
           onError={onCpError}

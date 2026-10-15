@@ -363,7 +363,9 @@ export function App({ rt, opts, env, os, write }: AppProps) {
           session: s,
           initial: EMPTY_BLOCKS,
           configRef: bundle?.digest,
-          model: values.model ?? null,
+          // '' is the preselected "deployment default" choice, never a model id (MODEL_ID_RE): `||`,
+          // not `??`, or the status line reads "model " and /model marks a bogus row (PR #540 R2).
+          model: values.model || null,
         },
         prompt ? deriveTitle(prompt) : undefined,
         prompt ? [prompt] : [],
@@ -460,11 +462,11 @@ export function App({ rt, opts, env, os, write }: AppProps) {
       setTitle(t);
       notify(`renamed to "${t}"`);
     },
-    switchModel: async (arg) => {
+    switchModel: async (model) => {
       const s = sessionRef.current;
       if (!s || !rt.cp) return;
       try {
-        const r = await rt.cp.setSessionModel(s.sessionId, arg === 'default' ? null : arg);
+        const r = await rt.cp.setSessionModel(s.sessionId, model);
         setAttached((a) => (a.session === s ? { ...a, model: r.model ?? null } : a));
         const name = r.model ?? 'the deployment default';
         // The turn running now read its model at its exchange; the switch applies from the next.

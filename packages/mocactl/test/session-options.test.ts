@@ -288,6 +288,48 @@ describe('the model field', () => {
     }
   });
 
+  // PR #540 review R6: a remote body, shape-checked like the sandbox tiers.
+  it('skips the field on a catalog body with no models array', async () => {
+    const api = fakeControlPlane({
+      listCredentials: async () => [credential('c1')],
+      listModels: async () => ({ credential: 'c1' }) as never,
+    });
+    const r = await resolveSessionOptions(api, SESSION_OPTION_FIELDS, {}, {});
+    expect(r.status).toBe('ready');
+    if (r.status === 'ready') expect(r.request).not.toHaveProperty('model');
+  });
+
+  it('keeps only entries with a string id, and shows only a finite positive window', async () => {
+    const api = fakeControlPlane({
+      listCredentials: async () => [credential('c1')],
+      listModels: async () =>
+        ({
+          credential: 'c1',
+          models: [
+            null,
+            { id: 7 },
+            { id: 'a', contextWindow: '200000' },
+            { id: 'b', contextWindow: Number.POSITIVE_INFINITY },
+            { id: 'c', contextWindow: -5 },
+            { id: 'd', contextWindow: 400 },
+            { id: 'e', contextWindow: 131072 },
+          ],
+        }) as never,
+    });
+    const r = await resolveSessionOptions(api, SESSION_OPTION_FIELDS, {}, {});
+    expect(r.status).toBe('needs-input');
+    if (r.status === 'needs-input') {
+      expect(r.choices.map((c) => c.label)).toEqual([
+        'deployment default',
+        'a',
+        'b',
+        'c',
+        'd  400 ctx',
+        'e  131k ctx',
+      ]);
+    }
+  });
+
   it('asks even with one model, the deployment default preselected (final review F3)', async () => {
     const r = await resolveSessionOptions(
       withModels([{ id: 'only' }]),

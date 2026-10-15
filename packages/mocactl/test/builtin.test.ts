@@ -123,6 +123,14 @@ describe('BUILTIN_COMMANDS', () => {
     expect(h.openOverlay).toHaveBeenCalledWith('model');
   });
 
+  // PR #540 review R5: only the slash command maps the word `default`; the host takes string | null.
+  it('/model default asks for the deployment default as null', async () => {
+    const h = host();
+    const hit = registry.bySlash('/model default')!;
+    await hit.command.run(h, hit.arg);
+    expect(h.switchModel).toHaveBeenCalledWith(null);
+  });
+
   it('/model needs an open session', () => {
     expect(registry.available(host(false)).map((c) => c.id)).not.toContain('session.model');
   });
