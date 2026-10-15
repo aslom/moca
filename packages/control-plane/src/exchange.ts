@@ -3,6 +3,8 @@ import { touchBundle } from './bundle-budget.js';
 import { inferenceAuthHeader, type InferenceAuthHeader } from './credential-store.js';
 import { CpError } from './errors.js';
 import type { CpConfig, CpDeps } from './handlers.js';
+import type { InferenceTarget } from './model-catalog.js';
+import type { SessionModel } from './models.js';
 import type { SessionRecord } from './ownership.js';
 import { verifyToken } from './token.js';
 
@@ -41,6 +43,11 @@ export interface ExchangeResponse {
    * (sessionTier). Absent only when the deployment declares no tiers, so that response is unchanged.
    */
   sandboxTier?: string;
+  /**
+   * The session's model and the limits snapshotted when it was chosen (per-session model spec
+   * §4.5). Absent when the session names none, so that response is unchanged.
+   */
+  model?: SessionModel;
 }
 
 /**
@@ -132,26 +139,24 @@ export function directModeMismatch(
   return undefined;
 }
 
-export async function exchangeCredential(
-  presentedToken: string,
+export interface ResolvedInference {
+  secretValue: string;
+  /** The stored credential's name, or OPERATOR_FALLBACK_NAME when the operator's key is used. */
+  credentialName: string;
+  baseUrl: string;
+  authHeader: InferenceAuthHeader;
+  usedOperatorFallback: boolean;
+}
+
+/**
+ * Which secret a session's inference uses, sent in which header, to which endpoint (spec §5.3,
+ * §6.2, §6.4). Shared by the exchange and the model catalog (per-session model spec §4.1), so the
+ * catalog is asked with exactly the credential a turn would spend. Throws what the exchange throws.
+ */
+export async function resolveInference(
+  rec: { owner: string; credentialName: string; sessionId?: string },
   deps: CpDeps,
-): Promise<ExchangeResponse> {
-  // Only a SESSION token may drive a turn; an api token is rejected here (plan gap #7).
-  const claims = verifyToken(presentedToken, deps.verifyKeys, {
-    now: Math.floor(deps.now() / 1000),
-    requiredScope: 'turn:write',
-  });
-  if (!claims.sid) throw new CpError('token_invalid', 'token names no session');
-
-  const rec = await deps.index.get(claims.sid);
-  // Owner mismatch and unknown session are the same 404-shaped answer: a valid token minted for one
-  // subject must not exchange against another's session even though both facts are true separately.
-  if (!rec || rec.owner !== claims.sub) {
-    throw new CpError('session_not_found', undefined, claims.sid);
-  }
-  // The tombstone check is what stops a DELETED session starting a new turn (spec §5.3, §7.3).
-  if (rec.tombstone) throw new CpError('session_not_found', undefined, claims.sid);
-
+): Promise<ResolvedInference> {
   const stored = rec.credentialName
     ? await deps.credentials.get(rec.owner, rec.credentialName)
     : null;
@@ -228,6 +233,37 @@ export async function exchangeCredential(
       rec.sessionId,
     );
   }
+  return { secretValue, credentialName, baseUrl, authHeader, usedOperatorFallback };
+}
+
+export const targetOf = (r: ResolvedInference): InferenceTarget => ({
+  baseUrl: r.baseUrl,
+  secret: r.secretValue,
+  header: r.authHeader,
+});
+
+export async function exchangeCredential(
+  presentedToken: string,
+  deps: CpDeps,
+): Promise<ExchangeResponse> {
+  // Only a SESSION token may drive a turn; an api token is rejected here (plan gap #7).
+  const claims = verifyToken(presentedToken, deps.verifyKeys, {
+    now: Math.floor(deps.now() / 1000),
+    requiredScope: 'turn:write',
+  });
+  if (!claims.sid) throw new CpError('token_invalid', 'token names no session');
+
+  const rec = await deps.index.get(claims.sid);
+  // Owner mismatch and unknown session are the same 404-shaped answer: a valid token minted for one
+  // subject must not exchange against another's session even though both facts are true separately.
+  if (!rec || rec.owner !== claims.sub) {
+    throw new CpError('session_not_found', undefined, claims.sid);
+  }
+  // The tombstone check is what stops a DELETED session starting a new turn (spec §5.3, §7.3).
+  if (rec.tombstone) throw new CpError('session_not_found', undefined, claims.sid);
+
+  const { secretValue, credentialName, baseUrl, authHeader, usedOperatorFallback } =
+    await resolveInference(rec, deps);
 
   // Placeholder mode WINS whenever the deployment has an injector, so adding one strictly narrows
   // what the harness may hold; direct mode is reachable only when none is configured, and MU3 deletes
@@ -308,5 +344,6 @@ export async function exchangeCredential(
     ...(mode === 'direct' && authHeader === 'x-api-key' ? { authHeader } : {}),
     ...(rec.configRef ? { configRef: rec.configRef } : {}),
     ...(tier ? { sandboxTier: tier } : {}),
+    ...(rec.model ? { model: { id: rec.model, ...rec.modelLimits } } : {}),
   };
 }

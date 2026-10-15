@@ -774,6 +774,18 @@ paths:
                       the tier the session's turn runs in (P6.3): the recorded tier, or today's
                       default for a session that recorded none; absent whenever the deployment
                       declares no tiers, even for a session that recorded one
+                  model:
+                    type: object
+                    description: |
+                      the session's model and the limits recorded when it was chosen; absent when
+                      the session names none (the data plane then uses its deployment default)
+                    required: [id]
+                    properties:
+                      id: { type: string }
+                      contextWindow: { type: integer }
+                      maxTokens: { type: integer }
+                      reasoning: { type: boolean }
+                      vision: { type: boolean }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }

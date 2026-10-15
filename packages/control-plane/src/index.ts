@@ -93,8 +93,11 @@ export {
   checkExchangeAuth,
   exchangeCredential,
   placeholderFor,
+  resolveInference,
+  targetOf,
   type CredentialMode,
   type ExchangeResponse,
+  type ResolvedInference,
 } from './exchange.js';
 export { buildHandler, startControlPlane } from './server.js';
 export {

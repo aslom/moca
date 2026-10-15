@@ -100,6 +100,8 @@ export interface CpDeps {
   /** randomUUID by default. A control-plane-minted id is always its own leafSessionId (gap #10). */
   newId(): string;
   runKubectl?: RunKubectl;
+  /** The model catalog's fetch (per-session model spec §4.1); global fetch when absent. A test seam. */
+  fetchImpl?: typeof fetch;
   /**
    * Whether the Redis client is connected and ready (main.ts: `client.isReady`). A command issued
    * while it is not ready waits in node-redis's offline queue for as long as the outage lasts, so
