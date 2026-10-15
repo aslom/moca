@@ -6,7 +6,7 @@
  * line inside a handler that a test cannot enumerate.
  */
 export interface RouteSpec {
-  method: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   /** OpenAPI-style template. `{name}` segments become params. */
   path: string;
   /**
@@ -20,7 +20,7 @@ export interface RouteSpec {
   /** A query parameter that requires `roles` to include `admin` (spec §4.1). */
   adminOnlyQuery?: string;
   /**
-   * Whether a POST/PUT route needs a request body. Defaults to true (most do); a route whose
+   * Whether a POST/PUT/PATCH route needs a request body. Defaults to true (most do); a route whose
    * handler takes everything from the path param and the caller's own principal -- startDeviceAuth,
    * mintSessionToken -- sets this false so the router's generic empty-body guard doesn't 400 a
    * client that correctly sends nothing. Ignored for GET/DELETE, which never read a body.
@@ -110,6 +110,13 @@ export const ROUTES: readonly RouteSpec[] = [
     auth: 'api',
     sessionScoped: true,
     operationId: 'deleteSession',
+  },
+  {
+    method: 'PATCH',
+    path: '/v1/sessions/{id}',
+    auth: 'api',
+    sessionScoped: true,
+    operationId: 'updateSession',
   },
   {
     method: 'GET',

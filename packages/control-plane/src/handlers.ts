@@ -25,10 +25,19 @@ import {
   resolveInferenceName,
   parseCredentialBody,
   validateCredentialName,
+  type CredentialDescriptor,
   type CredentialStore,
   type InferenceAuthHeader,
 } from './credential-store.js';
-import { exchangeCredential, OPERATOR_FALLBACK_NAME, viewTier } from './exchange.js';
+import {
+  exchangeCredential,
+  OPERATOR_FALLBACK_NAME,
+  resolveInference,
+  targetOf,
+  viewTier,
+} from './exchange.js';
+import { MODEL_ID_RE } from './models.js';
+import { chooseModel, type ModelChoice } from './model-catalog.js';
 import type { RunKubectl } from './kubectl.js';
 import { DEFAULT_PAGE_SIZE, type OwnershipIndex, type SessionRecord } from './ownership.js';
 import type { IdentityProvider } from './identity.js';
@@ -341,7 +350,48 @@ async function sessionView(rec: SessionRecord, deps: CpDeps) {
     lastTurnAt: runtime.lastTurnAt ? Number(runtime.lastTurnAt) : null,
     turns: runtime.turns ? Number(runtime.turns) : 0,
     sandboxTier: tier,
+    model: rec.model || null,
   };
+}
+
+/**
+ * The credential a session created now would record: the named one, or -- for a subject with no
+ * inference credential of its own -- '' for the operator fallback (spec §6.4). Shared by
+ * createSession and the catalog route, which must list for exactly the credential a session would use.
+ */
+export function newSessionCredential(
+  descriptors: CredentialDescriptor[],
+  requested: string | undefined,
+  deps: CpDeps,
+): string {
+  const fallback =
+    requested === undefined &&
+    deps.config.allowOperatorFallback &&
+    !!deps.config.operatorInferenceToken &&
+    !descriptors.some((d) => d.consumer === 'inference');
+  return fallback ? '' : resolveInferenceName(descriptors, requested);
+}
+
+/** A requested model id, validated: undefined when absent (spec §4.2). */
+function modelParam(raw: unknown): string | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'string' || !MODEL_ID_RE.test(raw)) {
+    throw new CpError(
+      'invalid_request',
+      'model must be a model id: 1-256 printable ASCII characters, no spaces',
+    );
+  }
+  return raw;
+}
+
+/** Check a model against the catalog of the credential `rec` runs on (spec §4.2, §4.3). */
+async function chooseFor(
+  rec: { owner: string; credentialName: string; sessionId?: string },
+  model: string,
+  deps: CpDeps,
+): Promise<ModelChoice> {
+  const r = await resolveInference(rec, deps);
+  return chooseModel(targetOf(r), model, r.credentialName, deps.fetchImpl);
 }
 
 export const HANDLERS: Record<string, Handler> = {
@@ -454,12 +504,8 @@ export const HANDLERS: Record<string, Handler> = {
     // a session records NO credential name, and the exchange resolves the operator's key per turn,
     // attributably. A session that names a credential never falls back, here or at exchange: a typo
     // must 400, and a credential deleted mid-session ends its turns (exchange.ts).
-    const fallback =
-      requested === undefined &&
-      deps.config.allowOperatorFallback &&
-      !!deps.config.operatorInferenceToken &&
-      !descriptors.some((d) => d.consumer === 'inference');
-    const credentialName = fallback ? '' : resolveInferenceName(descriptors, requested);
+    const credentialName = newSessionCredential(descriptors, requested, deps);
+    const requestedModel = modelParam(body.model);
 
     // The sandbox tier (P6.3 spec §3.3), resolved and RECORDED here like the credential: a later change
     // to the deployment default must not move an existing session between tiers.
@@ -506,6 +552,11 @@ export const HANDLERS: Record<string, Handler> = {
       }
     }
 
+    // Checked against the catalog of the credential just resolved (per-session model spec §4.2).
+    const choice = requestedModel
+      ? await chooseFor({ owner: p.sub, credentialName }, requestedModel, deps)
+      : undefined;
+
     const sessionId = deps.newId();
     const rec: SessionRecord = {
       sessionId,
@@ -518,6 +569,8 @@ export const HANDLERS: Record<string, Handler> = {
       configRef,
       sandboxTier,
       tombstone: false,
+      model: choice?.model ?? '',
+      ...(choice?.limits ? { modelLimits: choice.limits } : {}),
     };
     await deps.index.create(rec);
     await deps.index.audit({
@@ -525,6 +578,7 @@ export const HANDLERS: Record<string, Handler> = {
       sessionId,
       credential: credentialName || OPERATOR_FALLBACK_NAME,
       decision: 'session_created',
+      ...(choice ? { model: choice.model } : {}),
     });
     const iat = seconds(deps);
     return {
@@ -541,6 +595,7 @@ export const HANDLERS: Record<string, Handler> = {
           now: iat,
         }),
         expiresAt: iat + deps.config.sessionTokenTtlSeconds,
+        ...(choice ? { model: choice.model, modelVerified: choice.verified } : {}),
       },
     };
   },
@@ -573,6 +628,44 @@ export const HANDLERS: Record<string, Handler> = {
   getSession: async (ctx, deps) => {
     const rec = await assertOwner(ctx.params.id!, ctx.principal, deps);
     return { status: 200, body: await sessionView(rec, deps) };
+  },
+
+  /**
+   * Switch the session's model (per-session model spec §4.3). A turn in flight read its model at
+   * its exchange and keeps it; the next turn's exchange returns the new one -- so there is no
+   * turn-in-progress refusal. `null` returns the session to the deployment default.
+   */
+  updateSession: async (ctx, deps) => {
+    const rec = await assertOwner(ctx.params.id!, ctx.principal, deps);
+    if (rec.tombstone) throw new CpError('session_not_found', undefined, rec.sessionId);
+    const body = asRecord(ctx.body);
+    const extra = Object.keys(body).filter((k) => k !== 'model');
+    if (extra.length > 0) {
+      throw new CpError('invalid_request', `only model can be changed (got ${extra.join(', ')})`);
+    }
+    if (!('model' in body)) {
+      throw new CpError(
+        'invalid_request',
+        'model is required: a model id, or null for the deployment default',
+      );
+    }
+    const choice: ModelChoice =
+      body.model === null
+        ? { model: '', verified: true }
+        : await chooseFor(rec, modelParam(body.model)!, deps);
+    await deps.index.setModel(rec.sessionId, choice.model, choice.limits);
+    await deps.index.audit({
+      subject: rec.owner,
+      sessionId: rec.sessionId,
+      decision: 'model_changed',
+      model: choice.model || 'default',
+      fromModel: rec.model || 'default',
+    });
+    const updated: SessionRecord = { ...rec, model: choice.model, modelLimits: choice.limits };
+    return {
+      status: 200,
+      body: { ...(await sessionView(updated, deps)), modelVerified: choice.verified },
+    };
   },
 
   mintSessionToken: async (ctx, deps) => {

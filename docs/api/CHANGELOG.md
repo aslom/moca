@@ -9,3 +9,4 @@ Per-session model selection ([spec](../specs/2026-10-14-per-session-model-select
 
 - New error codes `model_unavailable` (400) and `model_catalog_unavailable` (503).
 - /internal/credentials returns the session's `model` when it names one.
+- POST /v1/sessions accepts `model`; the session view shows it; new PATCH /v1/sessions/{id} switches it.

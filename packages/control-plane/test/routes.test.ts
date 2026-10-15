@@ -16,6 +16,7 @@ describe('the route table', () => {
         'GET /v1/sessions',
         'GET /v1/sessions/{id}',
         'DELETE /v1/sessions/{id}',
+        'PATCH /v1/sessions/{id}',
         'GET /v1/sessions/{id}/resources',
         'POST /v1/sessions/{id}/token',
         'GET /v1/credentials',
@@ -105,7 +106,8 @@ describe('matchRoute', () => {
 
   it('distinguishes methods on one path', () => {
     expect(matchRoute('DELETE', '/v1/sessions/x')?.route.method).toBe('DELETE');
-    expect(matchRoute('PATCH', '/v1/sessions/x')).toBeNull();
+    expect(matchRoute('PATCH', '/v1/sessions/x')?.route.method).toBe('PATCH');
+    expect(matchRoute('PUT', '/v1/sessions/x')).toBeNull();
   });
 
   it('returns null for an unknown path', () => {
