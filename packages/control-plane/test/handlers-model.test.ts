@@ -205,11 +205,10 @@ describe('the catalog routes', () => {
     const d = await deps();
     await create(d, {});
     await d.index.tombstone('sid-fixed');
-    expect(await codeOf(() =>
-      HANDLERS.listSessionModels!(
-        ctx({ principal: alice, params: { id: 'sid-fixed' } }),
-        d,
+    expect(
+      await codeOf(() =>
+        HANDLERS.listSessionModels!(ctx({ principal: alice, params: { id: 'sid-fixed' } }), d),
       ),
-    )).toBe('session_not_found');
+    ).toBe('session_not_found');
   });
 });
