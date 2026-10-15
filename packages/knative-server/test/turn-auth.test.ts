@@ -923,12 +923,13 @@ describe('configRef from the exchange', () => {
   it.each([[{ contextWindow: 1 }], [{ id: 'has space' }], [{ id: 'm', contextWindow: -5 }], ['m']])(
     'fails the turn on a malformed model %j rather than guessing',
     async (model) => {
-      const err = await resolveTurnAuth(
-        { authorization: `Bearer ${sessionToken()}` },
-        { sessionId: 'sid-1' },
-        withModel(model),
-      ).catch((e: { code: string }) => e);
-      expect((err as { code: string }).code).toBe('credential_unavailable');
+      await expect(
+        resolveTurnAuth(
+          { authorization: `Bearer ${sessionToken()}` },
+          { sessionId: 'sid-1' },
+          withModel(model),
+        ),
+      ).rejects.toMatchObject({ code: 'credential_unavailable' });
     },
   );
 });

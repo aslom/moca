@@ -283,6 +283,17 @@ export function validateItem(o: unknown): LeafItem | null {
   return null;
 }
 
+/**
+ * /runs keeps its envelope's or the environment's model (per-session model spec §5.1);
+ * a session's model applies to interactive turns only. Strip sessionModel from the config
+ * passed to runLeaf's executeTurn paths.
+ */
+export function leafTurnConfig(config?: TurnConfig): TurnConfig | undefined {
+  if (!config) return undefined;
+  const { sessionModel: _, ...rest } = config;
+  return rest;
+}
+
 export async function runLeaf(
   env: LeafEnvelope,
   config?: TurnConfig,
@@ -521,7 +532,7 @@ async function runPromptLeaf(
         ? `${env.prompt}\n\n${contextNote(contextPath, env.internalContext?.writable === true)}`
         : env.prompt,
       sessionId: env.sessionId,
-      config,
+      config: leafTurnConfig(config),
       createIfAbsent: true,
       selection,
       sandbox: { config: selected?.config ?? null, transport: selected?.transport },

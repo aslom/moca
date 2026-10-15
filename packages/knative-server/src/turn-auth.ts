@@ -2,6 +2,7 @@ import type { KeyObject } from 'node:crypto';
 import { createClient } from 'redis';
 import {
   CpError,
+  MODEL_ID_RE,
   OwnershipIndex,
   credentialValue,
   parseKeyset,
@@ -144,7 +145,6 @@ export const PASSTHROUGH = new Set([
   'token_expired',
 ]);
 
-const MODEL_ID = /^[\x21-\x7e]{1,256}$/;
 const optPositiveInt = (v: unknown) =>
   v === undefined || (Number.isInteger(v) && (v as number) > 0);
 const optBool = (v: unknown) => v === undefined || typeof v === 'boolean';
@@ -155,7 +155,7 @@ function isSessionModel(v: unknown): v is SessionModelSpec {
   const m = v as Record<string, unknown>;
   return (
     typeof m.id === 'string' &&
-    MODEL_ID.test(m.id) &&
+    MODEL_ID_RE.test(m.id) &&
     optPositiveInt(m.contextWindow) &&
     optPositiveInt(m.maxTokens) &&
     optBool(m.reasoning) &&
