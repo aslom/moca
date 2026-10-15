@@ -109,6 +109,10 @@ reaches:
 }
 ```
 
+`GET /v1/sessions/{id}/models` (auth `api`, session-scoped) returns the same body for the credential a
+session's turns run on, resolved exactly as the exchange resolves it. It is what `/model` uses: the
+session view does not name the session's credential, and need not.
+
 - `credential` omitted means the operator fallback (#368) when it is enabled, and `credential_required`
   otherwise — the same rule as `POST /v1/sessions` with no credential.
 - The credential must be the caller's own, with consumer `inference`. Its endpoint resolves as in the
@@ -176,10 +180,10 @@ present only when the session names a model. For every other session the respons
 
 ### 4.6 Contract
 
-New: one route (`GET /v1/models`), one route method (`PATCH /v1/sessions/{id}`), one optional request
+New: two routes (`GET /v1/models`, `GET /v1/sessions/{id}/models`), one route method (`PATCH /v1/sessions/{id}`), one optional request
 field, two optional response fields, two error codes (`model_unavailable`, `model_catalog_unavailable`
 — the latter is the catalog route's 503). All additive under the change policy: `docs/api/openapi.yaml`
-`version` goes `1.0.0` → `1.1.0` with a changelog entry, and both routes join `routes.ts`. No new
+`version` goes `1.0.0` → `1.1.0` with a changelog entry, and the three operations join `routes.ts`. No new
 configuration.
 
 ## 5. Data plane and harness
@@ -187,13 +191,14 @@ configuration.
 ### 5.1 Carrying the model
 
 `TurnAuth` (`packages/knative-server/src/turn-auth.ts:26`) gains `model?` as the exchange returned it.
-`buildConfig(auth)` sets `model: auth.model.id` and a new `TurnConfig.modelLimits` from the rest.
-`resolveModelSelection` needs no change: the config already outranks `SH_MODEL`.
+`buildConfig(auth)` copies it into a new `TurnConfig.sessionModel`. It does **not** set
+`TurnConfig.model`: `/runs` reads that field too (`run-leaf.ts:384`) and would then hand pi's registry
+an id it may not know. Only the interactive turn (`executeTurn`) reads `sessionModel`.
 
 ### 5.2 Building the model
 
-`requireModel` gains the turn's limits and base URL. With no per-session model the existing paths
-run unchanged. With one:
+A new `sessionModelFor(sessionModel, baseUrl)` builds the model when `sessionModel` is present; with
+none, `requireModel` runs unchanged. With one:
 
 - **The resolved base URL's host is `api.anthropic.com`** → `getModel('anthropic', id)` from pi's
   registry, exactly as today.
@@ -229,8 +234,12 @@ so the M5 checkpoint extension sees it as it sees any other.
   gain it with no other change.
 - **The `/model` command** (`ctrl+x m`, in a session only). It opens a list of the session
   credential's models with the current one marked and calls `PATCH /v1/sessions/{id}` on selection;
-  `/model <id>` switches directly. While a turn is streaming, the switch is queued behind it as turns
-  already are.
+  `/model <id>` switches directly. The PATCH is sent at once, even while a turn streams: that turn
+  read its model at its exchange, so the switch applies from the next one, and the toast says so.
+  The list comes from `GET /v1/sessions/{id}/models`.
+- **An explicit model with no catalog.** When the catalog is unavailable, `--option model=<id>` (or
+  a preset's model) is sent as given, for the server to accept unverified (§4.2), rather than
+  blocking the field.
 - **The status line** shows the session's model, or `default` when the session names none (the
   control plane does not know the harness's `SH_MODEL`).
 
@@ -258,8 +267,10 @@ so the M5 checkpoint extension sees it as it sees any other.
   the pre-prompt compaction check with a history above and below the threshold.
 - **mocactl.** The model field's dependency on the chosen credential; skipping on 404 and 503; `/model`
   with and without an argument; presets carrying `model`.
-- **Live.** A `kind-ci` smoke against a mock LiteLLM serving two model names with different limits:
-  create on one, switch with PATCH, and assert the second turn's request body names the other.
+- **Live.** A `kind-ci` smoke: create a session on one model name, switch with PATCH, and assert the
+  next turn's request named the other (the mock model echoes it). kind-ci's mock model listens on the
+  harness pod's loopback, out of the control plane's reach, so this exercises the unverified path end
+  to end; the catalog adapters are covered by the unit tests above.
 
 ## 9. Scope — explicitly not building
 
