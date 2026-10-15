@@ -120,6 +120,17 @@ describe('fetchModelCatalog — LiteLLM', () => {
     expect(calls[0]!.url).toBe(expected);
   });
 
+  it('trims a long run of trailing slashes in linear time', async () => {
+    const { f, calls } = fakeFetch(json(INFO));
+    const started = Date.now();
+    await fetchModelCatalog(
+      { ...litellm, baseUrl: `https://litellm.internal${'/'.repeat(50_000)}` },
+      f,
+    );
+    expect(calls[0]!.url).toBe('https://litellm.internal/model/info');
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
   it('sends x-api-key when the binding says so', async () => {
     const { f, calls } = fakeFetch(json(INFO));
     await fetchModelCatalog({ ...litellm, header: 'x-api-key' }, f);

@@ -161,12 +161,22 @@ function smaller(a: ModelLimits, b: ModelLimits): ModelLimits {
   );
 }
 
+/**
+ * The endpoint without trailing slashes, by a loop rather than /\/+$/: that regex is quadratic on a
+ * long run of slashes followed by anything else, and the endpoint is the user's to choose.
+ */
+function trimTrailingSlashes(url: string): string {
+  let end = url.length;
+  while (end > 0 && url[end - 1] === '/') end--;
+  return url.slice(0, end);
+}
+
 export async function fetchModelCatalog(
   target: InferenceTarget,
   fetchImpl: typeof fetch = fetch,
   timeoutMs = CATALOG_TIMEOUT_MS,
 ): Promise<ModelCatalog> {
-  const base = target.baseUrl.replace(/\/+$/, '');
+  const base = trimTrailingSlashes(target.baseUrl);
   const isAnthropic = URL.parse(base)?.hostname === ANTHROPIC_HOST;
   const headers: Record<string, string> =
     target.header === 'x-api-key'
