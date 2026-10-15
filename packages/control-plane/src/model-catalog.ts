@@ -26,9 +26,11 @@ async function getJson(
   url: string,
   headers: Record<string, string>,
   fetchImpl: typeof fetch,
-  timeoutMs: number,
+  signal: AbortSignal,
 ): Promise<unknown> {
-  const res = await fetchImpl(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+  // redirect: 'error' prevents cross-origin redirects from forwarding the x-api-key header
+  // (Fetch spec strips only Authorization on cross-origin redirects, not custom headers).
+  const res = await fetchImpl(url, { headers, signal, redirect: 'error' });
   if (!res.ok) throw unavailable(`it answered ${res.status}`);
   try {
     return await res.json();
@@ -88,11 +90,11 @@ export async function fetchModelCatalog(
       ? { 'x-api-key': target.secret }
       : { authorization: `Bearer ${target.secret}` };
   if (isAnthropic) headers['anthropic-version'] = '2023-06-01';
+  // Create one timeout signal that bounds the entire catalog call (all pages if paging).
+  const signal = AbortSignal.timeout(timeoutMs);
   try {
     if (!isAnthropic) {
-      return parseLiteLLMModelInfo(
-        await getJson(`${base}/model/info`, headers, fetchImpl, timeoutMs),
-      );
+      return parseLiteLLMModelInfo(await getJson(`${base}/model/info`, headers, fetchImpl, signal));
     }
     const out: ModelEntry[] = [];
     let after: string | undefined;
@@ -100,7 +102,7 @@ export async function fetchModelCatalog(
       const url = new URL(`${base}/v1/models`);
       url.searchParams.set('limit', '1000');
       if (after) url.searchParams.set('after_id', after);
-      const body = (await getJson(url.toString(), headers, fetchImpl, timeoutMs)) as {
+      const body = (await getJson(url.toString(), headers, fetchImpl, signal)) as {
         data?: unknown;
         has_more?: unknown;
         last_id?: unknown;

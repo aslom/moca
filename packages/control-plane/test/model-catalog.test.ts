@@ -7,12 +7,20 @@ import {
 } from '../src/model-catalog.js';
 import { codeOf } from './helpers/deps.js';
 
-type Call = { url: string; headers: Record<string, string> };
+type Call = {
+  url: string;
+  headers: Record<string, string>;
+  redirect?: RequestRedirect;
+};
 
 function fakeFetch(...replies: Array<(url: string) => Response | Promise<Response>>) {
   const calls: Call[] = [];
   const f = (async (url: string, init?: RequestInit) => {
-    calls.push({ url, headers: (init?.headers ?? {}) as Record<string, string> });
+    calls.push({
+      url,
+      headers: (init?.headers ?? {}) as Record<string, string>,
+      redirect: (init as { redirect?: RequestRedirect } | undefined)?.redirect,
+    });
     const next = replies.shift();
     if (!next) throw new Error(`unexpected fetch ${url}`);
     return next(url);
@@ -138,6 +146,14 @@ describe('fetchModelCatalog — LiteLLM', () => {
       'model_catalog_unavailable',
     );
   });
+
+  it('passes redirect: error to prevent cross-origin leaks of x-api-key', async () => {
+    const { f, calls } = fakeFetch(json(INFO));
+    await fetchModelCatalog(litellm, f);
+    for (const call of calls) {
+      expect(call.redirect).toBe('error');
+    }
+  });
 });
 
 describe('fetchModelCatalog — Anthropic', () => {
@@ -157,10 +173,30 @@ describe('fetchModelCatalog — Anthropic', () => {
     expect(calls[0]!.headers['x-api-key']).toBe('sk-ant-api-x');
     expect(calls[0]!.headers['anthropic-version']).toBe('2023-06-01');
   });
+
+  it('passes redirect: error on all pages to prevent cross-origin leaks of x-api-key', async () => {
+    const { f, calls } = fakeFetch(
+      json({ data: [{ id: 'claude-opus-4-8' }], has_more: true, last_id: 'claude-opus-4-8' }),
+      json({ data: [{ id: 'claude-haiku-4-5' }], has_more: false, last_id: 'claude-haiku-4-5' }),
+    );
+    await fetchModelCatalog(anthropic, f);
+    for (const call of calls) {
+      expect(call.redirect).toBe('error');
+    }
+  });
 });
 
 describe('chooseModel', () => {
   it('returns the listed model with its limits, verified', async () => {
+    const { f } = fakeFetch(json(INFO));
+    expect(await chooseModel(litellm, 'claude-opus-4-8', 'litellm-prod', f)).toEqual({
+      model: 'claude-opus-4-8',
+      limits: { contextWindow: 150000, maxTokens: 32000, reasoning: true, vision: true },
+      verified: true,
+    });
+  });
+
+  it('returns a model without limits when the catalog entry has none', async () => {
     const { f } = fakeFetch(json(INFO));
     expect(await chooseModel(litellm, 'granite-4.1-8b', 'litellm-prod', f)).toEqual({
       model: 'granite-4.1-8b',
