@@ -170,8 +170,16 @@ easy return. After removal lands, the deprecated path will not be there to roll 
   features. Fixes land on `main` only: there are no release branches or backports, and a user pinned to
   an older tag gets no fixes. "Breakage" means a regression or a break from a base-image or dependency
   update. The full policy is in [Maturity and lifecycle](reference/maturity-and-lifecycle.md#support-for-legacy-paths).
-- If you run the control plane on the deprecated K8s path during the window, #248's
-  namespace-collocation consideration still applies to it, unchanged by the deprecation.
+- **Control-plane exposure on the deprecated K8s path.** `deploy/knative/` runs the control plane
+  in the same namespace (`default`) as the harness, and the harness ServiceAccount holds
+  `pods/exec: create` there with no `resourceNames`. A process with code execution in a harness pod
+  can therefore `kubectl exec` into the control plane and read its Ed25519 session-signing key, the
+  credential KEK and the shared exchange token, which defeats the "the harness cannot mint a token"
+  property. It will not be fixed on this path. If you run the control plane there during the window,
+  move it to its own namespace and remove `pods/exec` from the harness Role yourself, or move to
+  `deploy/k8s`, which keeps the control plane in `moca` and its credentials in a separate
+  `moca-credentials` namespace. Off Kubernetes (`deploy/vm`, `deploy/compose`) there is no
+  pod-exec path to the control plane.
 - Removal happens no earlier than end of October 2026 and only once the remaining users have
   migrated. [Tell us when you have moved](https://github.com/rossoctl/moca/issues/490) — the
   condition is users, not the calendar alone.
@@ -182,3 +190,4 @@ easy return. After removal lands, the deprecated path will not be there to roll 
 | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 2026-10-11 | Knative/KEDA deployment path deprecated ([ADR-0041](adrs/0041-deprecate-knative-keda-deployment.md)). Removal: no earlier than end of October 2026, after remaining users migrate. |
 | 2026-10-12 | Added the async/cron section, configuration mapping, `mocactl` guidance and rollback.                                                                                              |
+| 2026-10-14 | Stated the deprecated path's control-plane exposure in full (it will not be fixed) instead of pointing at #248.                                                                    |
