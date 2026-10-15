@@ -62,6 +62,11 @@ vi.mock('../src/pre-prompt-compaction.js', () => ({
   compactIfOverflowing: vi.fn(async () => false),
 }));
 
+// The fake SessionManager above has no entries API; model-switch-record has its own test.
+vi.mock('../src/model-switch-record.js', () => ({
+  recordModelSwitch: vi.fn(() => false),
+}));
+
 const { executeTurn } = await import('../src/run-turn.js');
 
 const nullSandbox = { config: null };

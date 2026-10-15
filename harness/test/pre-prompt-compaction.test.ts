@@ -30,12 +30,33 @@ describe('compactIfOverflowing', () => {
     contextWindow: number,
     compact = vi.fn(async () => ({})),
     abortCompaction = vi.fn(() => {}),
+    lastEntryType = 'message',
   ) => ({
     messages: big,
     model: { contextWindow },
     settingsManager: { getCompactionSettings: () => settings },
+    sessionManager: { getBranch: () => [{ type: 'message' }, { type: lastEntryType }] },
     compact,
     abortCompaction,
+  });
+
+  // PR #540 review R12: pi throws "Already compacted" on a compaction-last branch, and a window no
+  // larger than reserve + keepRecent stays over the threshold even after compacting -- both turned
+  // into a failure line (and an abort/disconnect cycle) on every turn.
+  it('skips, silently, when the last branch entry is already a compaction', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const s = session(4_500, undefined, undefined, 'compaction');
+    expect(await compactIfOverflowing(s)).toBe(false);
+    expect(s.compact).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it('skips, silently, when the window is no larger than reserveTokens + keepRecentTokens', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const s = { ...session(1_500), messages: [{ ...big[0] }] as never[] };
+    expect(await compactIfOverflowing(s)).toBe(false);
+    expect(s.compact).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
   });
 
   it('compacts when the next prompt would not fit', async () => {

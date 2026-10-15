@@ -45,6 +45,7 @@ import { promotedLoaderOptions, type PromotedConfig } from './config-resolver.js
 import { leaseTimings } from './lease-timings.js';
 import { attachPromotedConfig, type AttachedPromotedConfig } from './promoted-config.js';
 import { compactIfOverflowing } from './pre-prompt-compaction.js';
+import { recordModelSwitch } from './model-switch-record.js';
 
 // Re-exported because they are now part of executeTurn's CONTRACT: since /turn leases from the pool,
 // every caller of executeTurn can be handed these errors and needs to distinguish them from a generic
@@ -1050,6 +1051,9 @@ async function executeTurnCore(
     stopReason = 'aborted';
     errorMessage = 'Request aborted';
   } else {
+    // After the pre-prompt compaction, so a compaction stays the branch's last entry for its check;
+    // only on a turn that runs, so an aborted one records no switch it never made (R11).
+    recordModelSwitch(sessionManager, model);
     await session.prompt(prompt);
     const lastMessage = session.state.messages.at(-1) as AssistantMessage | undefined;
     if (lastMessage?.role === 'assistant') {

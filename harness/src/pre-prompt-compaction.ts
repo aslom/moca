@@ -9,9 +9,11 @@ type CompactionSettings = ReturnType<SettingsManager['getCompactionSettings']>;
 type Msg = Parameters<typeof estimateTokens>[0];
 
 /**
- * Pi decides on compaction AFTER a reply, against the active model's window, and on an overflow
- * error compacts and retries. After a switch to a smaller model (per-session model spec §5.3) the
- * next request could therefore be sent knowing it cannot fit. This is the check before it: the
+ * Pi checks for compaction after each reply and again inside prompt(), before sending
+ * (`_checkCompaction(lastAssistant, false)`) -- but both checks read the LAST REPLY's usage, which
+ * a previous model produced against its own window, and on an overflow error pi compacts and
+ * retries. After a switch to a smaller model (per-session model spec §5.3) the next request could
+ * therefore be sent knowing it cannot fit. This check does not depend on a reply's usage: the
  * loaded history, estimated as pi estimates it (chars/4), against the CURRENT model's window.
  * It does not depend on a switch having happened, so no "previous window" is stored anywhere.
  */
@@ -29,8 +31,21 @@ export interface CompactableSession {
   messages: Msg[];
   model?: { contextWindow?: number };
   settingsManager: { getCompactionSettings(): CompactionSettings };
+  sessionManager: { getBranch(): ReadonlyArray<{ type: string }> };
   compact(): Promise<unknown>;
   abortCompaction(): void;
+}
+
+/**
+ * Whether compacting now could not help (PR #540 review R12), so it is not attempted, and nothing
+ * is logged: a branch whose last entry is already a compaction (pi's compact() throws "Already
+ * compacted"), or a window no larger than reserveTokens + keepRecentTokens, which stays over the
+ * threshold even after pi's own compaction -- either way every turn would log a failure.
+ */
+function compactionCannotHelp(session: CompactableSession, settings: CompactionSettings): boolean {
+  const window = session.model?.contextWindow ?? 0;
+  if (window <= settings.reserveTokens + settings.keepRecentTokens) return true;
+  return session.sessionManager.getBranch().at(-1)?.type === 'compaction';
 }
 
 /**
@@ -46,6 +61,7 @@ export async function compactIfOverflowing(
 ): Promise<boolean> {
   const settings = session.settingsManager.getCompactionSettings();
   if (!promptWouldOverflow(session.messages, session.model?.contextWindow, settings)) return false;
+  if (compactionCannotHelp(session, settings)) return false;
 
   // If signal is already aborted, don't attempt compaction
   if (signal?.aborted) return false;
