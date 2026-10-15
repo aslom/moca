@@ -335,24 +335,31 @@ describe('App', () => {
     await until(() => all().includes(`session started with config bundle ${short} — 1 skill`));
     await until(() => !frame().includes('New session'));
     // Its own status-line field, which the toast's `config bundle …` cannot satisfy.
-    expect(frame()).toContain(`s-1 · bundle ${short} · idle`);
+    expect(frame()).toContain(`s-1 · model default · bundle ${short} · idle`);
     // The next session has no bundle, and nothing claims it does.
     await tick();
     await send(stdin, '/new');
     await until(() => created.length === 2);
     await until(() => !frame().includes('New session'));
-    expect(frame()).toContain('s-2 · idle');
+    expect(frame()).toContain('s-2 · model default · idle');
     expect(frame()).not.toContain(`· bundle ${short}`);
   });
 
-  it('resuming a session that carries a bundle shows it in the status line', async () => {
+  it('resuming a session that carries a bundle and a model shows both in the status line', async () => {
     const digest = `sha256:${'ab12cd34'.repeat(8)}`;
     const listed = sessionList('remote-1');
     const rt = testRuntime({
       cp: fakeControlPlane({
         listSessions: async (o) => {
           const page = await listed.listSessions(o);
-          return { ...page, sessions: page.sessions.map((s) => ({ ...s, configRef: digest })) };
+          return {
+            ...page,
+            sessions: page.sessions.map((s) => ({
+              ...s,
+              configRef: digest,
+              model: 'granite-4.1-8b',
+            })),
+          };
         },
       }),
     });
@@ -365,7 +372,38 @@ describe('App', () => {
     await tick();
     stdin.write(KEY.enter);
     await until(() => !frame().includes('Sessions'));
-    await until(() => frame().includes('remote-1 · bundle ab12cd34 · idle'));
+    await until(() => frame().includes('remote-1 · model granite-4.1-8b · bundle ab12cd34 · idle'));
+  });
+
+  it('/model <id> switches the session from the next turn; /model default goes back', async () => {
+    const set: Array<[string, string | null]> = [];
+    const base = fakeControlPlane();
+    const rt = testRuntime({
+      cp: fakeControlPlane({
+        listCredentials: async () => [credential('anthropic')],
+        createSession: async () => ({ sessionId: 's-1', token: 'st', expiresAt: 4_000_000_000 }),
+        setSessionModel: async (id, model) => (
+          set.push([id, model]),
+          base.setSessionModel(id, model)
+        ),
+      }),
+    });
+    const { stdin, all, frame, until, ready } = mount(rt);
+    await ready();
+    await send(stdin, '/new');
+    await until(() => !frame().includes('New session') && frame().includes('s-1 · model default'));
+    await tick();
+    await send(stdin, '/model granite-4.1-8b');
+    await until(() => frame().includes('s-1 · model granite-4.1-8b · idle'));
+    expect(all()).toContain('model: granite-4.1-8b — from the next turn');
+    await tick();
+    await send(stdin, '/model default');
+    await until(() => frame().includes('s-1 · model default · idle'));
+    expect(all()).toContain('model: the deployment default — from the next turn');
+    expect(set).toEqual([
+      ['s-1', 'granite-4.1-8b'],
+      ['s-1', null],
+    ]);
   });
 
   it('/promote toasts skills, commands and the warning count with the --dry-run hint', async () => {

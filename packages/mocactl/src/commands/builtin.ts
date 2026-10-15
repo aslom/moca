@@ -9,7 +9,8 @@ export type OverlayName =
   | 'doctor'
   | 'login'
   | 'onboarding'
-  | 'leave-turn';
+  | 'leave-turn'
+  | 'model';
 
 /** What commands may ask of the app. Implemented by app.tsx. */
 export interface CommandHost {
@@ -17,6 +18,8 @@ export interface CommandHost {
   openOverlay(name: OverlayName): void;
   newSession(): void;
   renameSession(title: string): void;
+  /** Switch the session's model: an id, or `default` for the deployment default. */
+  switchModel(arg: string): void | Promise<void>;
   prefillInput(text: string): void;
   toggleDetails(): void;
   toggleThinking(): void;
@@ -59,6 +62,14 @@ export const BUILTIN_COMMANDS: Command<CommandHost>[] = [
     keybind: 'ctrl+x r',
     when: inSession,
     run: (h, arg) => (arg ? h.renameSession(arg) : h.prefillInput('/rename ')),
+  },
+  {
+    id: 'session.model',
+    title: 'Switch model',
+    slash: ['model'],
+    keybind: 'ctrl+x m',
+    when: inSession,
+    run: (h, arg) => (arg ? h.switchModel(arg) : h.openOverlay('model')),
   },
   {
     id: 'credentials',
