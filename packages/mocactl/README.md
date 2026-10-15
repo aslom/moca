@@ -182,10 +182,11 @@ mocactl workloads delete "$id"
 ```
 
 `ctx pack` puts the directory's files under the bundle's `workspace/` directory. It needs a Context
-Service with [rossoctl/context-service#56](https://github.com/rossoctl/context-service/pull/56) (workspace bundles). A run starts in its context: the agent's working directory shows the
-bundle's `workspace/` directory (`src/`, not `workspace/src/`), or the whole bundle when it has
-other content too. A read-only run gets the session's own working directory (`/workspace/<session>`
-on container workers) as writable scratch space. See "Runs" in
+Service with [rossoctl/context-service#56](https://github.com/rossoctl/context-service/pull/56)
+(workspace bundles). A run starts in its context: the agent's working directory shows the bundle's
+`workspace/` directory (`src/`, not `workspace/src/`), or the whole bundle when it has no
+`workspace/` directory or has other content too. A read-only run gets the session's own working
+directory (`/workspace/<session>` on container workers) as writable scratch space. See "Runs" in
 [`docs/context-service.md`](../../docs/context-service.md).
 
 `workloads create` creates the workload (`POST /workloads` on the harness, with your API token),
