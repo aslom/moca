@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.0.0
+  version: 1.1.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -81,6 +81,8 @@ components:
             - credential_not_found
             - credential_unavailable
             - endpoint_unresolved
+            - model_unavailable
+            - model_catalog_unavailable
             - authorization_pending
             - device_code_expired
             - identity_provider_misconfigured

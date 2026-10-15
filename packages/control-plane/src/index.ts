@@ -42,6 +42,13 @@ export {
   type RunKubectl,
 } from './kubectl.js';
 export { K8sSecretStore, secretNameFor, subjectHash } from './k8s-secret-store.js';
+export {
+  MODEL_ID_RE,
+  sanitizeLimits,
+  type ModelEntry,
+  type ModelLimits,
+  type SessionModel,
+} from './models.js';
 export { FileCredentialStore } from './file-store.js';
 export {
   VaultCredentialStore,
