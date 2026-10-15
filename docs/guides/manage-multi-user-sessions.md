@@ -179,7 +179,22 @@ mocactl run --new --option sandboxTier=microvm "In your sandbox: ..."
 and no choice, the server default applies. The container tier has network access and per-session directories under one `/workspace`, which are not isolated from
 each other; the microVM tier has no network ([Sandboxes and tiers](../concepts/sandboxes-and-tiers.md)).
 
-## 5. Revoke access
+## 5. Choose a model
+
+A session runs on the deployment's default model unless it names one. Name it when creating the session:
+
+```bash
+mocactl run --new --option model=claude-opus-4-8 "…"
+```
+
+`mocactl` lists the models from the session credential's endpoint; with several and no `model` given, an interactive run
+asks and a script leaves the deployment default. In the TUI, `/model` (or `ctrl+x m`) lists the session's models and
+switches to the one you pick, `/model ID` switches directly, and `/model default` returns to the deployment default. A
+switch applies from the next turn; the status line shows `model <id>` or `model default`.
+
+A LiteLLM key's own model access decides which models are listed: a key limited to some models lists only those.
+
+## 6. Revoke access
 
 | To remove...               | Do this                                                                                                                                                                  |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |

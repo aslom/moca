@@ -83,7 +83,7 @@ reachable?` instead; `auth token` exits 3 (login required) or 4; `logout` while 
 - The prompt is the positionals joined with spaces. Exit 2 for an empty prompt, `--new` with
   `--session`, `--config` with `--session` (a session's bundle is fixed at creation), a blank
   `--config`, or an `--option` without `=`.
-- `--option` keys: `inferenceCredential=NAME` and `sandboxTier=NAME`. An ambiguous or unknown choice for
+- `--option` keys: `inferenceCredential=NAME`, `model=ID` and `sandboxTier=NAME`. `model` is listed from the chosen credential's endpoint; with several and none given, an interactive run asks and a script leaves it to the deployment default; when the endpoint cannot list its models, the id is sent as given and checked by the gateway at the first turn. An ambiguous or unknown choice for
   `inferenceCredential` exits 2 with the declared values. With several `sandboxTier` choices and none given,
   the tier is left unset for the server default; a value for a field that has no choices exits 2. Unknown
   keys are silently ignored, and `=x` (no key) exits 2. `--option` is ignored when resuming a session.
@@ -196,6 +196,7 @@ using the command id.
 | `session.new`       | `/new`                             | `ctrl+x n`            |
 | `session.promote`   | `/promote DIR`, `/promote --clear` | none                  |
 | `session.rename`    | `/rename <title>`                  | `ctrl+x r`            |
+| `session.model`     | `/model [id\|default]`             | `ctrl+x m`            |
 | `credentials`       | `/credentials`                     | `ctrl+x k`            |
 | `view.details`      | `/details`                         | `ctrl+x d`            |
 | `view.thinking`     | `/thinking`                        | `ctrl+x t`            |
