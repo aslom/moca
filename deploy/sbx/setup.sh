@@ -161,7 +161,7 @@ ensure_worker_tokens() {
 # limited to workspace keys under sbx-exec-<client>-. The tokens are kept per pair in
 # sbx-relay-client-keys; the relay reads the joined list from sbx-relay-clients.
 ensure_client_tokens() {
-  local keys_json pairs=() c w stale
+  local keys_json pairs=() c w stale patch
   keys_json="$(secret_json sbx-relay-client-keys)"
   for c in ${SBX_CLIENTS:-}; do for w in $SBX_WORKERS; do pairs+=("$c.$w"); done; done
   (
@@ -179,7 +179,7 @@ ensure_client_tokens() {
     apply_secret sbx-relay-clients MOCA_RELAY_CLIENT_TOKENS
   )
   # Revoke any (client, worker) pair no longer in the current list with an explicit null patch.
-  stale="$(printf '%s' "$keys_json" | jq -r '.data | keys[]' | while read -r k; do
+  stale="$(printf '%s' "$keys_json" | jq -r '.data // {} | keys[]' | while read -r k; do
     [[ " ${pairs[*]+"${pairs[*]}"} " == *" $k "* ]] || printf '%s\n' "$k"
   done)"
   if [[ -n "$stale" ]]; then

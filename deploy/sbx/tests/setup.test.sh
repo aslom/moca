@@ -46,6 +46,7 @@ case "$1 $2" in
   f="$MOCK_STATE/secret-$name.json"
   # Merge stringData into existing .data (the way real server-side apply keeps foreign keys).
   # For TLS secrets, .data already contains the keys; for Opaque, we convert stringData to base64.
+  # When .data becomes empty, delete the field (realistic API behavior).
   if [[ -f "$f" ]]; then
     existing="$(jq -c . "$f")"
   else
@@ -56,7 +57,8 @@ case "$1 $2" in
       .data = (($ex.data // {}) + (.stringData | with_entries(.value |= @base64))) | del(.stringData)
     else
       .data = ($ex.data // {}) + (.data // {})
-    end' >"$f"
+    end |
+    if (.data // {}) == {} then del(.data) else . end' >"$f"
   exit 0 ;;
 'patch secret')
   name="$3" patch=''
@@ -70,8 +72,10 @@ case "$1 $2" in
   done
   f="$MOCK_STATE/secret-$name.json"
   [[ -f "$f" ]] || { printf '%s' '{"data":{}}' >"$f"; }
-  # Apply merge patch: null values delete keys.
-  jq --argjson p "$patch" '.data = ((.data // {}) * ($p.data // {}) | with_entries(select(.value != null)))' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
+  # Apply merge patch: null values delete keys. Delete .data if it becomes empty.
+  jq --argjson p "$patch" '
+    .data = ((.data // {}) * ($p.data // {}) | with_entries(select(.value != null))) |
+    if (.data // {}) == {} then del(.data) else . end' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
   exit 0 ;;
 'apply -k')
   cp "$3/kustomization.yaml" "$MOCK_STATE/applied-kustomization.yaml"
@@ -171,3 +175,26 @@ run_setup export SBX_WORKERS=sbx_default SBX_CLIENTS=alice || fail 'shrinking ru
 grep -qE 'kubectl patch secret moca-relay-sandbox-tokens' "$MOCK_LOG" ||
   fail 'no kubectl patch secret call for moca-relay-sandbox-tokens (revocation not explicit)'
 pass 'dropping a worker or client revokes its token and deletes its bundle (via explicit null patch)'
+
+# 6. No clients (SBX_CLIENTS unset): run twice, must both succeed.
+run_setup unset SBX_CLIENTS || fail 'run with no clients failed'
+# Second run with no clients must succeed (sbx-relay-client-keys has no .data field after first run).
+run_setup unset SBX_CLIENTS || fail 'second run with no clients failed'
+# .data field must be absent (the Secret exists but has no keys).
+[[ ! -f "$MOCK_STATE/secret-sbx-relay-client-keys.json" || -z "$(jq -r '.data // empty' "$MOCK_STATE/secret-sbx-relay-client-keys.json")" ]] ||
+  fail 'sbx-relay-client-keys has a .data field after zero clients'
+pass 'tolerates empty client list (no .data field on empty Secret)'
+
+# 7. Clients → no clients: revokes all client keys, deletes client bundles, leaves MOCA_RELAY_CLIENT_TOKENS empty.
+run_setup true || fail 're-populate clients run failed'
+[[ -d "$REPO/deploy/sbx/.generated/clients/alice" ]] || fail 'client bundle not created'
+run_setup unset SBX_CLIENTS || fail 'shrink to zero clients run failed'
+# All client.* keys must be gone.
+[[ -z "$(jq -r '.data // {} | keys[]' "$MOCK_STATE/secret-sbx-relay-client-keys.json" 2>/dev/null)" ]] ||
+  fail 'client keys not all revoked'
+[[ ! -d "$REPO/deploy/sbx/.generated/clients/alice" && ! -d "$REPO/deploy/sbx/.generated/clients/bob" ]] ||
+  fail 'stale client bundles not deleted'
+# MOCA_RELAY_CLIENT_TOKENS must be empty string (not null, to preserve the key).
+[[ "$(secret_val sbx-relay-clients MOCA_RELAY_CLIENT_TOKENS)" == "" ]] ||
+  fail 'MOCA_RELAY_CLIENT_TOKENS not empty after zero clients'
+pass 'revokes all client tokens when SBX_CLIENTS becomes empty'
