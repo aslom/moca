@@ -110,28 +110,42 @@ at freeze, `workloads.ts:359`). None of that can live on a caller-owned claim.
    if they outgrow a ConfigMap's 1 MiB ceiling. Writing annotations onto the caller's PVC instead
    is rejected: anyone with edit rights on that PVC could rewrite its grants. Managed-PVC contexts
    keep today's PVC-carried metadata untouched — the change is additive, and a later Context
-   Service refactor may unify the two homes.
+   Service refactor may unify the two homes. The record is deterministically named for the Context
+   name and created with create-if-absent semantics, and the managed path creates the same
+   reservation before its PVC — today its uniqueness comes for free from
+   `PersistentVolumeClaims.Create` on `context-<name>` (`manager.go:72`) — so a managed and an
+   attached create of one Context name cannot both succeed.
 2. **`contextId` for an attached-claim Context is its record's UID, never the claim's.** The claim's
    UID is shared by everything that ever attaches it and survives delete-and-recreate, so it
    cannot carry the identity Moca pins on. Upload, freeze and export verify their expected UID
    against the record (today they verify against `pvc.UID`, `context_upload.go`); Moca's pin logic
    is unchanged — it compares the `contextId` Context Service answers with.
 3. **One claim backs at most one live Context:** a create naming a claim an attached Context
-   already uses answers `409 claim_in_use`. Deleting that Context releases the claim for a new
-   Context, whose fresh record has a fresh UID, so the pin stays meaningful.
+   already uses answers `409 claim_in_use`. The check is a per-claim marker object,
+   deterministically named from the claim and created if-absent — a list-then-create check cannot
+   refuse both of two concurrent creates that name the same claim. Deleting that Context removes
+   the record and the marker before the claim counts as released, and the re-created Context's
+   fresh record has a fresh UID, so the pin stays meaningful.
 4. `POST /internal/v1/contexts` (and the public equivalent) accepts
    `storage.claimName: <slug>`. When set, Context Service does **not** create a PVC: it requires an
    existing claim named `moca-<scope>-<slug>` for the request's subject and answers
    `409 claim_not_found` if it is absent — it never provisions one, so a typo cannot silently mint
    a volume. `size` and `storageClass` are ignored on that path.
-5. **The claim is adopted as the Context's filesystem, exactly as a managed PVC is today.** The
-   upload helper mounts it at `/workspace` and materializes the bundle onto it; revisions are
-   computed from it; export streams it back for sandbox delivery — so the revision a workload runs
-   is the one stored on the caller's claim. Whatever was already on the claim stays and joins the
-   first revision's baseline (that is the point of bringing your own volume); paths that collide
-   with the uploaded bundle are overwritten by it. Context Service never reads or writes outside
-   its mount, and `DELETE /internal{ctx}` removes the Context — metadata record included — but
-   **never the claim** (acceptance 5): the caller's data survives the workload.
+5. **The claim is a revision store, exactly as a managed PVC is today.** An upload materializes
+   into `.context-service/materialized/<digest>/` on it — content-addressed
+   (`materializeUploadWithLimit`, `main.go:210`; `UploadContext` refuses any other
+   `WorkspacePath`) — the revision id is the digest of exactly what export streams
+   (`exportMaterializedRevision`), and export streams only that directory. So the revision a
+   workload runs is the one stored on the caller's claim, and the freeze pin's property — the
+   revision id is the digest of exactly what export delivers — is unchanged. Pre-existing content
+   at the claim's root is invisible: never read, never part of a revision, never exported, never
+   overwritten — Context Service touches only `.context-service/` on the claim. Bring-your-own-PVC
+   buys the caller the volume's capacity, storage class and placement, not its data. Two footnotes
+   on an adopted claim, stated so they are decisions: `ensureMaterializationDirectory` chmods
+   `.context-service/` and `materialized/` to 0755, and the expanded-size limit
+   (`contextUploadExpandedLimit`) comes from the claim's requested size, not its free space — both
+   inherited from the managed path. `DELETE /internal{ctx}` removes the Context — metadata record
+   included — but **never the claim** (acceptance 5): the caller's data survives the workload.
 6. **The trusted create response gains `attachment.claimName`.** The trusted view omits the PVC
    attachment today, deliberately — "Moca receives content as bundles, not mounts"
    (`uploads.go:106`, mirrored in Moca's `TrustedContext` doc). That rationale is amended rather
@@ -181,10 +195,12 @@ the derived name in the workspace view (the JSON view already carries `workspace
 - The derived name is opaque. Whoever pre-creates the PVC — an operator, or a user with namespace
   access — must obtain it from the owner's `GET /workloads/{id}` (or the create response). That is
   the price of the mapping not existing.
-- Adoption is trust in the caller's own volume: whatever the claim already holds joins the first
-  revision and is read by the agent that runs it, and an upload overwrites colliding paths. That is
-  the feature; there is deliberately no protection from it, because the only subject who can name
-  the claim is its owner (§2.2 item 5).
+- **Bring-your-own-PVC buys storage, not data.** A claim's pre-existing content is invisible to the
+  workload (§2.2 item 5): the caller gets the volume's capacity, storage class and placement, and
+  nothing else. Importing the existing tree as a revision — digesting and materializing the claim's
+  root content as its own revision, with its own size and type checks (`contextUploadExpandedLimit`,
+  the bundle-type check) — is the operation that would change that, and it is deliberately not
+  built: it is a further companion change with no consumer yet, recorded here so it is a decision.
 - A caller with rights to create PVCs in the Context Service namespace remains
   operator-privileged there (they can mount any claim directly); the keyed scope at least stops
   them computing another subject's name, which a bare subject hash would not.
@@ -204,9 +220,12 @@ the derived name in the workspace view (the JSON view already carries `workspace
 - The Alice/Bob proof — the same slug from two subjects derives to two different claim names, and
   a subject cannot attach a claim outside its scope — lives in `rossoctl/context-service`'s own
   suite with the companion change (§2.2), since that is where derivation happens. So do the
-  contract's own pins: `claim_not_found` and `claim_in_use`; a freeze with a stale `contextId`
-  fails against the record's UID; deleting the Context removes the metadata record and leaves the
-  claim; pre-existing content on the claim joins the first revision.
+  contract's own pins: `claim_not_found` and `claim_in_use`; two concurrent creates naming the same
+  claim let exactly one win, and a managed and an attached create of one Context name let exactly
+  one win (the shared reservation, §2.2 items 1 and 3); a freeze with a stale `contextId` fails
+  against the record's UID; deleting the Context removes the metadata record and leaves the claim;
+  Context Service writes only under `.context-service/` on an adopted claim, and pre-existing
+  content there never reaches a revision or an export.
 
 ## 5. Records
 
