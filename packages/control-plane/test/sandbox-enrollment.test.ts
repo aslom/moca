@@ -86,6 +86,12 @@ describe('discovery under each profile (SBX0 §4.1, spec v1.1)', () => {
     });
   });
 
+  it('refuses, rather than answering the harness body, on a sandbox profile with no sandbox config', async () => {
+    const d = sandboxDeps('github:1234');
+    delete d.config.sandbox;
+    expect(await codeOf(() => HANDLERS.getDiscovery!(ctx(), d))).toBe('internal_error');
+  });
+
   it('keeps the harness body and names its profile, with no exec endpoint', async () => {
     const harness = (await HANDLERS.getDiscovery!(ctx(), makeDeps())).body as Record<
       string,

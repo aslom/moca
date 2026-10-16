@@ -124,6 +124,49 @@ describe('the sandbox profile config (SBX0 §4.1, §5)', () => {
     expect(() =>
       parseTemplates(JSON.stringify([{ id: 'a', worker: 'w', description: 3, tools: [] }])),
     ).toThrow(/description/);
+    expect(() =>
+      parseTemplates(
+        JSON.stringify([{ id: 'a', worker: 'w', description: '', tools: ['git', 'bash', 'git'] }]),
+      ),
+    ).toThrow(/tools must not list a tool twice/);
+  });
+
+  it('refuses an allow-list entry that is not a github:<numeric id> subject, without echoing it', () => {
+    // The control plane mints `github:<id>`; a login-form or typo'd entry would never match.
+    for (const v of ['octocat', 'github:octocat', 'gitlab:12', 'github:12x']) {
+      const msg = messageOf(() => configFromEnv(env({ SH_ALLOWED_SUBJECTS: `github:1, ${v}` })));
+      expect(msg, v).toMatch(/SH_ALLOWED_SUBJECTS/);
+      expect(msg, v).not.toContain(v);
+    }
+    // A bare prefix is refused too (the message names the form, so it cannot be checked for echo).
+    expect(() => configFromEnv(env({ SH_ALLOWED_SUBJECTS: 'github:' }))).toThrow(
+      /SH_ALLOWED_SUBJECTS/,
+    );
+  });
+
+  it('refuses an exec endpoint port outside 1-65535, without echoing the value', () => {
+    for (const v of ['h.example.invalid:0', 'h.example.invalid:65536', 'h.example.invalid:99999']) {
+      const msg = messageOf(() => configFromEnv(env({ SH_SANDBOX_EXEC_ENDPOINT: v })));
+      expect(msg, v).toMatch(/SH_SANDBOX_EXEC_ENDPOINT/);
+      expect(msg, v).not.toContain(v);
+    }
+    expect(
+      configFromEnv(env({ SH_SANDBOX_EXEC_ENDPOINT: 'h.example.invalid:1' })).sandbox!.execEndpoint,
+    ).toBe('h.example.invalid:1');
+    expect(
+      configFromEnv(env({ SH_SANDBOX_EXEC_ENDPOINT: 'h.example.invalid:65535' })).sandbox!
+        .execEndpoint,
+    ).toBe('h.example.invalid:65535');
+  });
+
+  it('refuses an exec CA that is not a PEM certificate, without echoing it', () => {
+    const bad = 'not-a-certificate-value';
+    const msg = messageOf(() => configFromEnv(env({ SH_SANDBOX_EXEC_CA: bad })));
+    expect(msg).toMatch(/SH_SANDBOX_EXEC_CA/);
+    expect(msg).not.toContain(bad);
+    const pem = '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n';
+    expect(configFromEnv(env({ SH_SANDBOX_EXEC_CA: pem })).sandbox!.execCa).toBe(pem);
+    expect(configFromEnv(env({ SH_SANDBOX_EXEC_CA: '' })).sandbox).not.toHaveProperty('execCa');
   });
 });
 

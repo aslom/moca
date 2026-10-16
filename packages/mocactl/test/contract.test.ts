@@ -97,13 +97,16 @@ function responseSchema(op: any): any {
   return resolveSchema(schema);
 }
 
-// `$ref` to a component and `allOf` both appear in 2xx schemas; flatten them to one properties map.
+// `$ref` to a component, `allOf` and `oneOf`/`anyOf` all appear in 2xx schemas; flatten them to one
+// properties map. For `oneOf`/`anyOf` that is the union of every branch's properties: the check is
+// that each field the client reads exists somewhere in the response.
 function resolveSchema(s: any): any {
   if (!s) return s;
   if (s.$ref) return resolveSchema(openapi.components.schemas[s.$ref.split('/').pop()]);
-  if (s.allOf) {
+  const parts = s.allOf ?? s.oneOf ?? s.anyOf;
+  if (parts) {
     return {
-      properties: Object.assign({}, ...s.allOf.map((p: any) => resolveSchema(p)?.properties)),
+      properties: Object.assign({}, ...parts.map((p: any) => resolveSchema(p)?.properties)),
     };
   }
   return s;

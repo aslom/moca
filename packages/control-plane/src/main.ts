@@ -112,12 +112,18 @@ export function hostFromEnv(env: NodeJS.ProcessEnv): string | undefined {
 // prettier-ignore
 export const CONTROL_PLANE_SECRETS = ['SH_SESSION_TOKEN_PRIVATE_KEY', 'SH_CREDENTIAL_KEK', 'SH_EXCHANGE_TOKEN', 'SH_OPERATOR_INFERENCE_TOKEN', 'SH_JANITOR_TOKEN'] as const;
 
-export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
-  required(env, 'SH_SESSION_TOKEN_PRIVATE_KEY');
-  required(env, 'SH_GITHUB_CLIENT_ID');
-  if (routeProfileFromEnv(env) === 'sandbox') return sandboxProfileConfig(env);
-  keksFromBase64(required(env, 'SH_CREDENTIAL_KEK'));
-  const config: CpConfig = {
+/** The API, session and refresh token lifetimes, shared by both route profiles. */
+function tokenTtlsFromEnv(
+  env: NodeJS.ProcessEnv,
+): Pick<
+  CpConfig,
+  | 'apiTokenTtlSeconds'
+  | 'sessionTokenTtlSeconds'
+  | 'refreshIdleTtlSeconds'
+  | 'refreshMaxTtlSeconds'
+  | 'refreshReuseGraceSeconds'
+> {
+  return {
     // 15 minutes: API tokens stay stateless, so their lifetime IS the revocation latency (B14 §2).
     apiTokenTtlSeconds: intEnv(env, 'SH_API_TOKEN_TTL_SECONDS', 900),
     // A session outlives a 5-minute token; POST /v1/sessions/{id}/token re-mints (spec §4.2).
@@ -125,6 +131,16 @@ export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
     refreshIdleTtlSeconds: intEnv(env, 'SH_REFRESH_IDLE_TTL_SECONDS', 30 * 86_400),
     refreshMaxTtlSeconds: intEnv(env, 'SH_REFRESH_MAX_TTL_SECONDS', 90 * 86_400),
     refreshReuseGraceSeconds: intEnv(env, 'SH_REFRESH_REUSE_GRACE_SECONDS', 30),
+  };
+}
+
+export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
+  required(env, 'SH_SESSION_TOKEN_PRIVATE_KEY');
+  required(env, 'SH_GITHUB_CLIENT_ID');
+  if (routeProfileFromEnv(env) === 'sandbox') return sandboxProfileConfig(env);
+  keksFromBase64(required(env, 'SH_CREDENTIAL_KEK'));
+  const config: CpConfig = {
+    ...tokenTtlsFromEnv(env),
     exchangeToken: required(env, 'SH_EXCHANGE_TOKEN'),
     defaultInferenceEndpoint: env.SH_DEFAULT_INFERENCE_ENDPOINT || undefined,
     modelCatalogHosts: catalogHostsEnv(env),
@@ -156,11 +172,7 @@ function sandboxProfileConfig(env: NodeJS.ProcessEnv): CpConfig {
   const config: CpConfig = {
     routeProfile: 'sandbox',
     sandbox: sandboxConfigFromEnv(env),
-    apiTokenTtlSeconds: intEnv(env, 'SH_API_TOKEN_TTL_SECONDS', 900),
-    sessionTokenTtlSeconds: intEnv(env, 'SH_SESSION_TOKEN_TTL_SECONDS', 300),
-    refreshIdleTtlSeconds: intEnv(env, 'SH_REFRESH_IDLE_TTL_SECONDS', 30 * 86_400),
-    refreshMaxTtlSeconds: intEnv(env, 'SH_REFRESH_MAX_TTL_SECONDS', 90 * 86_400),
-    refreshReuseGraceSeconds: intEnv(env, 'SH_REFRESH_REUSE_GRACE_SECONDS', 30),
+    ...tokenTtlsFromEnv(env),
     allowOperatorFallback: false,
     injectorConfigured: false,
     sandboxNamespace: 'default',

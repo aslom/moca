@@ -452,8 +452,10 @@ export const HANDLERS: Record<string, Handler> = {
   // SBX0 §4.1 (v1.1): the sandbox profile answers only where clients send Exec, and the CA to trust
   // when its certificate is self-issued (absent otherwise); templates are at the fixed /v1/templates.
   getDiscovery: async (_ctx, deps) => {
-    const sbx = deps.config.routeProfile === 'sandbox' ? deps.config.sandbox : undefined;
-    if (sbx) {
+    if (deps.config.routeProfile === 'sandbox') {
+      const sbx = deps.config.sandbox;
+      // Never fall through to the harness body: a sandbox profile without its config is a bug.
+      if (!sbx) throw new CpError('internal_error', 'the sandbox profile has no sandbox config');
       return {
         status: 200,
         body: {

@@ -1,5 +1,6 @@
 import type { CpConfig } from './handlers.js';
 import type { RouteProfile } from './routes.js';
+import { GITHUB_SUBJECT_RE } from './identity.js';
 import { DEFAULT_SANDBOX_ISSUER } from './sandbox-token.js';
 
 /**
@@ -96,6 +97,9 @@ export function parseTemplates(raw: string | undefined): SandboxTemplate[] {
     if (!Array.isArray(o.tools) || !o.tools.every((x) => typeof x === 'string')) {
       throw new Error(`${where}: tools must be a list of strings`);
     }
+    if (new Set(o.tools).size !== o.tools.length) {
+      throw new Error(`${where}: tools must not list a tool twice`);
+    }
     if (seen.has(o.id)) throw new Error(`${where}: template id '${o.id}' is listed twice`);
     seen.add(o.id);
     return { id: o.id, worker: o.worker, description: o.description, tools: o.tools as string[] };
@@ -112,9 +116,19 @@ export function sandboxConfigFromEnv(env: NodeJS.ProcessEnv): SandboxConfig {
       'SH_ALLOWED_SUBJECTS is required on the sandbox profile: the enrolled subjects',
     );
   }
+  if (!allowedSubjects.every((s) => GITHUB_SUBJECT_RE.test(s))) {
+    throw new Error(`SH_ALLOWED_SUBJECTS: every entry must match ${GITHUB_SUBJECT_RE}`);
+  }
   const execEndpoint = env.SH_SANDBOX_EXEC_ENDPOINT ?? '';
-  if (!ENDPOINT_RE.test(execEndpoint)) {
-    throw new Error('SH_SANDBOX_EXEC_ENDPOINT must be host:port (the exec Route, e.g. <host>:443)');
+  const port = Number(execEndpoint.slice(execEndpoint.lastIndexOf(':') + 1));
+  if (!ENDPOINT_RE.test(execEndpoint) || port < 1 || port > 65_535) {
+    throw new Error(
+      'SH_SANDBOX_EXEC_ENDPOINT must be host:port with a port of 1-65535 (the exec Route, e.g. <host>:443)',
+    );
+  }
+  const execCa = env.SH_SANDBOX_EXEC_CA || undefined;
+  if (execCa !== undefined && !execCa.includes('-----BEGIN CERTIFICATE-----')) {
+    throw new Error('SH_SANDBOX_EXEC_CA must be a PEM certificate (-----BEGIN CERTIFICATE-----)');
   }
   const janitorToken = env.SH_JANITOR_TOKEN || undefined;
   if (janitorToken !== undefined && janitorToken.length < 32) {
@@ -130,7 +144,7 @@ export function sandboxConfigFromEnv(env: NodeJS.ProcessEnv): SandboxConfig {
     maxTotal: positive(env, 'SH_SANDBOX_MAX_TOTAL', 40),
     issuer: env.SH_SANDBOX_TOKEN_ISSUER || DEFAULT_SANDBOX_ISSUER,
     execEndpoint,
-    ...(env.SH_SANDBOX_EXEC_CA ? { execCa: env.SH_SANDBOX_EXEC_CA } : {}),
+    ...(execCa ? { execCa } : {}),
     ...(janitorToken ? { janitorToken } : {}),
   };
 }
