@@ -178,8 +178,8 @@ attach side already heartbeats.
 ### 3.5 Audit
 
 One JSON line per `Exec` on completion, to stdout:
-`{ts, sub, sbx, wrk, req_id, ms, exit_code, timed_out, truncated, out_bytes, outcome}`, where
-`outcome` is `end | error | cancelled | refused`. Command text and output are never logged; an
+`{ts, sub, sbx, wrk, req_id, ms, exit_code, truncated, out_bytes, outcome}`, where
+`outcome` is `end | error | cancelled | refused`. There is no timeout field: `sandbox/v1`'s `End` carries only the exit code and `truncated`, so a timeout shows as the exit code the worker reports. The lines are written only when the relay has sandbox keys configured, so a MOCA relay's output is unchanged. Command text and output are never logged; an
 operator debug flag (`SH_SANDBOX_AUDIT_COMMANDS=1`) adds the command's first 200 bytes. Refusals
 (`UNAUTHENTICATED`, `PERMISSION_DENIED`) are logged with the reason and, when the token parsed, its
 `sub` and `sbx`.
