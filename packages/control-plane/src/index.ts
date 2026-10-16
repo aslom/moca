@@ -1,5 +1,5 @@
 export { CP_ERROR_CODES, CpError, statusFor, writeError, type CpErrorCode } from './errors.js';
-export { ROUTES, matchRoute, type RouteSpec } from './routes.js';
+export { ROUTES, matchRoute, type RouteProfile, type RouteSpec } from './routes.js';
 export {
   TOKEN_AUDIENCE,
   DEFAULT_ISSUER,
@@ -28,6 +28,7 @@ export { KEK_BYTES, credentialAad, keksFromBase64, open, seal, type Opened } fro
 export {
   CREDENTIAL_NAME_RE,
   InMemoryCredentialStore,
+  UnavailableCredentialStore,
   inferenceAuthHeader,
   kindSpec,
   parseCredentialBody,
@@ -120,6 +121,14 @@ export {
   RedisSandboxStore,
   type SandboxRedisLike,
 } from './sandbox-redis.js';
+export {
+  isEnrolled,
+  parseTemplates,
+  routeProfileFromEnv,
+  sandboxConfigFromEnv,
+  type SandboxConfig,
+  type SandboxTemplate,
+} from './sandbox-config.js';
 export {
   checkExchangeAuth,
   exchangeCredential,

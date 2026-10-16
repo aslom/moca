@@ -232,6 +232,11 @@ paths:
         deployment advertises none; a 404 means a control plane that predates this route.
         `sandboxTiers` (P6.3) is always present; a control plane that predates P6.3 omits it.
         `version` is always present; a control plane that predates advertising one omits it.
+        `profile` names the control plane's route profile; on `sandbox`, `execEndpoint` and `execCa`
+        say where to send Exec and which CA to trust (SBX0 §4.1). A `sandbox` control plane answers
+        only `profile`, `execEndpoint` and, when the exec certificate is self-issued, `execCa`;
+        templates are at the fixed `/v1/templates`. A control plane that predates profiles omits
+        `profile`, and is a `harness` one.
       security: []
       responses:
         '200':
@@ -239,27 +244,44 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                required: [harnessUrl, sandboxTiers, version]
-                properties:
-                  harnessUrl:
-                    type: [string, 'null']
-                    description: absolute http(s) URL, no trailing slash
-                  sandboxTiers:
-                    type: [object, 'null']
-                    description: |
-                      the tiers a session may ask for at creation (SH_SANDBOX_TIERS) and the
-                      default; null when none are declared
-                    required: [names, default]
+                oneOf:
+                  - type: object
+                    description: the harness profile (the default)
+                    required: [harnessUrl, sandboxTiers, version]
                     properties:
-                      names: { type: array, items: { type: string } }
-                      default: { type: string }
-                  version:
-                    type: [string, 'null']
-                    description: |
-                      the deployment's version (MOCA_VERSION, baked in at image build), so a client
-                      can show it; `dev` when nothing was baked in, and `null` permitted for
-                      compatibility with a control plane that reports none
+                      harnessUrl:
+                        type: [string, 'null']
+                        description: absolute http(s) URL, no trailing slash
+                      sandboxTiers:
+                        type: [object, 'null']
+                        description: |
+                          the tiers a session may ask for at creation (SH_SANDBOX_TIERS) and the
+                          default; null when none are declared
+                        required: [names, default]
+                        properties:
+                          names: { type: array, items: { type: string } }
+                          default: { type: string }
+                      version:
+                        type: [string, 'null']
+                        description: |
+                          the deployment's version (MOCA_VERSION, baked in at image build), so a client
+                          can show it; `dev` when nothing was baked in, and `null` permitted for
+                          compatibility with a control plane that reports none
+                      profile: { type: string, enum: [harness] }
+                  - type: object
+                    description: the sandbox profile (SBX0 §4.1)
+                    required: [profile, execEndpoint]
+                    additionalProperties: false
+                    properties:
+                      profile: { type: string, enum: [sandbox] }
+                      execEndpoint:
+                        type: string
+                        description: sandbox profile only -- host:port of the exec Route
+                      execCa:
+                        type: string
+                        description: |
+                          sandbox profile only -- PEM of a self-issued exec certificate; absent when
+                          the certificate chains to a public CA
   /v1/auth/device:
     post:
       operationId: startDeviceAuth

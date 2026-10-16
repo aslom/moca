@@ -53,6 +53,8 @@ import { isRefreshTokenShape, type RefreshStore } from './refresh-store.js';
 import { projectResources, resolveSandbox } from './resources.js';
 import type { SandboxTiers } from './sandbox-tiers.js';
 import type { RouteProfile } from './routes.js';
+import { isEnrolled, type SandboxConfig } from './sandbox-config.js';
+import type { SandboxStore } from './sandbox-store.js';
 
 export interface CpConfig {
   /** Which routes this control plane mounts (SBX0 §4.1). Absent means `harness`. */
@@ -101,6 +103,8 @@ export interface CpConfig {
   bundleTotalBytes: number;
   /** Advertised alongside harnessUrl; null when the deployment reports none (predates MOCA_VERSION). */
   version?: string;
+  /** The sandbox profile's settings (SBX0 §4, §5); configFromEnv sets it on that profile only. */
+  sandbox?: SandboxConfig;
 }
 
 export interface CpDeps {
@@ -144,6 +148,8 @@ export interface CpDeps {
   readyzTimeoutMs?: number;
   /** Release the Redis client. A test that builds deps through depsFromEnv must call it. */
   close?: () => Promise<void>;
+  /** The sandbox resource (SBX0 §5); present on the sandbox profile only. */
+  sandboxes?: SandboxStore;
 }
 
 export interface RequestCtx {
@@ -154,6 +160,8 @@ export interface RequestCtx {
   principal?: TokenClaims;
   /** Set by the router for `auth: 'exchange'` routes. */
   exchangeAuthorized?: boolean;
+  /** Set by the router for `auth: 'janitor'` routes. */
+  janitorAuthorized?: boolean;
 }
 
 export type Handler = (ctx: RequestCtx, deps: CpDeps) => Promise<{ status: number; body: unknown }>;
@@ -441,14 +449,30 @@ export const HANDLERS: Record<string, Handler> = {
 
   // `null`, not a 404, when unset: the client can tell "this deployment advertises no harness" from
   // "this control plane predates discovery" and name the right fix for each.
-  getDiscovery: async (_ctx, deps) => ({
-    status: 200,
-    body: {
-      harnessUrl: deps.config.publicHarnessUrl ?? null,
-      sandboxTiers: deps.config.sandboxTiers,
-      version: deps.config.version ?? null,
-    },
-  }),
+  // SBX0 §4.1 (v1.1): the sandbox profile answers only where clients send Exec, and the CA to trust
+  // when its certificate is self-issued (absent otherwise); templates are at the fixed /v1/templates.
+  getDiscovery: async (_ctx, deps) => {
+    const sbx = deps.config.routeProfile === 'sandbox' ? deps.config.sandbox : undefined;
+    if (sbx) {
+      return {
+        status: 200,
+        body: {
+          profile: 'sandbox',
+          execEndpoint: sbx.execEndpoint,
+          ...(sbx.execCa ? { execCa: sbx.execCa } : {}),
+        },
+      };
+    }
+    return {
+      status: 200,
+      body: {
+        harnessUrl: deps.config.publicHarnessUrl ?? null,
+        sandboxTiers: deps.config.sandboxTiers,
+        version: deps.config.version ?? null,
+        profile: deps.config.routeProfile ?? 'harness',
+      },
+    };
+  },
 
   startDeviceAuth: async (_ctx, deps) => ({
     status: 200,
@@ -462,6 +486,11 @@ export const HANDLERS: Record<string, Handler> = {
     }
     // A pending authorization propagates as authorization_pending (428) -- the client polls.
     const principal = await deps.identity.completeDeviceAuth(deviceCode);
+    // SBX0 §4.2: on the sandbox profile only enrolled subjects (and admins) get a login, and the
+    // refusal comes BEFORE a refresh family is issued, so nothing is left behind for them.
+    if (!isEnrolled(principal.subject, principal.roles, deps.config)) {
+      throw new CpError('not_enrolled', 'this account is not enrolled in the sandbox service');
+    }
     const label = asRecord(ctx.body).label;
     const issued = await deps.refresh.issue({
       subject: principal.subject,
@@ -486,17 +515,17 @@ export const HANDLERS: Record<string, Handler> = {
     const r = await deps.refresh.rotate(token, deps.now());
     // One code for every refusal: the client's only move is to log in again (errors.ts).
     if (!r.ok) throw new CpError('invalid_grant', `refresh token refused: ${r.reason}`);
+    const roles = deps.identity.rolesFor(r.subject);
+    // A subject removed from SH_ALLOWED_SUBJECTS loses access at its next refresh, not its next login.
+    if (!isEnrolled(r.subject, roles, deps.config)) {
+      throw new CpError(
+        'not_enrolled',
+        'this account is no longer enrolled in the sandbox service',
+      );
+    }
     return {
       status: 200,
-      body: loginBody(
-        deps,
-        {
-          subject: r.subject,
-          displayName: r.displayName,
-          roles: deps.identity.rolesFor(r.subject),
-        },
-        r,
-      ),
+      body: loginBody(deps, { subject: r.subject, displayName: r.displayName, roles }, r),
     };
   },
 
