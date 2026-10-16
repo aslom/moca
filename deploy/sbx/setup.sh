@@ -89,7 +89,8 @@ rand_hex() { openssl rand -hex 32; }
 
 # apply_secret NAME KEY...: the values are $S_0, $S_1, ... in the caller's (sub)shell environment;
 # jq reads them from its environment, so no value reaches argv. Server-side apply with one field
-# manager: a key no longer listed is dropped, which is how revocation works below.
+# manager. Revocation (when a key is no longer listed) is handled by an explicit null patch after,
+# never by relying on pruning stringData keys.
 apply_secret() {
   local name="$1"
   shift
@@ -130,9 +131,9 @@ ensure_relay_secret() {
 }
 
 # One attach token per worker id in moca-relay-sandbox-tokens, which the relay reads on each attach
-# (P6.2 §2.1). Generated once and kept; an id no longer listed is dropped by the apply (revocation).
+# (P6.2 §2.1). Generated once and kept; an id no longer listed is revoked with an explicit null patch.
 ensure_worker_tokens() {
-  local json
+  local json stale
   json="$(secret_json moca-relay-sandbox-tokens)"
   (
     i=0
@@ -145,13 +146,22 @@ ensure_worker_tokens() {
     # shellcheck disable=SC2086 # one argument per id; ids are validated identifiers
     apply_secret moca-relay-sandbox-tokens $SBX_WORKERS
   )
+  # Revoke any worker id no longer in SBX_WORKERS with an explicit null patch (not apply pruning).
+  stale="$(printf '%s' "$json" | jq -r '.data | keys[]' | while read -r k; do
+    [[ " $SBX_WORKERS " == *" $k "* ]] || printf '%s\n' "$k"
+  done)"
+  if [[ -n "$stale" ]]; then
+    log "revoking the attach token of worker(s) no longer listed: $(printf '%s' "$stale" | tr '\n' ' ')"
+    patch="$(printf '%s\n' "$stale" | jq -Rnc '{data: ([inputs | {key: ., value: null}] | from_entries)}')"
+    kc patch secret moca-relay-sandbox-tokens -n "$NS" --type=merge -p "$patch" >/dev/null
+  fi
 }
 
 # 1a only (spec §3.1): the prototype relay's static client tokens, one per (client, worker), each
 # limited to workspace keys under sbx-exec-<client>-. The tokens are kept per pair in
 # sbx-relay-client-keys; the relay reads the joined list from sbx-relay-clients.
 ensure_client_tokens() {
-  local keys_json pairs=() c w
+  local keys_json pairs=() c w stale
   keys_json="$(secret_json sbx-relay-client-keys)"
   for c in ${SBX_CLIENTS:-}; do for w in $SBX_WORKERS; do pairs+=("$c.$w"); done; done
   (
@@ -168,6 +178,15 @@ ensure_client_tokens() {
     export S_0="$joined"
     apply_secret sbx-relay-clients MOCA_RELAY_CLIENT_TOKENS
   )
+  # Revoke any (client, worker) pair no longer in the current list with an explicit null patch.
+  stale="$(printf '%s' "$keys_json" | jq -r '.data | keys[]' | while read -r k; do
+    [[ " ${pairs[*]+"${pairs[*]}"} " == *" $k "* ]] || printf '%s\n' "$k"
+  done)"
+  if [[ -n "$stale" ]]; then
+    log "revoking the client token(s) no longer listed: $(printf '%s' "$stale" | tr '\n' ' ')"
+    patch="$(printf '%s\n' "$stale" | jq -Rnc '{data: ([inputs | {key: ., value: null}] | from_entries)}')"
+    kc patch secret sbx-relay-client-keys -n "$NS" --type=merge -p "$patch" >/dev/null
+  fi
 }
 
 # route_cert SECRET HOST CERT KEY CAFILE: install the operator's certificate, or make a self-signed one

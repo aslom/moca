@@ -43,9 +43,35 @@ case "$1 $2" in
 'apply --server-side')
   doc="$(cat)"
   name="$(printf '%s' "$doc" | jq -r .metadata.name)"
-  printf '%s' "$doc" | jq '
-    if .stringData then .data = (.stringData | with_entries(.value |= @base64)) | del(.stringData) else . end' \
-    >"$MOCK_STATE/secret-$name.json"
+  f="$MOCK_STATE/secret-$name.json"
+  # Merge stringData into existing .data (the way real server-side apply keeps foreign keys).
+  # For TLS secrets, .data already contains the keys; for Opaque, we convert stringData to base64.
+  if [[ -f "$f" ]]; then
+    existing="$(jq -c . "$f")"
+  else
+    existing='{"data":{}}'
+  fi
+  printf '%s' "$doc" | jq --argjson ex "$existing" '
+    if .stringData then
+      .data = (($ex.data // {}) + (.stringData | with_entries(.value |= @base64))) | del(.stringData)
+    else
+      .data = ($ex.data // {}) + (.data // {})
+    end' >"$f"
+  exit 0 ;;
+'patch secret')
+  name="$3" patch=''
+  # Extract the -p argument value
+  args=("$@")
+  for ((i = 0; i < ${#args[@]} - 1; i++)); do
+    if [[ "${args[$i]}" == -p ]]; then
+      patch="${args[$((i + 1))]}"
+      break
+    fi
+  done
+  f="$MOCK_STATE/secret-$name.json"
+  [[ -f "$f" ]] || { printf '%s' '{"data":{}}' >"$f"; }
+  # Apply merge patch: null values delete keys.
+  jq --argjson p "$patch" '.data = ((.data // {}) * ($p.data // {}) | with_entries(select(.value != null)))' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
   exit 0 ;;
 'apply -k')
   cp "$3/kustomization.yaml" "$MOCK_STATE/applied-kustomization.yaml"
@@ -129,7 +155,8 @@ after="$(cat "$MOCK_STATE"/secret-*.json | jq -S .data | sha256sum 2>/dev/null |
 [[ "$before" == "$after" ]] || fail 'a re-run changed a Secret value'
 pass 'a re-run keeps every token, password and certificate'
 
-# 5. Removing a worker or a client revokes exactly it.
+# 5. Removing a worker or a client revokes exactly it (with explicit null patch, not apply pruning).
+: >"$MOCK_LOG"
 run_setup export SBX_WORKERS=sbx_default SBX_CLIENTS=alice || fail 'shrinking run failed'
 [[ -z "$(secret_val moca-relay-sandbox-tokens sbx_py312)" ]] || fail 'sbx_py312 token not revoked'
 [[ -n "$(secret_val moca-relay-sandbox-tokens sbx_default)" ]] || fail 'sbx_default token lost'
@@ -137,4 +164,10 @@ run_setup export SBX_WORKERS=sbx_default SBX_CLIENTS=alice || fail 'shrinking ru
 [[ ! -d "$REPO/deploy/sbx/.generated/clients/bob" ]] || fail 'stale client bundle kept'
 [[ "$(secret_val sbx-relay-clients MOCA_RELAY_CLIENT_TOKENS)" =~ ^sbx_default:sbx-exec-alice-:[0-9a-f]{64}$ ]] ||
   fail 'client entries not narrowed to alice/sbx_default'
-pass 'dropping a worker or client revokes its token and deletes its bundle'
+# Verify no bob.* keys remain in sbx-relay-client-keys (they were revoked).
+[[ -z "$(printf '%s' "$(<"$MOCK_STATE/secret-sbx-relay-client-keys.json")" | jq -r '.data | keys[] | select(startswith("bob."))')" ]] ||
+  fail 'bob.* keys not revoked from sbx-relay-client-keys'
+# Verify the patch secret call was made (not relying on apply pruning).
+grep -qE 'kubectl patch secret moca-relay-sandbox-tokens' "$MOCK_LOG" ||
+  fail 'no kubectl patch secret call for moca-relay-sandbox-tokens (revocation not explicit)'
+pass 'dropping a worker or client revokes its token and deletes its bundle (via explicit null patch)'
