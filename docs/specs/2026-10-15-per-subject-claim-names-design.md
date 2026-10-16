@@ -94,7 +94,7 @@ no new reliance on it, and removes the old one (Moca no longer chooses storage n
 
 Recorded here because Moca's half is meaningless without it; to be implemented in
 `rossoctl/context-service` and tracked there. **This is most of the Context Service work, not a
-detail:** at `main 7951826` a Context *is* its managed PVC — the name and type are PVC labels,
+detail:** at `main 7951826` a Context _is_ its managed PVC — the name and type are PVC labels,
 the current revision, revision history and frozen revision are PVC annotations (`manager.go`,
 `PublishContextRevision`), owner, grants, consumers and audit are annotations too (`access.go`),
 `Attachment.ClaimName` is derived from `pvc.Name` at read time (`resourceFromContextPVC`), and the
