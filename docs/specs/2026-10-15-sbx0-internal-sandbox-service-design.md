@@ -169,9 +169,10 @@ from every sandbox relay token.
 
 Some load balancers in front of cluster routers close a TCP connection after a short idle period
 (one was measured at 50 s). An `Exec` whose command prints nothing for that long would die. The
-relay's exec server sets `grpc.keepalive_time_ms` = 20 000 and `grpc.keepalive_timeout_ms` = 10 000,
-and permits client pings (`grpc.keepalive_permit_without_calls` = 1,
-`grpc.http2.min_ping_interval_without_data_ms` = 10 000). Clients also ping every 20 s (§6.5). The
+relay's gRPC servers set `grpc.keepalive_time_ms` = 20 000 and `grpc.keepalive_timeout_ms` = 10 000,
+so the server pings every open connection. Those are the two keepalive options grpc-js 1.14's server
+reads, and it does not police client ping rates, so client pings are never refused. Clients also
+ping every 20 s (§6.5). The
 attach side already heartbeats.
 
 ### 3.5 Audit
