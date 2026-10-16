@@ -3,6 +3,7 @@
 Version: 1.0 — October 15, 2026
 Status: Proposed
 Milestone: **SBX0**, registered in [the milestone registry](README.md) (new `SBX` track).
+Decision record: [ADR-0042](../adrs/0042-sbx0-sandbox-service-on-sandbox-v1.md).
 
 Builds on these; it reuses them and redesigns nothing:
 
@@ -59,7 +60,7 @@ already runs.
 **In scope:** increments 1a, 1b and 1c (§11): §2–§10.
 
 - the relay: sandbox-token verification, fail-closed boot without a harness exec token, server
-  keepalive, per-Exec audit lines; removing `MOCA_RELAY_CLIENT_TOKENS` once 1b lands;
+  keepalive, per-Exec audit lines (the prototype's static client tokens are not merged, §3.1);
 - the control plane: the `sandbox` route profile, the sandbox store and routes, the sandbox token,
   the subject allowlist and quotas;
 - `mocactl sbx`: the command group, the gRPC client, the embedded MCP server, agent configuration;
@@ -108,31 +109,34 @@ Every host name, the namespace, the GitHub OAuth client id, the subject lists, t
 and paths, and the template list are **deployment inputs** (§8.1). None appears in code, tests or
 documentation as a literal.
 
-| Component                                    | Change                                                                                                                                                                | Size                               |
-| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
-| `@moca/control-plane`                        | A `sandbox` route profile; the sandbox store and routes; the sandbox token; the subject allowlist; quotas (§4, §5)                                                    | Medium, the main new code          |
-| `@moca/sandbox-relay`                        | Sandbox-token verification as a caller kind; boot rule; keepalive; audit lines (§3)                                                                                   | Small; replaces `client-tokens.ts` |
-| `@moca/mocactl`                              | `mocactl sbx` (§6), a `sandbox/v1` gRPC client, the embedded MCP server                                                                                               | Medium                             |
-| Tool layer                                   | Pi's seven tools as #504 builds them, with `fewer-execs`, over a transport interface `mocactl` provides (§6.4)                                                        | Small to medium                    |
-| `deploy/k8s/overlays/ocp-sbx`, `deploy/sbx/` | Single-namespace overlay reusing `base/relay.yaml`, `base/control-plane.yaml`, `base/redis.yaml`; no supervisor or sandbox pods; setup, bundles, janitor, status (§8) | Medium, mostly existing patterns   |
-| KVM host                                     | One `microvm-worker` unit per template; snapshots built with `deploy/microvm/build-snapshot.sh`; the janitor                                                          | Operator work, no code             |
-| `sandbox.proto`, `remote-worker`             | **No change**                                                                                                                                                         | —                                  |
+| Component                                    | Change                                                                                                                                                                | Size                                                 |
+| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| `@moca/control-plane`                        | A `sandbox` route profile; the sandbox store and routes; the sandbox token; the subject allowlist; quotas (§4, §5)                                                    | Medium, the main new code                            |
+| `@moca/sandbox-relay`                        | Sandbox-token verification as a caller kind; boot rule; keepalive; audit lines (§3)                                                                                   | Small; supersedes the prototype's `client-tokens.ts` |
+| `@moca/mocactl`                              | `mocactl sbx` (§6), a `sandbox/v1` gRPC client, the embedded MCP server                                                                                               | Medium                                               |
+| Tool layer                                   | Pi's seven tools as #504 builds them, with `fewer-execs`, over a transport interface `mocactl` provides (§6.4)                                                        | Small to medium                                      |
+| `deploy/k8s/overlays/ocp-sbx`, `deploy/sbx/` | Single-namespace overlay reusing `base/relay.yaml`, `base/control-plane.yaml`, `base/redis.yaml`; no supervisor or sandbox pods; setup, bundles, janitor, status (§8) | Medium, mostly existing patterns                     |
+| KVM host                                     | One `microvm-worker` unit per template; snapshots built with `deploy/microvm/build-snapshot.sh`; the janitor                                                          | Operator work, no code                               |
+| `sandbox.proto`, `remote-worker`             | **No change**                                                                                                                                                         | —                                                    |
 
 ## 3. The relay
 
 ### 3.1 Callers
 
-`execCaller` (in `main.ts`, from the client-token change) gains a third kind. Precedence, first match
-wins:
+The exec service's caller check (`validateExecToken` in `main.ts`) becomes a caller
+classification with two kinds. Precedence, first match wins:
 
 1. **Harness:** `MOCA_RELAY_EXEC_TOKEN`, unchanged and unrestricted. Not configured in an SBX0
    deployment.
-2. **Sandbox:** a `moca-sandbox+jwt` token (§4.2) that verifies against
+2. **Sandbox:** a `moca-sandbox+jwt` token (§4.3) that verifies against
    `SH_SANDBOX_TOKEN_PUBLIC_KEYS`.
 3. Otherwise `UNAUTHENTICATED`.
 
-`MOCA_RELAY_CLIENT_TOKENS` (static client tokens) is kept for increment 1a only and **deleted** in
-1b: its code, its tests, its env example and its docs.
+**The prototype's static client tokens are not merged.** `MOCA_RELAY_CLIENT_TOKENS` and
+`client-tokens.ts` exist only on the prototype branch `feat/relay-client-tokens`. Increment 1a runs
+the relay from that branch, for the team only (§11). On `main`, 1b's sandbox kind replaces them. It
+keeps their shape (a caller classification checked before routing) and their Abort-ownership map,
+keyed by `sbx` instead of a grant. Code meant to be deleted therefore never lands.
 
 ### 3.2 Verifying a sandbox token
 
@@ -145,7 +149,7 @@ On every `Exec` and `Abort`, before routing, so a refused call never reaches a w
 - **`Exec`:** `req.sandbox_id == wrk` and `exec.workspace_key == wsk`, both exact string equality;
   anything else is `PERMISSION_DENIED`;
 - **`Abort`:** permitted only for an `Exec` this relay accepted from a token with the same `sbx`,
-  still in flight (the client-token change's ownership map, keyed by `sbx` instead of a grant).
+  still in flight (the prototype's ownership map, keyed by `sbx` instead of a grant; §3.1).
 
 The relay holds **public keys only**, and does no Redis read for authorization. Verification reuses
 `token.ts`'s verify primitive once it is generalized over `typ` and `aud` (MI1 §6.1). If importing
@@ -671,13 +675,13 @@ to.
 
 ## 11. Increments
 
-| Inc                           | Lands                                                                                                                                                                                                     | Users               | Exit check                                                                                                                 |
-| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| **1a — Front door**           | Namespace, overlay, exec and attach routes with ghostunnel, relay keepalive; one template worker on the KVM host attached over TLS; static client tokens (`MOCA_RELAY_CLIENT_TOKENS`) from a Secret       | Team                | `sbx.py run` works from a laptop on the internal network with no tunnel; §10.6 step 3 passes                               |
-| **1b — Identity + lifecycle** | Control plane in `sandbox` profile; §4, §5; relay verification (§3.1–§3.3); static client tokens deleted; `mocactl sbx login, templates, ls, rm, token, env, run, put`                                    | Team                | §10.1, §10.2 pass; §10.6 steps 2 and 4 pass                                                                                |
-| **1c — Usable**               | `mocactl sbx up, push, pull, mcp, doctor`; agent configuration; curated templates; janitor; audit lines; status; user guide, API guide, runbook; security review (§9)                                     | **Internal cohort** | §10.3–§10.6 pass; a new user goes from install to `sbx pull --apply` using only the user guide                             |
-| **2 — Egress**                | E12, then P4.1's vsock egress transport with an operator allowlist of package registries                                                                                                                  | Cohort              | Installs from the allowlist work and everything else is refused; P4's gates still pass. **E12 starts in parallel with 1a** |
-| **3 — Hardening**             | `Release` frame (delete frees disk at once); worker-side token re-verification (MI1 S4's grant with a configurable signer); `gen` for immediate revocation; per-host mTLS; a dedicated or second KVM host | Wider internal      | Forged token straight to the worker refused; deleted sandbox unusable at once                                              |
+| Inc                           | Lands                                                                                                                                                                                                                                     | Users               | Exit check                                                                                                                 |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| **1a — Front door**           | Namespace, overlay, exec and attach routes with ghostunnel, relay keepalive; one template worker on the KVM host attached over TLS; the relay built from the prototype branch, with static client tokens from a Secret (not merged, §3.1) | Team                | `sbx.py run` works from a laptop on the internal network with no tunnel; §10.6 step 3 passes                               |
+| **1b — Identity + lifecycle** | Control plane in `sandbox` profile; §4, §5; relay verification (§3.1–§3.3) on `main`, replacing the prototype relay; `mocactl sbx login, templates, ls, rm, token, env, run, put`                                                         | Team                | §10.1, §10.2 pass; §10.6 steps 2 and 4 pass                                                                                |
+| **1c — Usable**               | `mocactl sbx up, push, pull, mcp, doctor`; agent configuration; curated templates; janitor; audit lines; status; user guide, API guide, runbook; security review (§9)                                                                     | **Internal cohort** | §10.3–§10.6 pass; a new user goes from install to `sbx pull --apply` using only the user guide                             |
+| **2 — Egress**                | E12, then P4.1's vsock egress transport with an operator allowlist of package registries                                                                                                                                                  | Cohort              | Installs from the allowlist work and everything else is refused; P4's gates still pass. **E12 starts in parallel with 1a** |
+| **3 — Hardening**             | `Release` frame (delete frees disk at once); worker-side token re-verification (MI1 S4's grant with a configurable signer); `gen` for immediate revocation; per-host mTLS; a dedicated or second KVM host                                 | Wider internal      | Forged token straight to the worker refused; deleted sandbox unusable at once                                              |
 
 Beyond increment 3, the items in §1's out-of-scope list are candidates, ordered by what the cohort's
 measurements (§10.7) show.
