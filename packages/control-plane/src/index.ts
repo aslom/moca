@@ -101,6 +101,25 @@ export {
   type RequestCtx,
 } from './handlers.js';
 export { projectResources, resolveSandbox, type SandboxView } from './resources.js';
+// The store's SandboxView is aliased: resources.ts's SandboxView (a session's sandbox tier) owns the name.
+export {
+  MemorySandboxStore,
+  isLive,
+  viewOf,
+  type CreateOutcome,
+  type DeleteOutcome,
+  type SandboxLimits,
+  type SandboxRecord,
+  type SandboxState,
+  type SandboxStore,
+  type SandboxView as SandboxStoreView,
+  type TerminationReason,
+} from './sandbox-store.js';
+export {
+  DEFAULT_SANDBOX_PREFIX,
+  RedisSandboxStore,
+  type SandboxRedisLike,
+} from './sandbox-redis.js';
 export {
   checkExchangeAuth,
   exchangeCredential,
