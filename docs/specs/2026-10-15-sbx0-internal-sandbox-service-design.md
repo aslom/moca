@@ -64,7 +64,8 @@ already runs.
 - the control plane: the `sandbox` route profile, the sandbox store and routes, the sandbox token,
   the subject allowlist and quotas;
 - `mocactl sbx`: the command group, the gRPC client, the embedded MCP server, agent configuration;
-- the tool layer that `mocactl` embeds (#504's tools with `fewer-execs`);
+- `@moca/sandbox-client`: the generated `sandbox/v1` stubs, the gRPC exec client and the seven
+  tools, which `mocactl` embeds (§6.4);
 - `deploy/k8s/overlays/ocp-sbx`, `deploy/sbx/setup.sh`, per-template worker bundles, the janitor,
   `deploy/sbx/status.sh`;
 - tests, a user guide, an API guide and an operator runbook.
@@ -114,7 +115,7 @@ documentation as a literal.
 | `@moca/control-plane`                        | A `sandbox` route profile; the sandbox store and routes; the sandbox token; the subject allowlist; quotas (§4, §5)                                                    | Medium, the main new code                            |
 | `@moca/sandbox-relay`                        | Sandbox-token verification as a caller kind; boot rule; keepalive; audit lines (§3)                                                                                   | Small; supersedes the prototype's `client-tokens.ts` |
 | `@moca/mocactl`                              | `mocactl sbx` (§6), a `sandbox/v1` gRPC client, the embedded MCP server                                                                                               | Medium                                               |
-| Tool layer                                   | Pi's seven tools as #504 builds them, with `fewer-execs`, over a transport interface `mocactl` provides (§6.4)                                                        | Small to medium                                      |
+| `@moca/sandbox-client` (new)                 | Generated `sandbox/v1` stubs, the gRPC exec client, and the seven tools over Exec with no Pi dependency; `mocactl`'s second allow-listed workspace dependency (§6.4)  | Small to medium                                      |
 | `deploy/k8s/overlays/ocp-sbx`, `deploy/sbx/` | Single-namespace overlay reusing `base/relay.yaml`, `base/control-plane.yaml`, `base/redis.yaml`; no supervisor or sandbox pods; setup, bundles, janitor, status (§8) | Medium, mostly existing patterns                     |
 | KVM host                                     | One `microvm-worker` unit per template; snapshots built with `deploy/microvm/build-snapshot.sh`; the janitor                                                          | Operator work, no code                               |
 | `sandbox.proto`, `remote-worker`             | **No change**                                                                                                                                                         | —                                                    |
@@ -390,21 +391,33 @@ state checkable (`doctor`) instead of assumed.
 - **Transport:** stdio. The server binds to one sandbox at start, from `--sandbox` or
   `.sbx/sandbox.json`. It holds the user's login and refreshes the sandbox token in process before
   `exp`.
-- **Tools:** Pi's seven (`bash`, `read`, `write`, `edit`, `grep`, `find`, `ls`), built as #504 builds
-  them, with `fewer-execs`: one Exec each, two for `edit`. Plus `sandbox_info`: template, expiry, and
-  the rules from §6.3.
+- **Tools:** seven, with the **names and input schemas of Pi's** (`bash`, `read`, `write`, `edit`,
+  `grep`, `find`, `ls`), so an agent sees the same tool surface MOCA's harness serves. Each costs one
+  Exec (`edit` two: read, then write), using the command shapes #504's `fewer-execs.ts` measured.
+  Plus `sandbox_info`: template, expiry, and the rules from §6.3.
 - **Errors:**
   - A busy sandbox returns the readable message from #504 ("sandbox busy: a command has been running
     for 3m12s; retry later").
   - A terminated sandbox returns "sandbox expired on … / was deleted; run `mocactl sbx up`".
   - Machinery failures come back as tool errors that say so, never as command output.
-- **The tool layer.** The server takes Pi's tool definitions and their operations objects over a
-  small `ExecTransport` interface, which `mocactl`'s gRPC client implements. That means it does not
-  pull in `GrpcRelayTransport` or all of `@moca/k8s-sandbox`.
-  - If the definitions can't be imported without the whole `pi-coding-agent` package, SBX0 bundles
-    it.
-  - CI then records the size of `mocactl.mjs` and fails on growth over a set budget, so the cost is
-    visible.
+- **The tool layer lives in a new package, `@moca/sandbox-client`.** It holds:
+  - the generated `sandbox/v1` TypeScript stubs, from a second `buf generate` output with the same
+    plugin and options as `@moca/k8s-sandbox`'s, so there is no hand-copied generated code;
+  - `SandboxExecConn`, the gRPC exec client of §6.5;
+  - the seven tools over an `Exec` function, **reimplemented without Pi**. `pi-coding-agent` brings
+    its TUI, AI and agent-core packages and a native image library, and ADR-0036's rule exists to
+    keep exactly that out of `mocactl`;
+  - the MCP server itself (`createSandboxMcpServer`, over `@modelcontextprotocol/sdk`), so
+    `mocactl sbx mcp` only wires a stdio transport, the login and the flight recorder to it.
+- **The dependency exception.** `mocactl` may depend on one workspace package today
+  (`@moca/config-bundle`, ADR-0038), enforced by `layering.test.ts`. `@moca/sandbox-client` becomes
+  the **second** allow-listed entry, recorded in ADR-0042. It carries what ADR-0038's justification
+  requires: no Pi, no server internals, no substrate assumptions. Its runtime dependencies are
+  `@grpc/grpc-js`, `@bufbuild/protobuf` and `@modelcontextprotocol/sdk`.
+- **The accepted cost:** two implementations of the seven tools exist, Pi's (the harness) and this
+  one (SBX0), until a shared transport-neutral tool layer is extracted. A contract test pins this
+  package's tool names and input schemas to Pi's, so the two cannot drift silently (§10.4).
+- **Bundle size:** CI records the size of `mocactl.mjs` and fails on growth over a set budget.
 - **Flight recorder:** one JSON line per tool call (`ts, tool, ms, execs, exit`) to
   `<mocactl state dir>/sbx/<id>.log`. `doctor` summarizes it.
 
@@ -633,13 +646,17 @@ code only and no secrets, and `sbx up` excludes common secret files by default (
   markers are idempotent; `rm` removes exactly what `up` added.
 - **`doctor`:** detects a built-in tool that is still enabled.
 
-### 10.4 MCP server
+### 10.4 MCP server and `@moca/sandbox-client`
 
-- #504's tests;
+- each tool against a fake `Exec`: the commands it sends, its result text, its error mapping, and its
+  Exec count (1, and 2 for `edit`);
+- **the schema contract:** the seven tools' names and input schemas equal Pi's
+  (`createBashToolDefinition` and siblings), checked in `@moca/sandbox-client`'s tests, which may
+  import Pi as a dev dependency;
+- the MCP server's `tools/list` and `tools/call` over an in-memory transport;
 - binding from `.sbx/sandbox.json`;
 - token refresh mid-session;
 - busy, terminated and machinery errors returned as tool errors;
-- the Exec count per tool (1, and 2 for `edit`);
 - the `mocactl.mjs` size budget in CI.
 
 ### 10.5 Janitor (shell tests, as `deploy/k8s/tests/`)
@@ -721,10 +738,11 @@ measurements (§10.7) show.
 
 - **O1. Template contents.** Which language versions and libraries the cohort needs. Settled with the
   cohort before 1c.
-- **O2. The token verifier's home.** Import `token.ts` from `@moca/control-plane` into the relay, or
-  move it to a shared module (§3.2). Decided in the implementation plan from the dependency graph.
-- **O3. Tool-layer extraction depth.** Whether Pi's tool definitions can be imported without all of
-  `pi-coding-agent` (§6.4). It sets `mocactl`'s bundle size, not the design.
+- **O2. The token verifier's home.** _Settled during planning:_ the relay imports it from
+  `@moca/control-plane`, as `knative-server` already does for `/turn` (`turn-auth.ts`).
+- **O3. Tool-layer extraction depth.** _Settled during planning:_ the tools are reimplemented in
+  `@moca/sandbox-client` without Pi (§6.4). A shared tool layer for the harness and SBX0 is later
+  work.
 - **O4. Concurrent agents on one sandbox.** Claude Code subagents and OpenCode parallel sessions
   queue on one sandbox. Measured during the cohort (§10.7). One fix is a sandbox per agent, which the
   per-user quota already allows.

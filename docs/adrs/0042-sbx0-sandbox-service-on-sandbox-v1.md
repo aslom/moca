@@ -49,8 +49,12 @@ from what already runs:
   (`typ: moca-sandbox+jwt`, `aud: moca-sandbox`) naming exactly one worker (`wrk`) and one workspace
   key (`wsk`). The relay verifies it with public keys only and requires an exact match on both.
 - **Clients:** `mocactl sbx`, which pushes the working tree in, pulls a patch out, runs commands, and
-  serves Pi's tools as a **local stdio MCP server**. There is no hosted MCP server or OAuth
-  authorization server.
+  serves seven sandbox tools as a **local stdio MCP server**. There is no hosted MCP server or OAuth
+  authorization server. The gRPC client, the tools (Pi's names and schemas, reimplemented without
+  Pi) and the MCP server live in a new package, `@moca/sandbox-client`. It is the **second named
+  exception** to ADR-0036's no-`@moca/*`-dependency rule, after ADR-0038's `@moca/config-bundle`,
+  and is justified the same way: no Pi, no server internals, no substrate assumptions. The one-entry
+  allow-list in `mocactl`'s `layering.test.ts` becomes a two-entry list naming this ADR.
 - **No silent reset**, held by invariants rather than worker changes:
   - the control plane owns the lifetime;
   - the worker's idle reclaim is set longer than any sandbox can live;
@@ -71,6 +75,11 @@ egress, the next increment.
 - **Keep static, operator-issued client tokens** (the prototype's). No login code, but revoking one
   means editing a Secret and restarting the relay. Used only in the first, team-only increment, from
   the prototype branch, and never merged.
+- **Embedding Pi's tools in `mocactl`** (depending on `pi-coding-agent` and `@moca/k8s-sandbox`).
+  One tool implementation, but it would break ADR-0036's stated core ("no pi") and bundle Pi's TUI
+  and AI packages into the client.
+- **A separate MCP binary** built on Pi. It keeps ADR-0036 absolute, but users install two things,
+  and the binary needs its own release channel and login code.
 - **A hosted MCP server.** It would be a new internet-facing surface that holds user tokens, while
   `mocactl` is already needed on the laptop for push and pull.
 
@@ -97,6 +106,10 @@ egress, the next increment.
 - **Negative / accepted cost:** the control plane's codebase now serves two products, selected by a
   route profile. An allow list per profile and a test that enumerates every route guard against a
   harness route leaking into the `sandbox` profile.
+- **Negative / accepted cost:** ADR-0036's dependency rule gets a second exception. Two
+  implementations of the seven tools exist (Pi's in the harness, `@moca/sandbox-client`'s for SBX0)
+  until a shared transport-neutral tool layer is extracted. A contract test pins the client's tool
+  names and schemas to Pi's.
 - **Negative / accepted cost:** no network in the guest, so repositories whose dependencies the
   curated templates lack do not work yet.
 - **Follow-up owed:** allowlisted egress (experiment E12, then P4.1's vsock transport), started in
