@@ -397,8 +397,11 @@ state checkable (`doctor`) instead of assumed.
   Exec (`edit` two: read, then write), using the command shapes #504's `fewer-execs.ts` measured.
   Plus `sandbox_info`: template, expiry, and the rules from §6.3.
 - **Errors:**
-  - A busy sandbox returns the readable message from #504 ("sandbox busy: a command has been running
-    for 3m12s; retry later").
+  - **Busy is decided client-side.** The worker serializes Execs per workspace and makes a second
+    one wait (`runpool.go`'s exec gate); `sandbox/v1` has no busy frame. So the MCP server, which knows
+    its own in-flight calls, refuses a call that would wait more than 30 s behind one of them with a
+    readable tool error ("sandbox busy: `npm test` has been running for 3m12s; retry later"), instead
+    of queueing. Calls from other clients (another terminal's `sbx run`) simply queue at the worker.
   - A terminated sandbox returns "sandbox expired on … / was deleted; run `mocactl sbx up`".
   - Machinery failures come back as tool errors that say so, never as command output.
 - **The tool layer lives in a new package, `@moca/sandbox-client`.** It holds:
