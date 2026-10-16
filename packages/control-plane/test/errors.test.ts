@@ -26,6 +26,12 @@ const EXPECTED: Record<CpErrorCode, number> = {
   // 404, not 403, for another user's session: a 403 is an existence oracle (spec §8.1).
   session_not_found: 404,
   session_mismatch: 400,
+  not_enrolled: 403,
+  sandbox_not_found: 404,
+  sandbox_terminated: 409,
+  name_conflict: 409,
+  quota_exceeded: 429,
+  unknown_template: 400,
   digest_mismatch: 400,
   bundle_quota_exceeded: 429,
   config_bundle_not_found: 404,
@@ -105,6 +111,20 @@ describe('writeError', () => {
     const { res, calls } = fakeRes();
     writeError(res as never, new CpError('session_not_found', undefined, 'sid-1'));
     expect(JSON.parse(calls.body!)).toEqual({ error: 'session_not_found', sessionId: 'sid-1' });
+  });
+
+  it('merges extra fields into the body', () => {
+    const { res, calls } = fakeRes();
+    writeError(
+      res as never,
+      new CpError('sandbox_terminated', 'sandbox was deleted', undefined, { reason: 'deleted' }),
+    );
+    expect(calls.status).toBe(409);
+    expect(JSON.parse(calls.body!)).toEqual({
+      error: 'sandbox_terminated',
+      message: 'sandbox was deleted',
+      reason: 'deleted',
+    });
   });
 
   it('maps an unknown throwable to internal_error without leaking its message', () => {

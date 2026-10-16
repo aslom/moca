@@ -8,10 +8,22 @@ export {
   parseKeyset,
   publicKeyFromBase64,
   publicKeyToBase64,
+  verifyJws,
   verifyToken,
   type MintInput,
   type TokenClaims,
 } from './token.js';
+export {
+  DEFAULT_SANDBOX_ISSUER,
+  SANDBOX_CLOCK_LEEWAY_S,
+  SANDBOX_SCOPE_EXEC,
+  SANDBOX_TOKEN_AUDIENCE,
+  SANDBOX_TOKEN_TYP,
+  mintSandboxToken,
+  verifySandboxToken,
+  type SandboxMintInput,
+  type SandboxTokenClaims,
+} from './sandbox-token.js';
 export { KEK_BYTES, credentialAad, keksFromBase64, open, seal, type Opened } from './envelope.js';
 export {
   CREDENTIAL_NAME_RE,

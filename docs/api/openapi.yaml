@@ -72,6 +72,12 @@ components:
             - forbidden
             - session_not_found
             - session_mismatch
+            - not_enrolled
+            - sandbox_not_found
+            - sandbox_terminated
+            - name_conflict
+            - quota_exceeded
+            - unknown_template
             - digest_mismatch
             - bundle_quota_exceeded
             - config_bundle_not_found
@@ -96,6 +102,9 @@ components:
             can carry a Redis connection string or a presented token, and this body reaches an
             arbitrary caller (errors.ts).
         sessionId: { type: string }
+        reason:
+          type: string
+          description: 'sandbox_terminated only: deleted | expired'
     Session:
       type: object
       required: [sessionId, owner, tenant, createdAt, state, turns]

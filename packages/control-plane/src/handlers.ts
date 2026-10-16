@@ -106,7 +106,11 @@ export interface CpDeps {
   /** Content-addressed config bundles (ADR-0038); the same Redis the ownership index uses. */
   bundles: BundleRedisLike & BundleBudgetRedisLike;
   identity: IdentityProvider;
-  signer: { kid: string; mint(input: MintInput): string };
+  signer: {
+    kid: string;
+    mint(input: MintInput): string;
+    signJws(typ: string, claims: object): string;
+  };
   /** Refresh-token families (B14). RedisRefreshStore in production; MemoryRefreshStore in tests. */
   refresh: RefreshStore;
   /**

@@ -24,6 +24,12 @@ export const CP_ERROR_CODES = [
   'forbidden',
   'session_not_found',
   'session_mismatch',
+  'not_enrolled',
+  'sandbox_not_found',
+  'sandbox_terminated',
+  'name_conflict',
+  'quota_exceeded',
+  'unknown_template',
   'digest_mismatch',
   'bundle_quota_exceeded',
   'config_bundle_not_found',
@@ -62,6 +68,12 @@ const STATUS: Record<CpErrorCode, number> = {
   // reserved for "authenticated but insufficiently privileged on a resource you may know exists".
   session_not_found: 404,
   session_mismatch: 400,
+  not_enrolled: 403,
+  sandbox_not_found: 404,
+  sandbox_terminated: 409,
+  name_conflict: 409,
+  quota_exceeded: 429,
+  unknown_template: 400,
   // A client-built bundle whose bytes do not hash to the digest it claimed (config-bundle store).
   digest_mismatch: 400,
   // 429: the config-bundle byte budget (per subject or deployment-wide) is full; retry after expiry.
@@ -101,6 +113,8 @@ export class CpError extends Error {
     readonly code: CpErrorCode,
     message?: string,
     readonly sessionId?: string,
+    /** Extra body fields a client branches on, e.g. sandbox_terminated's `reason`. Never a secret. */
+    readonly extra?: Record<string, string>,
   ) {
     super(message ?? code);
     this.name = 'CpError';
@@ -129,6 +143,8 @@ export function writeError(res: WritableRes, err: unknown): void {
     const body: Record<string, string> = { error: err.code };
     if (err.message && err.message !== err.code) body.message = err.message;
     if (err.sessionId) body.sessionId = err.sessionId;
+    if (err.extra) Object.assign(body, err.extra);
+    body.error = err.code;
     res.writeHead(statusFor(err.code), JSON_HEADERS);
     res.end(JSON.stringify(body));
     return;
