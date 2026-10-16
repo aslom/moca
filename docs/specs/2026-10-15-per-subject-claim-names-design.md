@@ -40,8 +40,8 @@ one.
 ### Acceptance
 
 1. An authenticated caller can create a workload over a claim they name (`workspace.claimName`),
-   and that workload runs on that claim's volume — bring-your-own-PVC works under
-   `MOCA_TENANCY=multi`.
+   and the revision that workload runs is the one stored on the caller's claim —
+   bring-your-own-PVC works under `MOCA_TENANCY=multi`.
 2. A caller cannot cause a Context to be attached to a claim outside their own scope, whatever they
    send and whatever Moca forwards: Alice naming `data` never produces Bob's claim name — not by a
    check that could be incomplete, but by construction.
@@ -60,13 +60,17 @@ exactly that, as a new `storage.claimName` field beside `X-Context-Subject` as t
 Service**, not Moca, derives the claim it attaches:
 
 ```
-moca-<scope>-<claim>     where <scope> = HMAC-SHA256(secret, subject)[:32]
+moca-<scope>-<claim>     where <scope> = HMAC-SHA256(secret, subjectKey)[:32]
 ```
 
 - The caller-supplied slug is validated by Moca exactly like a workload name: the existing `NAME`
   regex, at most 50 characters, `400 claim_name_invalid` otherwise. `WORKSPACE_FIELDS` gains
   `claimName`. Context Service validates the same shape again (defense in depth) and refuses a
   create whose storage names a claim it cannot derive from the caller's subject.
+- The HMAC input is pinned to `subjectKey` — `kind + ":" + name`, the encoding
+  `subjectKey` already uses (`access.go:315`) — so a `user:x` and a `serviceaccount:x` never share
+  a scope, and any reimplementation derives the same names. For Moca's callers the subject is
+  `user:<owner>`, the same string `X-Context-Subject` carries today.
 - The secret is **Context Service's own** — a new setting there (e.g. `CONTEXT_CLAIM_SECRET`),
   stable per deployment. Keying the scope with a secret, rather than a bare hash of the subject,
   makes the derived names unguessable: a caller who knows another subject's string still cannot
@@ -89,20 +93,51 @@ no new reliance on it, and removes the old one (Moca no longer chooses storage n
 ### 2.2 The Context Service contract (companion change, in scope)
 
 Recorded here because Moca's half is meaningless without it; to be implemented in
-`rossoctl/context-service` and tracked there.
+`rossoctl/context-service` and tracked there. **This is most of the Context Service work, not a
+detail:** at `main 7951826` a Context *is* its managed PVC — the name and type are PVC labels,
+the current revision, revision history and frozen revision are PVC annotations (`manager.go`,
+`PublishContextRevision`), owner, grants, consumers and audit are annotations too (`access.go`),
+`Attachment.ClaimName` is derived from `pvc.Name` at read time (`resourceFromContextPVC`), and the
+trusted `contextId` Moca pins on is `StorageUID`, the PVC's UID (`uploads.go:186`; Moca checks it
+at freeze, `workloads.ts:359`). None of that can live on a caller-owned claim.
 
-1. `POST /internal/v1/contexts` (and the public equivalent) accepts
+1. **A Context's metadata moves into a record object when the storage is a caller's claim.** A
+   namespaced ConfigMap per attached-claim Context — the existing query-index pattern
+   (`queryIndexName`) — carries name, type, revision history, frozen revision, owner, grants,
+   consumers, audit and the attachment (the derived claim name); revision history and audit keep
+   the same bounds they have as PVC annotations, and a custom resource is the recorded escape hatch
+   if they outgrow a ConfigMap's 1 MiB ceiling. Writing annotations onto the caller's PVC instead
+   is rejected: anyone with edit rights on that PVC could rewrite its grants. Managed-PVC contexts
+   keep today's PVC-carried metadata untouched — the change is additive, and a later Context
+   Service refactor may unify the two homes.
+2. **`contextId` for an attached-claim Context is its record's UID, never the claim's.** The claim's
+   UID is shared by everything that ever attaches it and survives delete-and-recreate, so it
+   cannot carry the identity Moca pins on. Upload, freeze and export verify their expected UID
+   against the record (today they verify against `pvc.UID`, `context_upload.go`); Moca's pin logic
+   is unchanged — it compares the `contextId` Context Service answers with.
+3. **One claim backs at most one live Context:** a create naming a claim an attached Context
+   already uses answers `409 claim_in_use`. Deleting that Context releases the claim for a new
+   Context, whose fresh record has a fresh UID, so the pin stays meaningful.
+4. `POST /internal/v1/contexts` (and the public equivalent) accepts
    `storage.claimName: <slug>`. When set, Context Service does **not** create a PVC: it requires an
    existing claim named `moca-<scope>-<slug>` for the request's subject and answers
    `409 claim_not_found` if it is absent — it never provisions one, so a typo cannot silently mint
    a volume. `size` and `storageClass` are ignored on that path.
-2. The claim is **caller-owned, not Context-Service-managed**: no `managed-by=context-service`
-   label is applied, and `DELETE /internal{ctx}` removes the Context but never the claim
-   (acceptance 5). The Context's record carries the attachment — `Resource.Attachment.ClaimName`
-   already exists for exactly this view — so get and list do not depend on PVC labels.
-3. The create response's `attachment.claimName` carries the derived name, which is how Moca (and
-   through it the caller) learns it.
-4. Context Service never returns or accepts a claim name for one subject's Context to another
+5. **The claim is adopted as the Context's filesystem, exactly as a managed PVC is today.** The
+   upload helper mounts it at `/workspace` and materializes the bundle onto it; revisions are
+   computed from it; export streams it back for sandbox delivery — so the revision a workload runs
+   is the one stored on the caller's claim. Whatever was already on the claim stays and joins the
+   first revision's baseline (that is the point of bringing your own volume); paths that collide
+   with the uploaded bundle are overwritten by it. Context Service never reads or writes outside
+   its mount, and `DELETE /internal{ctx}` removes the Context — metadata record included — but
+   **never the claim** (acceptance 5): the caller's data survives the workload.
+6. **The trusted create response gains `attachment.claimName`.** The trusted view omits the PVC
+   attachment today, deliberately — "Moca receives content as bundles, not mounts"
+   (`uploads.go:106`, mirrored in Moca's `TrustedContext` doc). That rationale is amended rather
+   than dropped: for an attached-claim Context the response carries the derived claim name,
+   because Moca stores it and returns it to the owner. It is the only attachment field on the
+   trusted contract.
+7. Context Service never returns or accepts a claim name for one subject's Context to another
    subject — contexts are already subject-scoped there.
 
 ### 2.3 Moca's half
@@ -145,6 +180,10 @@ the derived name in the workspace view (the JSON view already carries `workspace
 - The derived name is opaque. Whoever pre-creates the PVC — an operator, or a user with namespace
   access — must obtain it from the owner's `GET /workloads/{id}` (or the create response). That is
   the price of the mapping not existing.
+- Adoption is trust in the caller's own volume: whatever the claim already holds joins the first
+  revision and is read by the agent that runs it, and an upload overwrites colliding paths. That is
+  the feature; there is deliberately no protection from it, because the only subject who can name
+  the claim is its owner (§2.2 item 5).
 - A caller with rights to create PVCs in the Context Service namespace remains
   operator-privileged there (they can mount any claim directly); the keyed scope at least stops
   them computing another subject's name, which a bare subject hash would not.
@@ -163,7 +202,10 @@ the derived name in the workspace view (the JSON view already carries `workspace
   the `get` view.
 - The Alice/Bob proof — the same slug from two subjects derives to two different claim names, and
   a subject cannot attach a claim outside its scope — lives in `rossoctl/context-service`'s own
-  suite with the companion change (§2.2), since that is where derivation happens.
+  suite with the companion change (§2.2), since that is where derivation happens. So do the
+  contract's own pins: `claim_not_found` and `claim_in_use`; a freeze with a stale `contextId`
+  fails against the record's UID; deleting the Context removes the metadata record and leaves the
+  claim; pre-existing content on the claim joins the first revision.
 
 ## 5. Records
 
