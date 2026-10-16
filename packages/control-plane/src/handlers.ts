@@ -52,8 +52,11 @@ import type { MintInput, TokenClaims } from './token.js';
 import { isRefreshTokenShape, type RefreshStore } from './refresh-store.js';
 import { projectResources, resolveSandbox } from './resources.js';
 import type { SandboxTiers } from './sandbox-tiers.js';
+import type { RouteProfile } from './routes.js';
 
 export interface CpConfig {
+  /** Which routes this control plane mounts (SBX0 §4.1). Absent means `harness`. */
+  routeProfile?: RouteProfile;
   apiTokenTtlSeconds: number;
   sessionTokenTtlSeconds: number;
   /** A refresh family dies this long after its last use (`SH_REFRESH_IDLE_TTL_SECONDS`, B14). */

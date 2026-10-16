@@ -60,6 +60,10 @@ function authorize(route: RouteSpec, req: IncomingMessage, deps: CpDeps, ctx: Re
     ctx.exchangeAuthorized = true;
     return;
   }
+  if (route.auth === 'janitor') {
+    // Task 5 wires the janitor bearer; until then no route declares this kind.
+    throw new CpError('unauthorized', 'janitor authentication failed');
+  }
   if (!presented) throw new CpError('token_required', 'this route requires a token');
   // requiredScope 'api' is what stops a session token rewriting credentials or creating a second
   // session, and stops the shared exchange bearer standing in for a user identity (plan gap #7).
@@ -72,7 +76,11 @@ function authorize(route: RouteSpec, req: IncomingMessage, deps: CpDeps, ctx: Re
 export function buildHandler(deps: CpDeps): (req: IncomingMessage, res: ServerResponse) => void {
   return (req, res) => {
     const route = async () => {
-      const matched = matchRoute(req.method ?? '', req.url ?? '');
+      const matched = matchRoute(
+        req.method ?? '',
+        req.url ?? '',
+        deps.config.routeProfile ?? 'harness',
+      );
       if (!matched) {
         res.writeHead(404, JSON_HEADERS).end(JSON.stringify({ error: 'not_found' }));
         return;

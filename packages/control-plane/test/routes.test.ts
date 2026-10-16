@@ -132,6 +132,7 @@ describe('bodyLimitFor', () => {
         path: '/x',
         auth: 'api',
         sessionScoped: false,
+        profiles: ['harness'],
         operationId: 'x',
         maxBodyBytes: 1234,
       }),
