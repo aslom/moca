@@ -19,7 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${SBX_UNIT_DIR:=/etc/systemd/system}"
 : "${SBX_ENV_DIR:=/etc/sbx}"
 : "${SBX_SRV:=/srv/sbx}"
-: "${SBX_ATTACH_TIMEOUT:=60}"
+: "${SBX_ATTACH_TIMEOUT:=120}"
 : "${SBX_ATTACH_SETTLE:=5}"
 WORKSPACE_IDLE=216h # 9 days > the 7-day sandbox lifetime (spec §5.4); setup checks it again in 1b
 DEFAULT_BUDGET_MB=8192
@@ -95,37 +95,69 @@ install_worker() {
     >"$SBX_UNIT_DIR/sbx-$id.slice"
   record "worker sbx-worker@$id $SBX_ENV_DIR/workers/$id.env $SBX_UNIT_DIR/sbx-$id.slice"
   systemctl daemon-reload
-  systemctl enable --now "sbx-worker@$id.service"
+  # enable, then exactly one restart: a first install starts the unit, a re-install picks up the new
+  # env file once (enable --now followed by restart would start a fresh unit twice).
+  systemctl enable "sbx-worker@$id.service"
   systemctl restart "sbx-worker@$id.service"
   wait_attached "$id"
 }
 
-# The worker logs `attached, serving execs` when its stream opens, before the relay checks the token;
-# a refused token ends the stream a moment later. So the attach must HOLD for SBX_ATTACH_SETTLE
-# seconds, in this invocation of the unit -- the rule setup-microvm.sh --remote applies.
+invocation() { # invocation WORKER_ID -> the unit's current InvocationID, or nothing
+  systemctl show -p InvocationID --value "sbx-worker@$1.service" 2>/dev/null | sed 's/^InvocationID=//' || true
+}
+
+# attach_state <journal text> -> "<count of attached/ended lines> <last: attached|ended|none>"
+attach_state() {
+  local line n=0 last=none
+  while IFS= read -r line; do
+    case "$line" in
+    *"attached, serving execs"*) n=$((n + 1)) last=attached ;;
+    *"stream ended"*) n=$((n + 1)) last=ended ;;
+    esac
+  done <<<"$1"
+  printf '%s %s' "$n" "$last"
+}
+
+# The rule of deploy/microvm/setup-microvm.sh --remote (attach_state, verify_attached_remote). The
+# worker logs `attached, serving execs` as soon as its stream opens, before the relay reads the
+# token; a refused token ends the stream milliseconds later (`stream ended (...); reconnecting`) and
+# the worker retries after a backoff. Refusals are normal for a while after a template is added: the
+# relay sees the new token file only once the kubelet syncs the Secret, about a minute. So an earlier
+# refusal does not fail the wait; an attach counts once it HOLDS: in the current invocation the last
+# attached/ended line is an attached one, and the count and the last line are unchanged across
+# SBX_ATTACH_SETTLE seconds (at least 1, to outlast the worker's first backoff of at most 750ms).
+# The journal is captured once per look, never piped into `grep -q`: under pipefail grep's early
+# exit can SIGPIPE journalctl, and a negated check would then read as success. Bounded by the wall
+# clock: polls start until SBX_ATTACH_TIMEOUT has passed, and the first one always runs.
 wait_attached() {
-  local id="$1" inv deadline
-  inv="$(systemctl show -p InvocationID --value "sbx-worker@$id.service" 2>/dev/null | sed 's/^InvocationID=//')"
-  deadline=$((SECONDS + SBX_ATTACH_TIMEOUT))
-  while ((SECONDS < deadline)); do
-    if journalctl -u "sbx-worker@$id" "_SYSTEMD_INVOCATION_ID=$inv" --no-pager -o cat 2>/dev/null |
-      grep -q 'attached, serving execs'; then
-      sleep "$SBX_ATTACH_SETTLE"
-      if ! journalctl -u "sbx-worker@$id" "_SYSTEMD_INVOCATION_ID=$inv" --no-pager -o cat 2>/dev/null |
-        grep -Eq 'stream ended|reconnect'; then
-        log "sbx-worker@$id attached to the relay"
-        return 0
+  local id="$1" inv='' now out first deadline=$((SECONDS + SBX_ATTACH_TIMEOUT))
+  while :; do
+    inv="$(invocation "$id")"
+    if [[ -n "$inv" ]]; then
+      out="$(journalctl -q --no-pager -o cat "_SYSTEMD_INVOCATION_ID=$inv" 2>/dev/null || true)"
+      first="$(attach_state "$out")"
+      if [[ "$first" == *" attached" ]]; then
+        sleep "$SBX_ATTACH_SETTLE"
+        now="$(invocation "$id")"
+        out="$(journalctl -q --no-pager -o cat "_SYSTEMD_INVOCATION_ID=$inv" 2>/dev/null || true)"
+        if [[ "$now" == "$inv" && "$(attach_state "$out")" == "$first" ]]; then
+          log "sbx-worker@$id attached to the relay"
+          return 0
+        fi
       fi
     fi
+    ((SECONDS < deadline)) || break
     sleep 1
   done
-  die "sbx-worker@$id did not attach within ${SBX_ATTACH_TIMEOUT}s: journalctl -u sbx-worker@$id _SYSTEMD_INVOCATION_ID=$inv (TLS, token or address)"
+  die "sbx-worker@$id did not stay attached within ${SBX_ATTACH_TIMEOUT}s (a wrong or revoked token, TLS or DNS; a newly added worker's token can take about a minute to reach the relay, so re-run or raise SBX_ATTACH_TIMEOUT). The reason is in: journalctl -u sbx-worker@$id _SYSTEMD_INVOCATION_ID=$inv"
 }
 
 uninstall_worker() {
   local id="$1"
   valid_id "$id" || die "not a worker id: $id"
   systemctl disable --now "sbx-worker@$id.service" || true
+  # A stop that hit TimeoutStopSec can leave the worker's VMs in its slice; stopping the slice ends them.
+  systemctl stop "sbx-$id.slice" || true
   rm -f "$SBX_ENV_DIR/workers/$id.env" "$SBX_ENV_DIR/workers/$id-relay-ca.crt" "$SBX_UNIT_DIR/sbx-$id.slice"
   [[ ! -f "$SBX_ENV_DIR/manifest" ]] || { grep -v -e "sbx-worker@$id " -e "$id-relay-ca.crt" "$SBX_ENV_DIR/manifest" >"$SBX_ENV_DIR/manifest.new" || true; mv "$SBX_ENV_DIR/manifest.new" "$SBX_ENV_DIR/manifest"; }
   systemctl daemon-reload
@@ -137,6 +169,12 @@ main() {
   parse_args "$@"
   [[ -n "${SBX_SKIP_ROOT_CHECK:-}" || "$(id -u)" == 0 ]] || die 'must run as root'
   if [[ -n "$UNINSTALL" ]]; then uninstall_worker "$UNINSTALL"; return; fi
+  [[ "$SBX_ATTACH_TIMEOUT" =~ ^[1-9][0-9]*$ ]] ||
+    die "SBX_ATTACH_TIMEOUT='$SBX_ATTACH_TIMEOUT' must be a whole number of seconds, at least 1"
+  # At least 1: the hold must outlast the worker's first reconnect backoff (at most 750ms), or a
+  # refused token's attached -> stream ended -> attached cycle could fall outside the window.
+  [[ "$SBX_ATTACH_SETTLE" =~ ^[1-9][0-9]*$ ]] ||
+    die "SBX_ATTACH_SETTLE='$SBX_ATTACH_SETTLE' must be a whole number of seconds, at least 1, to outlast the worker's first reconnect backoff (at most 750ms)"
   [[ -n "$BUNDLE" ]] || die 'usage: install-host.sh BUNDLE_DIR --snapshot IMAGE [--budget-mb N] | --uninstall ID'
   install_units
   install_worker

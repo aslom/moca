@@ -17,9 +17,18 @@ printf 'systemctl %s\n' "$*" >>"$MOCK_LOG"
 [[ "$1" == show ]] && { echo "InvocationID=abc123"; exit 0; }
 exit 0
 MOCK
+# journalctl: MOCK_JOURNAL_DIR holds the whole journal as the Nth look sees it (files 1, 2, ...;
+# the last one keeps being served), so a test can script the worker's log growing between looks.
 cat >"$TMP/bin/journalctl" <<'MOCK'
 #!/usr/bin/env bash
 printf 'journalctl %s\n' "$*" >>"$MOCK_LOG"
+if [[ -n "${MOCK_JOURNAL_DIR:-}" ]]; then
+  n=$(($(cat "$MOCK_JOURNAL_DIR/count" 2>/dev/null || echo 0) + 1))
+  echo "$n" >"$MOCK_JOURNAL_DIR/count"
+  while ((n > 1)) && [[ ! -f "$MOCK_JOURNAL_DIR/$n" ]]; do n=$((n - 1)); done
+  cat "$MOCK_JOURNAL_DIR/$n"
+  exit 0
+fi
 [[ -n "${MOCK_NO_ATTACH:-}" ]] || echo 'microvm-worker: attached, serving execs'
 MOCK
 chmod +x "$TMP/bin/systemctl" "$TMP/bin/journalctl"
@@ -70,18 +79,51 @@ grep -qx 'Slice=sbx-%i.slice' "$SBX_UNIT_DIR/sbx-worker@.service" || fail 'unit 
 grep -qx 'AssertPathExists=/dev/kvm' "$SBX_UNIT_DIR/sbx-worker@.service" || fail 'unit lacks AssertPathExists=/dev/kvm'
 grep -qx 'StartLimitIntervalSec=300' "$SBX_UNIT_DIR/sbx-worker@.service" || fail 'unit lacks StartLimitIntervalSec=300'
 grep -qx 'StartLimitBurst=5' "$SBX_UNIT_DIR/sbx-worker@.service" || fail 'unit lacks StartLimitBurst=5'
-grep -q 'systemctl enable --now sbx-worker@sbx_py312.service' "$MOCK_LOG" || fail 'unit not enabled'
+grep -qx 'systemctl enable sbx-worker@sbx_py312.service' "$MOCK_LOG" || fail 'unit not enabled'
+! grep -q 'systemctl enable --now' "$MOCK_LOG" || fail 'enable --now plus restart starts a fresh unit twice'
+[[ "$(grep -cx 'systemctl restart sbx-worker@sbx_py312.service' "$MOCK_LOG")" == 1 ]] || fail 'the worker is not restarted exactly once'
 grep -q 'sbx-worker@sbx_py312' "$SBX_ENV_DIR/manifest" || fail 'manifest does not record the worker'
-pass 'installs the template unit, the slices, enables the worker and records it'
+pass 'installs the template unit, the slices, enables and restarts the worker once and records it'
 
 : >"$MOCK_LOG"
 ! MOCK_NO_ATTACH=1 bash "$INSTALL" "$(bundle sbx_default)" --snapshot default >"$TMP/out" 2>&1 || fail 'reported success with no attach'
-grep -q 'journalctl -u sbx-worker@sbx_default' "$TMP/out" || fail 'no-attach failure does not name the journal'
-pass 'fails, naming the journal, when the worker never logs an attach'
+grep -q 'journalctl -u sbx-worker@sbx_default _SYSTEMD_INVOCATION_ID=abc123' "$TMP/out" || fail 'no-attach failure does not name the journal'
+grep -q 'about a minute to reach the relay' "$TMP/out" || fail 'the timeout does not mention the Secret sync delay'
+pass 'fails, naming the journal and the token-sync delay, when the worker never logs an attach'
 
+# The attach rule of setup-microvm.sh: an earlier refusal does not fail the wait, a later attach that
+# holds succeeds, and an attach followed by `stream ended` with no re-attach fails.
+ATTACHED='microvm-worker: attached, serving execs'
+ENDED='microvm-worker: stream ended (rpc error: code = Unauthenticated desc = bad token); reconnecting in 612ms'
+journal() { # journal DIR LOOK... -- each LOOK is the full journal at that look, lines separated by |
+  local d="$1" i=0 look
+  rm -rf "$d" && mkdir -p "$d" && shift
+  for look in "$@"; do i=$((i + 1)); printf '%s\n' "$look" | tr '|' '\n' >"$d/$i"; done
+}
+journal "$TMP/j1" "$ATTACHED" "$ATTACHED|$ENDED" "$ATTACHED|$ENDED|$ATTACHED"
+MOCK_JOURNAL_DIR="$TMP/j1" SBX_ATTACH_TIMEOUT=10 bash "$INSTALL" "$(bundle sbx_default)" --snapshot default >"$TMP/out" 2>&1 ||
+  fail 'a refusal followed by an attach that holds was reported as a failure'
+grep -q 'sbx-worker@sbx_default attached to the relay' "$TMP/out" || fail 'no attached message'
+pass 'an attach that holds after an earlier refusal (Secret not yet synced) succeeds'
+
+journal "$TMP/j2" "$ATTACHED" "$ATTACHED|$ENDED"
+! MOCK_JOURNAL_DIR="$TMP/j2" SBX_ATTACH_TIMEOUT=3 bash "$INSTALL" "$(bundle sbx_default)" --snapshot default >"$TMP/out" 2>&1 ||
+  fail 'an attach followed by stream ended and no re-attach was reported as attached'
+grep -q 'journalctl -u sbx-worker@sbx_default _SYSTEMD_INVOCATION_ID=abc123' "$TMP/out" || fail 'the failure does not name the journal'
+pass 'an attach that ends and never comes back fails, naming the journal'
+
+: >"$MOCK_LOG"
+! SBX_ATTACH_SETTLE=0 bash "$INSTALL" "$(bundle sbx_default)" --snapshot default >"$TMP/out" 2>&1 || fail 'accepted SBX_ATTACH_SETTLE=0'
+grep -q 'SBX_ATTACH_SETTLE' "$TMP/out" || fail 'the SBX_ATTACH_SETTLE refusal does not say why'
+! grep -q 'systemctl' "$MOCK_LOG" || fail 'touched systemd before refusing SBX_ATTACH_SETTLE=0'
+pass 'refuses SBX_ATTACH_SETTLE below 1 before touching anything'
+
+: >"$MOCK_LOG"
 mkdir -p "$SBX_SRV/workspaces/sbx_py312/sbx-keepme"
 bash "$INSTALL" --uninstall sbx_py312 >"$TMP/out" 2>&1 || fail 'uninstall'
 grep -q 'systemctl disable --now sbx-worker@sbx_py312.service' "$MOCK_LOG" || fail 'unit not disabled'
+grep -A1 'systemctl disable --now sbx-worker@sbx_py312.service' "$MOCK_LOG" | grep -qx 'systemctl stop sbx-sbx_py312.slice' ||
+  fail 'the worker slice is not stopped after the unit is disabled (VMs left by a timed-out stop stay resident)'
 [[ ! -f "$B" && ! -f "$SBX_UNIT_DIR/sbx-sbx_py312.slice" ]] || fail 'env file or slice kept'
 [[ -d "$SBX_SRV/workspaces/sbx_py312/sbx-keepme" ]] || fail 'uninstall removed workspace data'
 grep -q "left in place: $SBX_SRV/workspaces/sbx_py312" "$TMP/out" || fail 'uninstall does not say what it kept'
