@@ -6,7 +6,7 @@ import { parse } from 'yaml';
 import { ROUTES } from '../src/routes.js';
 import { CP_ERROR_CODES } from '../src/errors.js';
 import { CREDENTIAL_NAME_RE } from '../src/credential-store.js';
-import { SANDBOX_ID_RE } from '../src/sandbox-handlers.js';
+import { LABEL_KEY_RE, SANDBOX_ID_RE } from '../src/sandbox-handlers.js';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const doc = () => parse(readFileSync(resolve(REPO_ROOT, 'docs/api/openapi.yaml'), 'utf8'));
@@ -110,6 +110,21 @@ describe('§9.3 test 3 — contract drift', () => {
     expect(s.properties.state.enum).toEqual(['ready', 'terminated']);
     expect(s.properties.reason.enum).toEqual(['deleted', 'expired', null]);
     expect(s.properties.id.pattern).toBe(SANDBOX_ID_RE.source);
+  });
+
+  it('states the label rules the code enforces: key pattern, and no character-count limit', () => {
+    // The code limits a value to 256 UTF-8 BYTES; `maxLength` counts characters, so it would
+    // admit values the server refuses. The limit lives in the description instead.
+    const create = doc().paths['/v1/sandboxes'].post.requestBody.content['application/json'];
+    for (const labels of [
+      doc().components.schemas.Sandbox.properties.labels,
+      create.schema.properties.labels,
+    ]) {
+      expect(labels.propertyNames.pattern).toBe(LABEL_KEY_RE.source);
+      expect(labels.additionalProperties).toEqual({ type: 'string' });
+      expect(labels.maxProperties).toBe(16);
+      expect(labels.description).toContain('256 UTF-8 bytes');
+    }
   });
 
   it('documents the token response with execCa, nullable', () => {

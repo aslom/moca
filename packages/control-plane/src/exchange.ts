@@ -1,4 +1,4 @@
-import { timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { touchBundle } from './bundle-budget.js';
 import { inferenceAuthHeader, type InferenceAuthHeader } from './credential-store.js';
 import { CpError } from './errors.js';
@@ -100,10 +100,12 @@ export function checkStaticBearer(
     throw new CpError('unauthorized', `${what} authentication failed`);
   };
   if (!configured || !presented) deny();
-  const a = Buffer.from(presented!);
-  const b = Buffer.from(configured!);
-  // Constant-time, and length-checked first because timingSafeEqual throws on a length mismatch.
-  if (a.length !== b.length || !timingSafeEqual(a, b)) deny();
+  // Compare SHA-256 digests, not the values: both are always 32 bytes, so timingSafeEqual (which
+  // throws on a length mismatch) needs no length check first, and the time taken reveals neither
+  // the content nor the length of the configured bearer.
+  const a = createHash('sha256').update(presented!).digest();
+  const b = createHash('sha256').update(configured!).digest();
+  if (!timingSafeEqual(a, b)) deny();
 }
 
 /**

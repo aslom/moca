@@ -1,4 +1,5 @@
 import { CpError } from './errors.js';
+import { asRecord, auditBestEffort, isAdmin, seconds } from './handler-util.js';
 import type { CpDeps, Handler, RequestCtx } from './handlers.js';
 import { isEnrolled, type SandboxConfig } from './sandbox-config.js';
 import {
@@ -20,15 +21,11 @@ import type { TokenClaims } from './token.js';
 export const SANDBOX_ID_RE = /^sbx-[0-9a-f]{26}$/;
 const ID_HEX = 26;
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
-const LABEL_KEY_RE = /^[a-z0-9][a-z0-9._-]{0,62}$/;
+/** A label key; openapi.yaml's `propertyNames` states the same pattern (openapi-contract.test.ts). */
+export const LABEL_KEY_RE = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 const MAX_LABELS = 16;
 const MAX_LABEL_BYTES = 256;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-
-const nowS = (deps: CpDeps): number => Math.floor(deps.now() / 1000);
-const asRecord = (b: unknown): Record<string, unknown> =>
-  typeof b === 'object' && b !== null && !Array.isArray(b) ? (b as Record<string, unknown>) : {};
-const isAdmin = (p: TokenClaims): boolean => (p.roles ?? []).includes('admin');
 
 function service(deps: CpDeps): { cfg: SandboxConfig; store: SandboxStore } {
   // The sandbox profile always has both (configFromEnv, depsFromEnv); a harness one never mounts
@@ -78,7 +75,7 @@ async function assertSandboxOwner(
 ): Promise<SandboxRecord> {
   const p = requireEnrolled(ctx, deps);
   const id = ctx.params.id ?? '';
-  const rec = await service(deps).store.get(id, nowS(deps));
+  const rec = await service(deps).store.get(id, seconds(deps));
   if (!rec || (rec.owner !== p.sub && !(opts.admin && isAdmin(p)))) {
     throw new CpError('sandbox_not_found', 'no such sandbox');
   }
@@ -124,25 +121,9 @@ function parseLabels(raw: unknown): Record<string, string> {
   return { ...(o as Record<string, string>) };
 }
 
-/**
- * Best effort, like the credential routes' auditBestEffort: the write already happened, and an
- * audit outage must not report it as failed. The gap is logged, naming the id only.
- */
-async function audit(
-  deps: CpDeps,
-  subject: string,
-  sandboxId: string,
-  decision: string,
-): Promise<void> {
-  try {
-    await deps.index.audit({ subject, sandboxId, decision });
-  } catch (err) {
-    console.error(
-      `[control-plane] audit write failed for ${decision} ${sandboxId}: ` +
-        `${(err as Error).message} -- the write itself SUCCEEDED`,
-    );
-  }
-}
+/** Sandbox writes are audited best effort: the write already happened (handler-util.ts). */
+const audit = (deps: CpDeps, subject: string, sandboxId: string, decision: string) =>
+  auditBestEffort(deps, decision, sandboxId, { subject, sandboxId, decision });
 
 export const SANDBOX_HANDLERS: Record<string, Handler> = {
   listTemplates: async (ctx, deps) => {
@@ -171,7 +152,7 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
       throw new CpError('invalid_request', `name must match ${NAME_RE}`);
     }
     const labels = parseLabels(b.labels);
-    const now = nowS(deps);
+    const now = seconds(deps);
     const id = sandboxId(deps.newId());
     // Create does no I/O to the worker: the first Exec creates the workspace, and wsk being the
     // sandbox's own id is what makes a new sandbox always start empty (spec §5.1).
@@ -217,7 +198,7 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     if (state !== null && state !== 'ready' && state !== 'terminated') {
       throw new CpError('invalid_request', "state must be 'ready' or 'terminated'");
     }
-    const now = nowS(deps);
+    const now = seconds(deps);
     const recs = all ? await store.listAll(now) : await store.listByOwner(p.sub, now);
     const sandboxes = recs
       .map((r) => viewOf(r, now))
@@ -228,13 +209,13 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
 
   getSandbox: async (ctx, deps) => {
     const rec = await assertSandboxOwner(ctx, deps, { admin: true });
-    return { status: 200, body: sandboxBody(viewOf(rec, nowS(deps))) };
+    return { status: 200, body: sandboxBody(viewOf(rec, seconds(deps))) };
   },
 
   deleteSandbox: async (ctx, deps) => {
     const rec = await assertSandboxOwner(ctx, deps, { admin: true });
     const { cfg, store } = service(deps);
-    const now = nowS(deps);
+    const now = seconds(deps);
     const outcome = await store.markDeleted(rec.id, now, cfg.retentionS);
     // Retention ran out between the read and the delete: it is gone, as it would read now.
     if (outcome === 'not_found') throw new CpError('sandbox_not_found', 'no such sandbox');
@@ -250,7 +231,7 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
   mintSandboxToken: async (ctx, deps) => {
     const rec = await assertSandboxOwner(ctx, deps, { admin: false });
     const { cfg } = service(deps);
-    const now = nowS(deps);
+    const now = seconds(deps);
     const v = viewOf(rec, now);
     // Expiry is computed (spec §5.2): a sandbox past its expiresAt refuses here with no job run.
     if (v.state === 'terminated') {
@@ -290,7 +271,7 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
   janitorSandboxes: async (ctx, deps) => {
     if (!ctx.janitorAuthorized) throw new CpError('unauthorized', 'janitor authentication failed');
     const { store } = service(deps);
-    const now = nowS(deps);
+    const now = seconds(deps);
     const live: { wsk: string; wrk: string }[] = [];
     const terminated: { wsk: string; wrk: string; terminatedAt: number }[] = [];
     for (const rec of await store.listAll(now)) {

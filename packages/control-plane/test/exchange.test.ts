@@ -74,8 +74,10 @@ describe('checkStaticBearer', () => {
   it('accepts the configured value and names what failed otherwise', () => {
     expect(() => checkStaticBearer('shared-abc', 'shared-abc', 'janitor')).not.toThrow(); // notsecret
     for (const [p, c] of [
-      ['shared-xyz', 'shared-abc'], // same length: reaches timingSafeEqual
-      ['nope', 'shared-abc'],
+      ['shared-xyz', 'shared-abc'], // same length, different content
+      ['nope', 'shared-abc'], // shorter
+      ['shared-abc-and-more', 'shared-abc'], // longer, with the configured value as its prefix
+      ['shared-ab', 'shared-abc'], // a prefix of the configured value
       [undefined, 'shared-abc'],
       ['anything', undefined],
       ['', ''],
@@ -83,6 +85,24 @@ describe('checkStaticBearer', () => {
       expect(() => checkStaticBearer(p, c, 'janitor')).toThrow(
         expect.objectContaining({ code: 'unauthorized', message: 'janitor authentication failed' }),
       );
+    }
+  });
+
+  it('refuses a bearer of the wrong length as unauthorized, at any length', () => {
+    // The values are compared as SHA-256 digests, so a bearer of any length reaches the one
+    // constant-time compare: there is no length shortcut to time. Without the digests,
+    // timingSafeEqual would throw a RangeError on these instead of the CpError asserted here.
+    for (const p of ['x', 'shared-ab', 'shared-abc-', 'y'.repeat(4096), '\u00e9'.repeat(5)]) {
+      let thrown: unknown;
+      try {
+        checkStaticBearer(p, 'shared-abc', 'janitor'); // notsecret
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown, p.slice(0, 12)).toMatchObject({
+        code: 'unauthorized',
+        message: 'janitor authentication failed',
+      });
     }
   });
 

@@ -228,8 +228,9 @@ components:
         labels:
           type: object
           maxProperties: 16
-          additionalProperties: { type: string, maxLength: 256 }
-          description: free-form string pairs (at most 16, 256 bytes each)
+          propertyNames: { pattern: '^[a-z0-9][a-z0-9._-]{0,62}$' }
+          additionalProperties: { type: string }
+          description: free-form string pairs (at most 16; each value at most 256 UTF-8 bytes)
   responses:
     Unauthorized:
       description: no token, a bad token, or a failed exchange or janitor authentication
@@ -1013,7 +1014,9 @@ paths:
                 labels:
                   type: object
                   maxProperties: 16
-                  additionalProperties: { type: string, maxLength: 256 }
+                  propertyNames: { pattern: '^[a-z0-9][a-z0-9._-]{0,62}$' }
+                  additionalProperties: { type: string }
+                  description: at most 16 pairs; each value at most 256 UTF-8 bytes
       responses:
         '201':
           description: the new sandbox, ready

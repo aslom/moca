@@ -1,7 +1,7 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ROUTES, matchRoute } from '../src/routes.js';
+import { ROUTES, matchRoute, type RouteSpec } from '../src/routes.js';
 import { buildHandler } from '../src/server.js';
 import type { CpConfig } from '../src/handlers.js';
 import { makeDeps, NOW_MS, type TestDeps } from './helpers/deps.js';
@@ -63,6 +63,20 @@ const apiToken = (d: TestDeps, sub: string, roles: string[]) =>
 
 const concrete = (path: string) => path.replace(/\{[^}]+\}/g, 'x');
 
+/** Every route in `routes` answers exactly as an unknown path does: an unmounted route is invisible. */
+async function expectUnknownPath(base: string, routes: readonly RouteSpec[]): Promise<void> {
+  const unknownBody = await (await fetch(`${base}/no/such/path`)).json();
+  for (const r of routes) {
+    const res = await fetch(base + concrete(r.path), {
+      method: r.method,
+      headers: { authorization: 'Bearer x', 'content-type': 'application/json' },
+      body: r.method === 'GET' || r.method === 'DELETE' ? undefined : '{}',
+    });
+    expect(res.status, `${r.method} ${r.path}`).toBe(404);
+    expect(await res.json(), `${r.method} ${r.path}`).toEqual(unknownBody);
+  }
+}
+
 describe('route profiles (SBX0 §4.1)', () => {
   it('declares a non-empty profile list on every route', () => {
     expect(ROUTES.filter((r) => !r.profiles || r.profiles.length === 0).map((r) => r.path)).toEqual(
@@ -88,17 +102,7 @@ describe('route profiles (SBX0 §4.1)', () => {
     const base = await serve('sandbox');
     const harnessOnly = ROUTES.filter((r) => !r.profiles.includes('sandbox'));
     expect(harnessOnly.length).toBeGreaterThan(10); // guards the guard
-    const unknown = await fetch(`${base}/no/such/path`);
-    const unknownBody = await unknown.json();
-    for (const r of harnessOnly) {
-      const res = await fetch(base + concrete(r.path), {
-        method: r.method,
-        headers: { authorization: 'Bearer x', 'content-type': 'application/json' },
-        body: r.method === 'GET' || r.method === 'DELETE' ? undefined : '{}',
-      });
-      expect(res.status, `${r.method} ${r.path}`).toBe(404);
-      expect(await res.json(), `${r.method} ${r.path}`).toEqual(unknownBody);
-    }
+    await expectUnknownPath(base, harnessOnly);
   });
 
   it('mounts the sandbox routes on the sandbox profile only', () => {
@@ -112,16 +116,7 @@ describe('route profiles (SBX0 §4.1)', () => {
     const base = await serve('harness');
     const sandboxOnly = ROUTES.filter((r) => !r.profiles.includes('harness'));
     expect(sandboxOnly.map((r) => r.operationId).sort()).toEqual(SANDBOX_ONLY);
-    const unknownBody = await (await fetch(`${base}/no/such/path`)).json();
-    for (const r of sandboxOnly) {
-      const res = await fetch(base + concrete(r.path), {
-        method: r.method,
-        headers: { authorization: 'Bearer x', 'content-type': 'application/json' },
-        body: r.method === 'GET' || r.method === 'DELETE' ? undefined : '{}',
-      });
-      expect(res.status, `${r.method} ${r.path}`).toBe(404);
-      expect(await res.json(), `${r.method} ${r.path}`).toEqual(unknownBody);
-    }
+    await expectUnknownPath(base, sandboxOnly);
   });
 
   it('serves the janitor read only with the janitor bearer (SBX0 §8.3)', async () => {

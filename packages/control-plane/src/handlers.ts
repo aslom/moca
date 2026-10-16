@@ -20,6 +20,7 @@ import {
   type BundleBudgetRedisLike,
 } from './bundle-budget.js';
 import { CpError } from './errors.js';
+import { asRecord, auditBestEffort, isAdmin, seconds } from './handler-util.js';
 import { subjectHash } from './subject-document.js';
 import {
   resolveInferenceName,
@@ -197,11 +198,6 @@ export async function assertOwner(
   return rec;
 }
 
-const asRecord = (body: unknown): Record<string, unknown> =>
-  typeof body === 'object' && body !== null && !Array.isArray(body)
-    ? (body as Record<string, unknown>)
-    : {};
-
 /** A query integer must be rejected, not coerced: `parseInt('abc')` is NaN and pages by nothing. */
 function intQuery(query: URLSearchParams, name: string): number | undefined {
   const raw = query.get(name);
@@ -210,8 +206,6 @@ function intQuery(query: URLSearchParams, name: string): number | undefined {
   if (!Number.isFinite(n)) throw new CpError('invalid_request', `${name} must be a number`);
   return n;
 }
-
-const seconds = (deps: CpDeps): number => Math.floor(deps.now() / 1000);
 
 /**
  * The body both grants answer with (device flow and refresh, B14 §4.3): an API token now, and the
@@ -246,39 +240,6 @@ async function turnInFlight(sessionId: string, deps: CpDeps): Promise<boolean> {
   const started = Number(runtime.turnStartedAt ?? 0);
   const ended = Number(runtime.turnEndedAt ?? 0);
   return started > 0 && started > ended;
-}
-
-/**
- * Audit a CREDENTIAL route without letting the audit's own failure change the caller's status.
- *
- * Spec §9.2 promises "Redis down => session routes 503, while /v1/credentials stays up, because §7.1
- * put them in different stores". The credential store is Kubernetes Secrets and knows nothing about
- * Redis -- but `index.audit()` is a Redis write, and `OwnershipIndex.guard` turns any transport
- * failure into `redis_unavailable` (503). Awaiting it after a successful Secret patch therefore
- * reported 503 for a write that HAD happened: the status lied, and a user could not repair their
- * credential during a Redis outage. Availability of the repair path is worth more than the audit
- * record, so the audit is what gives way.
- *
- * Deliberately NOT applied to `audit` globally, and never to the session routes: their 503 is correct
- * and spec-mandated, because those routes' own state lives in the very Redis that is down.
- *
- * The swallow is loud. An audit gap must be discoverable, so it logs the route and the credential
- * NAME -- never the value, which this function is never given in the first place.
- */
-async function auditBestEffort(
-  deps: CpDeps,
-  route: string,
-  target: string,
-  entry: Parameters<OwnershipIndex['audit']>[0],
-): Promise<void> {
-  try {
-    await deps.index.audit(entry);
-  } catch (err) {
-    console.error(
-      `[control-plane] audit write failed for ${route} ${target}: ` +
-        `${(err as Error).message} -- the write itself SUCCEEDED`,
-    );
-  }
 }
 
 /** The body of putConfigBundle; `seen` collects what the refusal audit row can name. */
@@ -691,7 +652,7 @@ export const HANDLERS: Record<string, Handler> = {
     if (requestedOwner !== null && requestedOwner !== p.sub) {
       // 403, not 404: "authenticated but insufficiently privileged on a resource you may know
       // exists" is exactly what 403 is reserved for (spec §8.1).
-      if (!(p.roles ?? []).includes('admin')) {
+      if (!isAdmin(p)) {
         throw new CpError('forbidden', '?owner= requires the admin role');
       }
       owner = requestedOwner;
@@ -895,7 +856,7 @@ export const HANDLERS: Record<string, Handler> = {
           throw new CpError('config_bundle_not_found', 'no config bundle with that digest');
         }
         // A bundle with no budget entry was stored by /promote straight into Redis: nobody's to delete.
-        if (!(p.roles ?? []).includes('admin') && owner !== subjectHash(p.sub)) {
+        if (!isAdmin(p) && owner !== subjectHash(p.sub)) {
           throw new CpError(
             'forbidden',
             'only the subject that uploaded this bundle, or an admin, may delete it',

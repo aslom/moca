@@ -129,7 +129,7 @@ export {
   type SandboxConfig,
   type SandboxTemplate,
 } from './sandbox-config.js';
-export { SANDBOX_HANDLERS, SANDBOX_ID_RE } from './sandbox-handlers.js';
+export { LABEL_KEY_RE, SANDBOX_HANDLERS, SANDBOX_ID_RE } from './sandbox-handlers.js';
 export {
   checkExchangeAuth,
   checkStaticBearer,
