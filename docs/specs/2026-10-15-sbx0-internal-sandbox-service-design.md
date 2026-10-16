@@ -509,10 +509,14 @@ supported CLI.
 
 **Per template:**
 
-- a systemd unit `sbx-worker@<template>` running `microvm-worker`, configured from its bundle;
-- its own `SH_SNAPSHOT_IMAGE`, memory budget slice and standby depth;
+- a systemd unit `sbx-worker@<worker>` running `microvm-worker`, configured from its bundle;
+- its own `SH_SNAPSHOT_IMAGE`, memory budget (`SH_MAX_COMMITTED_MB`) and standby depth;
 - the shared `SH_WORKSPACE_IDLE`;
-- all units in one memory slice.
+- **its own slice, jail directory and workspace root:** `sbx-<worker>.slice` under a parent
+  `sbx.slice` (so `SH_PARENT_CGROUP=sbx.slice/sbx-<worker>.slice`), `SH_CHROOT_BASE` and
+  `SH_WORKSPACE_ROOT` under per-worker directories. Never one shared slice: each worker sweeps its
+  parent cgroup for orphans at startup (`vmpool/cgroup.go`), so a restart of one worker would kill
+  every other worker's VMs.
 
 **Snapshots** are built with `deploy/microvm/build-snapshot.sh` from an OCI image. The curated set
 for the cohort, with contents agreed before 1c:
@@ -533,7 +537,7 @@ A systemd timer on the KVM host (default every 15 min) that:
 
 1. lists sandboxes terminated more than 1 h ago, through `GET /v1/janitor/terminated` with its
    token (§8.1), keeping only those whose `wrk` is one of this host's template workers;
-2. for each, renames `<workspace root>/<wsk>` to `.reclaiming-<wsk>-<ts>` (the worker's own
+2. for each, renames `<workspace root of wrk>/<wsk>` to `.reclaiming-<wsk>-<ts>` (the worker's own
    detach-then-remove pattern, so no key can reach the tree), then removes it;
 3. removes `.reclaiming-*` trees older than 1 h left by crashed workers;
 4. prints one JSON summary line (`ts, examined, removed, bytes_freed, errors`).
