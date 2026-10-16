@@ -92,8 +92,9 @@ no new reliance on it, and removes the old one (Moca no longer chooses storage n
 
 ### 2.2 The Context Service contract (companion change, in scope)
 
-Recorded here because Moca's half is meaningless without it; to be implemented in
-`rossoctl/context-service` and tracked there. **This is most of the Context Service work, not a
+Recorded here because Moca's half is meaningless without it; tracked as
+[rossoctl/context-service#59](https://github.com/rossoctl/context-service/issues/59). **This is
+most of the Context Service work, not a
 detail:** at `main 7951826` a Context _is_ its managed PVC — the name and type are PVC labels,
 the current revision, revision history and frozen revision are PVC annotations (`manager.go`,
 `PublishContextRevision`), owner, grants, consumers and audit are annotations too (`access.go`),
@@ -212,7 +213,8 @@ the derived name in the workspace view (the JSON view already carries `workspace
 Closes MI1 §13's "per-subject PVC authorization" bullet (the issue's other half, subject-scoped
 workload names, was already closed with it). The MI1 §4.3 paragraph keeps its historical account of
 the stop-gap; §13's bullet records the closure in place, per that spec's amendment convention. The
-Context Service half is tracked in `rossoctl/context-service`.
+Context Service half is tracked as
+[rossoctl/context-service#59](https://github.com/rossoctl/context-service/issues/59).
 
 ---
 
