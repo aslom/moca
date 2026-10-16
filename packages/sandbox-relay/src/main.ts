@@ -404,7 +404,13 @@ async function stopGracefully(servers: Server[], relay: Relay, close?: () => Pro
 }
 
 export async function startRelay(
-  opts: { port?: number; execAddr?: string; deps?: RelayServerDeps; env?: NodeJS.ProcessEnv; keepalive?: Keepalive } = {},
+  opts: {
+    port?: number;
+    execAddr?: string;
+    deps?: RelayServerDeps;
+    env?: NodeJS.ProcessEnv;
+    keepalive?: Keepalive;
+  } = {},
 ): Promise<{ port: number; execPort?: number; shutdown: () => Promise<void> }> {
   const env = opts.env ?? process.env;
   // The store startRelay built itself, and so closes on shutdown; injected deps belong to the caller.

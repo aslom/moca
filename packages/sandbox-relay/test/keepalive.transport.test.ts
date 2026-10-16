@@ -53,7 +53,15 @@ async function attachSilentWorker(addr: string, sandboxId: string, silentMs: num
     }, silentMs);
   });
   stream.write({
-    hello: { sandboxId, labels: {}, capabilities: [], image: '', arch: 'amd64', capacityMax: 1, trust: 'trusted' },
+    hello: {
+      sandboxId,
+      labels: {},
+      capabilities: [],
+      image: '',
+      arch: 'amd64',
+      capacityMax: 1,
+      trust: 'trusted',
+    },
   } as WorkerFrame);
   closers.push(() => {
     stream.cancel();
@@ -97,7 +105,14 @@ function exec(addr: string, sandboxId: string) {
   const call = client.exec(
     {
       sandboxId,
-      exec: { reqId: 7, command: 'sleep 2', stdin: new Uint8Array(), timeoutS: 30, streaming: true, workspaceKey: 'k' },
+      exec: {
+        reqId: 7,
+        command: 'sleep 2',
+        stdin: new Uint8Array(),
+        timeoutS: 30,
+        streaming: true,
+        workspaceKey: 'k',
+      },
     },
     md,
   );
