@@ -16,7 +16,8 @@ import { subjectHash } from './subject-document.js';
  * whether a key still exists: the `live` ZSET (id -> expiresAt) is the truth for quotas and for name
  * uniqueness, which keeps this store and MemorySandboxStore in step under one injected clock. Key
  * TTLs are retention only: the record hash lives until terminatedAt + retention (EXPIREAT on create,
- * EXPIRE on delete), the name key until expiresAt (PXAT).
+ * EXPIRE on delete), the name key until expiresAt + retention (PXAT). The name key's TTL never
+ * decides liveness, so a Redis clock running ahead cannot free a name whose holder is still live.
  *
  * Subjects appear in key names only as subjectHash, as ownerKey does, so the keyspace names no logins.
  *
@@ -38,11 +39,12 @@ export interface SandboxRedisLike {
 export const DEFAULT_SANDBOX_PREFIX = 'sbx:';
 
 // KEYS: live, owner, all, rec, name (a placeholder when unnamed).
-// ARGV: now, expiresAt, perSubject, total, retention, id, createdAt, hasName, expiresAtMs,
+// ARGV: now, expiresAt, perSubject, total, retention, id, createdAt, hasName, nameGcAtMs,
 // field1, value1, ...
-// The name check asks `live` whether the holder is still live at `now`, rather than trusting the
-// name key's PXAT: a holder that is expired by the caller's clock frees the name even if Redis's
-// clock has not reached the PXAT yet, exactly as in the memory model.
+// The name key only says WHO last took the name; `live` alone says whether that holder is still
+// live at `now`, exactly as in the memory model. Its PXAT is (expiresAt + retention), garbage
+// collection only: a holder expired by the caller's clock frees the name though the key remains,
+// and a Redis clock running ahead cannot drop the key while the holder is still live.
 const CREATE = `
 local now = tonumber(ARGV[1]); local exp = tonumber(ARGV[2])
 local per = tonumber(ARGV[3]); local tot = tonumber(ARGV[4]); local ret = tonumber(ARGV[5])
@@ -144,7 +146,7 @@ export class RedisSandboxStore implements SandboxStore {
           rec.id,
           String(rec.createdAt),
           rec.name ? '1' : '0',
-          String(rec.expiresAt * 1000),
+          String((rec.expiresAt + l.retentionS) * 1000),
           ...fields,
         ],
       })) as CreateOutcome;

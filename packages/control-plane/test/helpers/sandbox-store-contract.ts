@@ -59,6 +59,20 @@ export function sandboxStoreContract(name: string, make: MakeStore): void {
       await done();
     });
 
+    it('does not count expired sandboxes against the total quota', async () => {
+      const { store, done } = await make();
+      const limits = { ...LIMITS, perSubject: 3, total: 3 };
+      for (const owner of ['github:1', 'github:2', 'github:3']) {
+        expect(
+          await store.create(rec({ owner, tenant: owner, expiresAt: T0 + 10 }), limits, T0),
+        ).toBe('ok');
+      }
+      expect(
+        await store.create(rec({ owner: 'github:4', tenant: 'github:4' }), limits, T0 + 20),
+      ).toBe('ok');
+      await done();
+    });
+
     it('enforces the total quota across subjects', async () => {
       const { store, done } = await make();
       for (const owner of ['github:1', 'github:2', 'github:3']) {
@@ -94,9 +108,19 @@ export function sandboxStoreContract(name: string, make: MakeStore): void {
       await done();
     });
 
+    it("frees a name once its holder is expired by the caller's clock, with no wait", async () => {
+      const { store, done } = await make();
+      // Liveness is the caller's nowS, not a Redis key TTL: wall time never reaches T0 + 600 here.
+      expect(await store.create(rec({ name: 'x', expiresAt: T0 + 600 }), LIMITS, T0)).toBe('ok');
+      expect(await store.create(rec({ name: 'x', expiresAt: T0 + 1200 }), LIMITS, T0 + 601)).toBe(
+        'ok',
+      );
+      await done();
+    });
+
     it('frees a name at expiry', async () => {
       const { store, done } = await make();
-      // Real time for Redis: PXAT must pass, so this one sleeps just past a 1 s expiry.
+      // Real time: both the caller's clock and Redis's pass a 1 s expiry, so this one sleeps.
       expect(await store.create(rec({ name: 'soon', expiresAt: T0 + 1 }), LIMITS, T0)).toBe('ok');
       await new Promise((r) => setTimeout(r, (T0 + 2) * 1000 - Date.now() + 50));
       expect(await store.create(rec({ name: 'soon' }), LIMITS, T0 + 2)).toBe('ok');

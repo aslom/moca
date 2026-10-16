@@ -25,6 +25,8 @@ describe('MemorySandboxStore retention', () => {
     await store.create(rec, { perSubject: 1, total: 1, retentionS: 50 }, 100);
     expect(await store.markDeleted('sbx-r', 150, 50)).toBe('deleted');
     expect(await store.get('sbx-r', 199)).not.toBeNull();
+    // Gone AT terminatedAt + retention, as a Redis key with EXPIREAT t is gone at t.
+    expect(await store.get('sbx-r', 200)).toBeNull();
     expect(await store.get('sbx-r', 201)).toBeNull();
   });
 });

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { createClient } from 'redis';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { RedisSandboxStore, type SandboxRedisLike } from '../src/sandbox-redis.js';
+import { subjectHash } from '../src/subject-document.js';
 import { sandboxStoreContract } from './helpers/sandbox-store-contract.js';
 
 // Needs Redis on 6379, as refresh-redis.test.ts does; CI provides a redis:7 service.
@@ -51,6 +52,32 @@ describe('RedisSandboxStore TTLs (retention is the key lifetime)', () => {
     const ttl2 = await client.ttl(`${prefix}sandbox:sbx-t`);
     expect(ttl2).toBeGreaterThan(490);
     expect(ttl2).toBeLessThanOrEqual(500);
+    await done();
+  });
+
+  it('keeps the name key until expiresAt + retention, so only `live` decides who holds a name', async () => {
+    const { prefix, store, done } = isolated();
+    const now = Math.floor(Date.now() / 1000);
+    await store.create(
+      {
+        id: 'sbx-n',
+        owner: 'github:1',
+        tenant: 'github:1',
+        name: 'web',
+        template: 'd',
+        worker: 'w',
+        wsk: 'sbx-n',
+        labels: {},
+        createdAt: now,
+        expiresAt: now + 1000,
+      },
+      { perSubject: 1, total: 1, retentionS: 500 },
+      now,
+    );
+    // Garbage collection only: a Redis clock running ahead must not free a name whose holder is live.
+    const ttl = await client.ttl(`${prefix}name:${subjectHash('github:1')}:web`);
+    expect(ttl).toBeGreaterThan(1400);
+    expect(ttl).toBeLessThanOrEqual(1500);
     await done();
   });
 });
