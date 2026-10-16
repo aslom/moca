@@ -227,10 +227,13 @@ export function verifyJws(
     return bad('unparseable token header');
   }
   if (typeof header !== 'object' || header === null) bad('unparseable token header');
+  // Reject `alg: none` and every non-EdDSA alg BEFORE looking at the key: accepting the header's
+  // word on the algorithm is the classic JWT downgrade.
   if (header.alg !== 'EdDSA') bad('unsupported alg');
   if (header.typ !== typ) bad(`wrong token typ (want ${typ})`);
   if (typeof header.kid !== 'string') bad('token header has no kid');
   const key = keys.get(header.kid);
+  // `bad()` is declared `: never`, so control flow cannot reach past it -- no `key!` needed.
   if (!key) bad('unknown token key id');
   if (!cryptoVerify(null, Buffer.from(`${h}.${p}`), key, Buffer.from(s, 'base64url'))) {
     bad('bad token signature');

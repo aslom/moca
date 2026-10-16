@@ -127,6 +127,41 @@ describe('writeError', () => {
     });
   });
 
+  it('never lets extra overwrite the core fields', () => {
+    // `extra` is merged first and the core fields last: a handler passing `error`, `message` or
+    // `sessionId` in extra cannot relabel the code a client branches on.
+    const { res, calls } = fakeRes();
+    writeError(
+      res as never,
+      new CpError('sandbox_terminated', 'sandbox was deleted', 'sid-1', {
+        error: 'internal_error',
+        message: 'forged',
+        sessionId: 'sid-forged',
+        reason: 'deleted',
+      }),
+    );
+    expect(calls.status).toBe(409);
+    expect(JSON.parse(calls.body!)).toEqual({
+      error: 'sandbox_terminated',
+      message: 'sandbox was deleted',
+      sessionId: 'sid-1',
+      reason: 'deleted',
+    });
+  });
+
+  it('drops a message or sessionId supplied only through extra', () => {
+    const { res, calls } = fakeRes();
+    writeError(
+      res as never,
+      new CpError('sandbox_terminated', undefined, undefined, {
+        message: 'forged',
+        sessionId: 'sid-forged',
+        reason: 'expired',
+      }),
+    );
+    expect(JSON.parse(calls.body!)).toEqual({ error: 'sandbox_terminated', reason: 'expired' });
+  });
+
   it('maps an unknown throwable to internal_error without leaking its message', () => {
     const { res, calls } = fakeRes();
     writeError(res as never, new Error('ECONNREFUSED redis://10.0.0.1:6379 password=hunter2'));

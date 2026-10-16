@@ -140,11 +140,13 @@ interface WritableRes {
 export function writeError(res: WritableRes, err: unknown): void {
   if (res.headersSent) return;
   if (err instanceof CpError) {
-    const body: Record<string, string> = { error: err.code };
+    // `extra` first and the core fields last, so an extra field can never overwrite them: a stray
+    // `error` in extra must not relabel the code a client branches on. A core field the error does
+    // not carry is dropped from extra too, rather than supplied through it.
+    const { error: _e, message: _m, sessionId: _s, ...extra } = err.extra ?? {};
+    const body: Record<string, string> = { ...extra, error: err.code };
     if (err.message && err.message !== err.code) body.message = err.message;
     if (err.sessionId) body.sessionId = err.sessionId;
-    if (err.extra) Object.assign(body, err.extra);
-    body.error = err.code;
     res.writeHead(statusFor(err.code), JSON_HEADERS);
     res.end(JSON.stringify(body));
     return;
