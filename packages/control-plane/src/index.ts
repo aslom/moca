@@ -129,8 +129,10 @@ export {
   type SandboxConfig,
   type SandboxTemplate,
 } from './sandbox-config.js';
+export { SANDBOX_HANDLERS, SANDBOX_ID_RE } from './sandbox-handlers.js';
 export {
   checkExchangeAuth,
+  checkStaticBearer,
   exchangeCredential,
   placeholderFor,
   refuseMisdirectedSecret,

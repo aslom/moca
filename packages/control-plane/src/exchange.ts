@@ -86,9 +86,29 @@ export function viewTier(rec: SessionRecord, tiers: CpConfig['sandboxTiers']): s
 }
 
 /**
+ * The one check behind every static-bearer route kind (`exchange`, `janitor`): the presented
+ * bearer against the configured one. FAIL-CLOSED: with none configured, EVERY call is rejected --
+ * an unconfigured deployment must not accept anything. The message names `what` and never the
+ * presented value, so a wrong token is not logged with it.
+ */
+export function checkStaticBearer(
+  presented: string | undefined,
+  configured: string | undefined,
+  what: string,
+): void {
+  const deny = (): never => {
+    throw new CpError('unauthorized', `${what} authentication failed`);
+  };
+  if (!configured || !presented) deny();
+  const a = Buffer.from(presented!);
+  const b = Buffer.from(configured!);
+  // Constant-time, and length-checked first because timingSafeEqual throws on a length mismatch.
+  if (a.length !== b.length || !timingSafeEqual(a, b)) deny();
+}
+
+/**
  * Shared-bearer auth for /internal/credentials (spec §5.3.1), reusing the pattern this repo already
- * runs for the relay and remote worker. FAIL-CLOSED: with no token configured, EVERY call is
- * rejected -- an unconfigured deployment must not accept anything.
+ * runs for the relay and remote worker.
  *
  * mTLS remains the target, and Z1 is what makes it cheap: once per-session SPIFFE identities exist,
  * the exchange authorizes on the peer's SVID and gains what a shared token cannot -- the CALLER
@@ -100,16 +120,7 @@ export function checkExchangeAuth(
   presented: string | undefined,
   configured: string | undefined,
 ): void {
-  // The message never contains the presented value: a wrong token must not be logged with it.
-  const deny = () => {
-    throw new CpError('unauthorized', 'exchange authentication failed');
-  };
-  if (!configured) deny();
-  if (!presented) deny();
-  const a = Buffer.from(presented!);
-  const b = Buffer.from(configured!);
-  // Constant-time, and length-checked first because timingSafeEqual throws on a length mismatch.
-  if (a.length !== b.length || !timingSafeEqual(a, b)) deny();
+  checkStaticBearer(presented, configured, 'exchange');
 }
 
 /**

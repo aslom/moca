@@ -47,6 +47,7 @@ export interface RouteSpec {
 
 const BOTH: readonly RouteProfile[] = ['harness', 'sandbox'];
 const HARNESS: readonly RouteProfile[] = ['harness'];
+const SANDBOX: readonly RouteProfile[] = ['sandbox'];
 
 export const ROUTES: readonly RouteSpec[] = [
   {
@@ -248,6 +249,69 @@ export const ROUTES: readonly RouteSpec[] = [
     sessionScoped: false,
     profiles: HARNESS,
     operationId: 'exchangeCredential',
+  },
+  // SBX0 §5.1: the sandbox resource, on the sandbox profile only (sandbox-handlers.ts).
+  {
+    method: 'GET',
+    path: '/v1/templates',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: SANDBOX,
+    operationId: 'listTemplates',
+  },
+  {
+    method: 'POST',
+    path: '/v1/sandboxes',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: SANDBOX,
+    operationId: 'createSandbox',
+  },
+  {
+    method: 'GET',
+    path: '/v1/sandboxes',
+    auth: 'api',
+    sessionScoped: false,
+    adminOnlyQuery: 'all',
+    profiles: SANDBOX,
+    operationId: 'listSandboxes',
+  },
+  {
+    method: 'GET',
+    path: '/v1/sandboxes/{id}',
+    auth: 'api',
+    sessionScoped: false,
+    sandboxScoped: true,
+    profiles: SANDBOX,
+    operationId: 'getSandbox',
+  },
+  {
+    method: 'DELETE',
+    path: '/v1/sandboxes/{id}',
+    auth: 'api',
+    sessionScoped: false,
+    sandboxScoped: true,
+    profiles: SANDBOX,
+    operationId: 'deleteSandbox',
+  },
+  {
+    method: 'POST',
+    path: '/v1/sandboxes/{id}/token',
+    auth: 'api',
+    sessionScoped: false,
+    sandboxScoped: true,
+    bodyRequired: false,
+    profiles: SANDBOX,
+    operationId: 'mintSandboxToken',
+  },
+  // The host janitor's read (SBX0 §8.3): what to keep and what to free, nothing else.
+  {
+    method: 'GET',
+    path: '/v1/janitor/sandboxes',
+    auth: 'janitor',
+    sessionScoped: false,
+    profiles: SANDBOX,
+    operationId: 'janitorSandboxes',
   },
 ];
 

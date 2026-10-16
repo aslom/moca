@@ -55,6 +55,7 @@ import type { SandboxTiers } from './sandbox-tiers.js';
 import type { RouteProfile } from './routes.js';
 import { isEnrolled, type SandboxConfig } from './sandbox-config.js';
 import type { SandboxStore } from './sandbox-store.js';
+import { SANDBOX_HANDLERS } from './sandbox-handlers.js';
 
 export interface CpConfig {
   /** Which routes this control plane mounts (SBX0 §4.1). Absent means `harness`. */
@@ -977,4 +978,7 @@ export const HANDLERS: Record<string, Handler> = {
     }
     return { status: 200, body: 'ok' };
   },
+
+  // SBX0 §5.1: the sandbox resource (sandbox-handlers.ts), mounted on the sandbox profile only.
+  ...SANDBOX_HANDLERS,
 };

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   checkExchangeAuth,
+  checkStaticBearer,
   exchangeCredential,
   placeholderFor,
   resolveInference,
@@ -65,6 +66,30 @@ describe('checkExchangeAuth', () => {
     } catch (e) {
       expect((e as Error).message).not.toContain('super-secret-guess'); // notsecret
     }
+  });
+});
+
+describe('checkStaticBearer', () => {
+  // The one constant-time compare behind both the exchange and the janitor bearers.
+  it('accepts the configured value and names what failed otherwise', () => {
+    expect(() => checkStaticBearer('shared-abc', 'shared-abc', 'janitor')).not.toThrow(); // notsecret
+    for (const [p, c] of [
+      ['shared-xyz', 'shared-abc'], // same length: reaches timingSafeEqual
+      ['nope', 'shared-abc'],
+      [undefined, 'shared-abc'],
+      ['anything', undefined],
+      ['', ''],
+    ] as const) {
+      expect(() => checkStaticBearer(p, c, 'janitor')).toThrow(
+        expect.objectContaining({ code: 'unauthorized', message: 'janitor authentication failed' }),
+      );
+    }
+  });
+
+  it('is what checkExchangeAuth runs, with its message unchanged', () => {
+    expect(() => checkExchangeAuth('x', 'y')).toThrow(
+      expect.objectContaining({ message: 'exchange authentication failed' }),
+    );
   });
 });
 

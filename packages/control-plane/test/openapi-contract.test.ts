@@ -6,6 +6,7 @@ import { parse } from 'yaml';
 import { ROUTES } from '../src/routes.js';
 import { CP_ERROR_CODES } from '../src/errors.js';
 import { CREDENTIAL_NAME_RE } from '../src/credential-store.js';
+import { SANDBOX_ID_RE } from '../src/sandbox-handlers.js';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const doc = () => parse(readFileSync(resolve(REPO_ROOT, 'docs/api/openapi.yaml'), 'utf8'));
@@ -65,13 +66,70 @@ describe('§9.3 test 3 — contract drift', () => {
       if (auth === 'none') expect(schemes, `${method} ${path}`).toEqual([]);
       if (auth === 'api') expect(schemes, `${method} ${path}`).toEqual(['sessionToken']);
       if (auth === 'exchange') expect(schemes, `${method} ${path}`).toEqual(['exchangeToken']);
+      if (auth === 'janitor') expect(schemes, `${method} ${path}`).toEqual(['janitorToken']);
     }
+    // Every auth kind the route table uses is one of the four handled above.
+    expect([...new Set(ROUTES.map((r) => r.auth))].sort()).toEqual([
+      'api',
+      'exchange',
+      'janitor',
+      'none',
+    ]);
   });
 
-  it('declares both security schemes it references', () => {
+  it('declares the three security schemes it references', () => {
     expect(Object.keys(doc().components?.securitySchemes ?? {}).sort()).toEqual([
       'exchangeToken',
+      'janitorToken',
       'sessionToken',
+    ]);
+  });
+
+  it('states the sandbox id pattern the code generates (SBX0 §5.1)', () => {
+    const param = doc().components.parameters.sandboxId;
+    expect(param.schema.pattern).toBe(SANDBOX_ID_RE.source);
+  });
+
+  it('documents the Sandbox shape of spec §5.1 exactly', () => {
+    const s = doc().components.schemas.Sandbox;
+    const fields = [
+      'id',
+      'owner',
+      'name',
+      'template',
+      'state',
+      'reason',
+      'createdAt',
+      'expiresAt',
+      'terminatedAt',
+      'labels',
+    ];
+    expect([...s.required].sort()).toEqual([...fields].sort());
+    expect(Object.keys(s.properties).sort()).toEqual([...fields].sort());
+    expect(s.additionalProperties).toBe(false);
+    expect(s.properties.state.enum).toEqual(['ready', 'terminated']);
+    expect(s.properties.reason.enum).toEqual(['deleted', 'expired', null]);
+    expect(s.properties.id.pattern).toBe(SANDBOX_ID_RE.source);
+  });
+
+  it('documents the token response with execCa, nullable', () => {
+    const ok = doc().paths['/v1/sandboxes/{id}/token'].post.responses['200'];
+    const schema = ok.content['application/json'].schema;
+    expect([...schema.required].sort()).toEqual(
+      ['execCa', 'execEndpoint', 'expiresAt', 'token', 'wrk', 'wsk'].sort(),
+    );
+    expect(schema.properties.execCa.type).toEqual(['string', 'null']);
+  });
+
+  it("documents the janitor's read as spec §5.1 shapes it", () => {
+    const ok = doc().paths['/v1/janitor/sandboxes'].get.responses['200'];
+    const schema = ok.content['application/json'].schema;
+    expect([...schema.required].sort()).toEqual(['live', 'terminated']);
+    expect([...schema.properties.live.items.required].sort()).toEqual(['wrk', 'wsk']);
+    expect([...schema.properties.terminated.items.required].sort()).toEqual([
+      'terminatedAt',
+      'wrk',
+      'wsk',
     ]);
   });
 

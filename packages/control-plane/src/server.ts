@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { CpError, writeError } from './errors.js';
-import { checkExchangeAuth } from './exchange.js';
+import { checkExchangeAuth, checkStaticBearer } from './exchange.js';
 import { HANDLERS, type CpDeps, type RequestCtx } from './handlers.js';
 import { matchRoute, type RouteSpec, bodyLimitFor } from './routes.js';
 import { verifyToken } from './token.js';
@@ -61,8 +61,11 @@ function authorize(route: RouteSpec, req: IncomingMessage, deps: CpDeps, ctx: Re
     return;
   }
   if (route.auth === 'janitor') {
-    // Task 5 wires the janitor bearer; until then no route declares this kind.
-    throw new CpError('unauthorized', 'janitor authentication failed');
+    // The host janitor's SH_JANITOR_TOKEN, and nothing else: a user's or an admin's API token is
+    // refused here, and with none configured every call is (SBX0 §8.3).
+    checkStaticBearer(presented, deps.config.sandbox?.janitorToken, 'janitor');
+    ctx.janitorAuthorized = true;
+    return;
   }
   if (!presented) throw new CpError('token_required', 'this route requires a token');
   // requiredScope 'api' is what stops a session token rewriting credentials or creating a second
