@@ -111,6 +111,14 @@ pass 'refuses missing or malformed inputs before applying anything'
 grep -q 'must already exist' "$TMP/out" || fail 'the missing-namespace refusal does not say why'
 pass 'refuses a namespace that does not exist (never creates one)'
 
+# 1a. Seed moca-relay-sandbox-tokens with no .data field (empty Secret from server).
+printf '%s\n' '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"moca-relay-sandbox-tokens"}}' \
+  >"$MOCK_STATE/secret-moca-relay-sandbox-tokens.json"
+run_setup true || fail 'first run with empty worker-token Secret failed'
+[[ "$(secret_val moca-relay-sandbox-tokens sbx_default)" =~ ^[0-9a-f]{64}$ ]] || fail 'no token for sbx_default after empty seed'
+[[ "$(secret_val moca-relay-sandbox-tokens sbx_py312)" =~ ^[0-9a-f]{64}$ ]] || fail 'no token for sbx_py312 after empty seed'
+pass 'succeeds with an empty worker-token Secret (no .data field)'
+
 # 2. A first run.
 run_setup true || fail 'first run failed'
 for s in moca-redis moca-relay moca-relay-sandbox-tokens sbx-relay-clients moca-relay-tls sbx-exec-tls; do

@@ -133,7 +133,7 @@ ensure_relay_secret() {
 # One attach token per worker id in moca-relay-sandbox-tokens, which the relay reads on each attach
 # (P6.2 §2.1). Generated once and kept; an id no longer listed is revoked with an explicit null patch.
 ensure_worker_tokens() {
-  local json stale
+  local json stale patch
   json="$(secret_json moca-relay-sandbox-tokens)"
   (
     i=0
@@ -147,7 +147,7 @@ ensure_worker_tokens() {
     apply_secret moca-relay-sandbox-tokens $SBX_WORKERS
   )
   # Revoke any worker id no longer in SBX_WORKERS with an explicit null patch (not apply pruning).
-  stale="$(printf '%s' "$json" | jq -r '.data | keys[]' | while read -r k; do
+  stale="$(printf '%s' "$json" | jq -r '.data // {} | keys[]' | while read -r k; do
     [[ " $SBX_WORKERS " == *" $k "* ]] || printf '%s\n' "$k"
   done)"
   if [[ -n "$stale" ]]; then
