@@ -7,6 +7,10 @@
 Description=SBX0 sandbox worker %i (microvm-worker)
 After=network-online.target
 Wants=network-online.target
+# As deploy/microvm/microvm-worker.service: fail loudly without KVM, and stop restarting a broken worker after 5 tries in 5 minutes.
+AssertPathExists=/dev/kvm
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
