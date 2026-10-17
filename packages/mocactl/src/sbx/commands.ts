@@ -42,8 +42,17 @@ export interface RefreshFailure {
   error: unknown;
 }
 
-export const NOT_ENROLLED =
-  'sbx: this GitHub account is not enrolled in the sandbox service; ask an operator to add it';
+/**
+ * The not-enrolled refusal: the control plane's own message, which names the caller's subject
+ * (`github:<id>`, what the operator adds), then what to do about it.
+ */
+export function notEnrolledMessage(err: ApiError): string {
+  const server =
+    err.message && err.message !== err.code
+      ? sanitizeRemote(err.message)
+      : 'this GitHub account is not enrolled in the sandbox service';
+  return `sbx: ${server}; ask an operator to add it`;
+}
 
 /**
  * A refresh that did not end in "log in again": an ApiError is reported as any other (status 0 is
@@ -71,7 +80,7 @@ export function fail(io: Io, err: unknown, refreshFailure?: RefreshFailure): num
     return SBX_EXIT.unreachable;
   }
   if (err instanceof ApiError && err.code === 'not_enrolled') {
-    io.err(NOT_ENROLLED);
+    io.err(notEnrolledMessage(err));
   } else if (err instanceof ApiError && TOKEN_CODES.has(err.code)) {
     io.err('sbx: your sandbox-service login has expired: run `mocactl sbx login`');
     return SBX_EXIT.loginRequired;
@@ -197,7 +206,14 @@ export async function cmdRm(c: SbxCtx, id: string): Promise<number> {
   try {
     const r = await c.api.deleteSandbox(id);
     if (c.json) c.io.out(JSON.stringify(r) + '\n');
-    c.io.err(`${id} ${r.reason === 'expired' ? 'had already expired' : 'deleted'}`);
+    // Delete is not immediate (SBX0 §5.4): a token already minted works until it expires, plus the
+    // relay's 30 s leeway. The client does not know the deployment's token lifetime, so the default.
+    c.io.err(
+      r.reason === 'expired'
+        ? `${id} had already expired`
+        : `deleted ${id}; tokens already issued stop working within one token lifetime plus 30 s ` +
+            '(15.5 minutes by default)',
+    );
     return SBX_EXIT.ok;
   } catch (err) {
     return failed(c, err);
@@ -246,7 +262,7 @@ export function tokenCmd(explicitUrl: string | undefined, id: string): string {
 
 /**
  * Exports for a direct sandbox/v1 client (SBX0 §6.1, §7): where to dial, what to put in the
- * request, and the command that mints a token -- never the token itself, which lives 15 minutes.
+ * request, and the command that mints a token -- never the token itself, which lives 15 minutes by default.
  */
 export async function cmdEnv(c: SbxCtx, id: string): Promise<number> {
   try {

@@ -229,28 +229,34 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
         status: 403,
         body: {
           error: 'not_enrolled',
-          message: 'this account is not enrolled in the sandbox service',
+          message: 'this account (github:777) is not enrolled in the sandbox service',
         },
       }),
     });
     expect(await sbxMain(['login'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(1);
-    expect(io.errs.join('\n')).toMatch(/not enrolled.*operator/s);
+    expect(io.errs.join('\n')).toMatch(/(not|no longer) enrolled.*operator/s);
+    // The server's message is passed through, subject included, for the user to hand on.
+    expect(io.errs.join('\n')).toContain('this account (github:777) is not enrolled');
   });
 
   it('tells a user de-enrolled since login so, at refresh (exit 1, not 4)', async () => {
-    const { home, env, io } = setup({ expired: true });
+    const { home, env, io, paths } = setup({ expired: true });
     const cp = fakeCp({
       'POST /v1/auth/token': () => ({
         status: 403,
         body: {
           error: 'not_enrolled',
-          message: 'this account is no longer enrolled in the sandbox service',
+          message: 'this account (github:1) is no longer enrolled in the sandbox service',
         },
       }),
     });
     expect(await sbxMain(['ls'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(1);
-    expect(io.errs.join('\n')).toMatch(/not enrolled.*operator/s);
+    expect(io.errs.join('\n')).toMatch(/(not|no longer) enrolled.*operator/s);
     expect(io.errs.join('\n')).not.toMatch(/cannot reach/);
+    expect(cp.calls.map((c) => c.path)).toEqual(['/v1/auth/token']);
+    // The server revoked the login; sbx-auth.json must never present that refresh token again.
+    expect(readFileSync(sbxPaths(paths).authFile, 'utf8')).not.toContain('refreshToken');
+    expect(await sbxMain(['ls'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(3);
     expect(cp.calls.map((c) => c.path)).toEqual(['/v1/auth/token']);
   });
 
@@ -374,7 +380,11 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
       }),
     });
     expect(await sbxMain(['rm', SBX], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
-    expect(io.errs.join('\n')).toContain('deleted');
+    // Delete is not immediate (SBX0 §5.4): the line says how long issued tokens keep working.
+    expect(io.errs.join('\n')).toBe(
+      `deleted ${SBX}; tokens already issued stop working within one token lifetime plus 30 s ` +
+        '(15.5 minutes by default)',
+    );
   });
 
   it('refuses a malformed sandbox id before any request', async () => {
@@ -564,10 +574,11 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
       const { home, env, io } = setup();
       const cp = rejectedThenRefresh(() => ({
         status: 403,
-        body: { error: 'not_enrolled', message: 'this account is no longer enrolled' },
+        body: { error: 'not_enrolled', message: 'this account (github:1) is no longer enrolled' },
       }));
       expect(await sbxMain(['ls'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(1);
-      expect(io.errs.join('\n')).toMatch(/not enrolled.*operator/s);
+      expect(io.errs.join('\n')).toMatch(/(not|no longer) enrolled.*operator/s);
+      expect(io.errs.join('\n')).toContain('(github:1)');
     });
 
     it('a refused refresh token: exit 3, log in again', async () => {

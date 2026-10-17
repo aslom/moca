@@ -27,7 +27,7 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  create a sandbox; prints its id and expiry
   mocactl sbx ls [--all] [--json]                your sandboxes (--all: everyone's; admins only)
   mocactl sbx rm [ID] [--json]                   delete a sandbox
-  mocactl sbx token [ID] [--json]                print a fresh 15-minute sandbox token
+  mocactl sbx token [ID] [--json]                print a fresh sandbox token (15 minutes by default)
   mocactl sbx env [ID]                           shell exports for a direct sandbox/v1 client
 ID defaults to the sandbox in the nearest .sbx/sandbox.json. The control plane comes from
 --control-plane-url, MOCACTL_SBX_URL, or the one remembered at login. The login is kept apart

@@ -47,6 +47,40 @@ describe('enrollment gates login and refresh on the sandbox profile (SBX0 §4.2)
     expect(await codeOf(() => refresh(d, first.refreshToken))).toBe('not_enrolled');
   });
 
+  it('names the caller in the not_enrolled message, so the user can hand it to an operator', async () => {
+    const login403 = await HANDLERS.completeDeviceAuth!(
+      ctx({ body: { deviceCode: 'dc-1' } }),
+      sandboxDeps('github:777'),
+    ).catch((e: Error) => e.message);
+    expect(login403).toContain('github:777');
+    const d = sandboxDeps('github:1234');
+    const first = await login(d);
+    d.config.sandbox!.allowedSubjects = [];
+    expect(await refresh(d, first.refreshToken).catch((e: Error) => e.message)).toContain(
+      'github:1234',
+    );
+  });
+
+  it('revokes the family of a de-enrolled refresh, so the old token is a plain refusal, not theft', async () => {
+    const d = sandboxDeps('github:1234');
+    const first = await login(d);
+    d.config.sandbox!.allowedSubjects = [];
+    expect(await codeOf(() => refresh(d, first.refreshToken))).toBe('not_enrolled');
+    expect(d.refreshAudit.at(-1)).toMatchObject({
+      decision: 'refresh_revoked',
+      reason: 'not_enrolled',
+      subject: 'github:1234',
+    });
+    // The client kept the token it presented; long past the grace window it comes back.
+    const later = { ...d, now: () => d.now() + 120_000 };
+    expect(await codeOf(() => refresh(later, first.refreshToken))).toBe('invalid_grant');
+    expect(d.refreshAudit.filter((a) => a.decision === 'refresh_reuse_detected')).toEqual([]);
+    expect(d.refreshAudit.at(-1)).toMatchObject({ decision: 'refresh_refused', reason: 'revoked' });
+    // Re-enrolled, the user logs in again; the revoked login stays revoked.
+    d.config.sandbox!.allowedSubjects = ['github:1234'];
+    expect(await codeOf(() => refresh(later, first.refreshToken))).toBe('invalid_grant');
+  });
+
   it('refreshes a subject who is still enrolled, and an admin who never was listed', async () => {
     // The positive control for the test above: the refusal is the allow list, not the refresh.
     const d = sandboxDeps('github:1234');

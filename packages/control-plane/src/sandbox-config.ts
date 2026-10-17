@@ -1,3 +1,4 @@
+import { CpError } from './errors.js';
 import type { CpConfig } from './handlers.js';
 import type { RouteProfile } from './routes.js';
 import { GITHUB_SUBJECT_RE } from './identity.js';
@@ -156,4 +157,15 @@ export function sandboxConfigFromEnv(env: NodeJS.ProcessEnv): SandboxConfig {
 export function isEnrolled(subject: string, roles: string[], config: CpConfig): boolean {
   if (config.routeProfile !== 'sandbox') return true;
   return roles.includes('admin') || (config.sandbox?.allowedSubjects ?? []).includes(subject);
+}
+
+/**
+ * The 403 for a caller who is not enrolled. It names the caller's OWN subject (`github:<id>`) --
+ * not a secret, and what an operator needs to add to SH_ALLOWED_SUBJECTS.
+ */
+export function notEnrolled(subject: string, when: 'not' | 'no longer' = 'not'): CpError {
+  return new CpError(
+    'not_enrolled',
+    `this account (${subject}) is ${when} enrolled in the sandbox service`,
+  );
 }

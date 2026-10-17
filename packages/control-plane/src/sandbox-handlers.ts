@@ -1,7 +1,7 @@
 import { CpError } from './errors.js';
 import { asRecord, auditBestEffort, isAdmin, seconds } from './handler-util.js';
 import type { CpDeps, Handler, RequestCtx } from './handlers.js';
-import { isEnrolled, type SandboxConfig } from './sandbox-config.js';
+import { isEnrolled, notEnrolled, type SandboxConfig } from './sandbox-config.js';
 import {
   viewOf,
   type SandboxRecord,
@@ -57,7 +57,7 @@ function requireEnrolled(ctx: RequestCtx, deps: CpDeps): TokenClaims {
   const p = ctx.principal;
   if (!p) throw new CpError('token_required', 'this route requires a token');
   if (!isEnrolled(p.sub, p.roles ?? [], deps.config)) {
-    throw new CpError('not_enrolled', 'this account is not enrolled in the sandbox service');
+    throw notEnrolled(p.sub);
   }
   return p;
 }

@@ -54,7 +54,7 @@ import { isRefreshTokenShape, type RefreshStore } from './refresh-store.js';
 import { projectResources, resolveSandbox } from './resources.js';
 import type { SandboxTiers } from './sandbox-tiers.js';
 import type { RouteProfile } from './routes.js';
-import { isEnrolled, type SandboxConfig } from './sandbox-config.js';
+import { isEnrolled, notEnrolled, type SandboxConfig } from './sandbox-config.js';
 import type { SandboxStore } from './sandbox-store.js';
 import { SANDBOX_HANDLERS } from './sandbox-handlers.js';
 
@@ -453,7 +453,7 @@ export const HANDLERS: Record<string, Handler> = {
     // SBX0 §4.2: on the sandbox profile only enrolled subjects (and admins) get a login, and the
     // refusal comes BEFORE a refresh family is issued, so nothing is left behind for them.
     if (!isEnrolled(principal.subject, principal.roles, deps.config)) {
-      throw new CpError('not_enrolled', 'this account is not enrolled in the sandbox service');
+      throw notEnrolled(principal.subject);
     }
     const label = asRecord(ctx.body).label;
     const issued = await deps.refresh.issue({
@@ -481,11 +481,13 @@ export const HANDLERS: Record<string, Handler> = {
     if (!r.ok) throw new CpError('invalid_grant', `refresh token refused: ${r.reason}`);
     const roles = deps.identity.rolesFor(r.subject);
     // A subject removed from SH_ALLOWED_SUBJECTS loses access at its next refresh, not its next login.
+    // rotate() has already stored a successor the client never sees, so the token it still holds is
+    // superseded: presented again after the grace window it would read as reuse, revoke the family
+    // as theft and audit refresh_reuse_detected. Revoke the family here, under a reason of its own,
+    // so that token is a plain `revoked` refusal instead.
     if (!isEnrolled(r.subject, roles, deps.config)) {
-      throw new CpError(
-        'not_enrolled',
-        'this account is no longer enrolled in the sandbox service',
-      );
+      await deps.refresh.revoke(r.refreshToken, deps.now(), 'not_enrolled');
+      throw notEnrolled(r.subject, 'no longer');
     }
     return {
       status: 200,
