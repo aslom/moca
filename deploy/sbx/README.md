@@ -56,8 +56,9 @@ directory, making the CA path absolute so it holds from anywhere:
     [ -f exec-ca.crt ] && export SBX_CA_FILE="$PWD/exec-ca.crt"
 
 In 1a a client token reaches the **first** worker in `SBX_WORKERS` only: that is the one its bundle
-names (`SBX_SANDBOX_ID`), and setup.sh mints and keeps no token for any other worker. Increment 1b's
-per-sandbox tokens replace these.
+names (`SBX_SANDBOX_ID`), and setup.sh mints and keeps no token for any other worker. So changing
+which worker is first in `SBX_WORKERS` re-issues every client token, and every client bundle already
+handed out must be replaced. Increment 1b's per-sandbox tokens replace these.
 
 These static client tokens work only with the team-only 1a relay image. Build it from
 `sbx/relay-1a`: the prototype's client-token commits rebased onto this change's relay keepalive
