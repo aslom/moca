@@ -27,15 +27,21 @@ else running in it. Keep the inputs in a file outside the repo:
 
     deploy/sbx/setup.sh --env-file <file>
 
+A subject is `github:` plus the numeric GitHub user id, not the login. Look one up with
+`gh api users/<login> --jq .id`. A user who is not enrolled is told their own subject by
+`mocactl sbx login`, so they can send it to you.
+
 Optional inputs:
 
-| Variable                               | Default | Rule                                                                       |
-| -------------------------------------- | ------- | -------------------------------------------------------------------------- |
-| `SBX_LIFETIME_DAYS`                    | 7       | 1-30; each worker's idle reclaim is set to this plus two days              |
-| `SBX_MAX_PER_SUBJECT`, `SBX_MAX_TOTAL` | 3, 40   | live sandboxes per user, and in all                                        |
-| `SBX_MAX_INFLIGHT`                     | 2       | 1-8: `Exec` calls one sandbox may have in flight at the relay              |
-| `SBX_WORKSPACE_IMAGE_MB`               | 2048    | each workspace's image size (`microvm-worker`'s `SH_WORKSPACE_IMAGE_MB`)   |
-| `SBX_{API,ATTACH,EXEC}_TLS_{CERT,KEY}` | none    | the Route's certificate; otherwise the router's (api) or a self-signed one |
+| Variable                               | Default | Rule                                                                        |
+| -------------------------------------- | ------- | --------------------------------------------------------------------------- |
+| `SBX_LIFETIME_DAYS`                    | 7       | 1-30; each worker's idle reclaim is set to this plus two days (below)       |
+| `SBX_TOKEN_TTL_MINUTES`                | 15      | 5-60: a sandbox token's lifetime, the longest command, and the delete delay |
+| `SBX_RETENTION_DAYS`                   | 14      | 1-90: how long a deleted or expired sandbox stays in `mocactl sbx ls`       |
+| `SBX_MAX_PER_SUBJECT`, `SBX_MAX_TOTAL` | 3, 40   | live sandboxes per user, and in all                                         |
+| `SBX_MAX_INFLIGHT`                     | 2       | 1-8: `Exec` calls one sandbox may have in flight at the relay               |
+| `SBX_WORKSPACE_IMAGE_MB`               | 2048    | each workspace's image size (`microvm-worker`'s `SH_WORKSPACE_IMAGE_MB`)    |
+| `SBX_{API,ATTACH,EXEC}_TLS_{CERT,KEY}` | none    | the Route's certificate; otherwise the router's (api) or a self-signed one  |
 
 The templates file lists one template per worker in `SBX_WORKERS`. A template id is lower-case
 letters, digits and dashes, and unique; `tools` is what `mocactl sbx` shows:
@@ -56,7 +62,25 @@ The run refuses, before applying anything, when `SBX_MAX_TOTAL` × `SBX_WORKSPAC
 80 % of `SBX_WORKSPACE_FS_GIB`: the quota is the disk control.
 
 Re-run it after any change; tokens, the signing key and certificates are kept. A change to any
-setting rolls the control plane and the relay, which read their settings only at boot. Without
+setting rolls the control plane and the relay, which read their settings only at boot.
+
+**Changing `SBX_LIFETIME_DAYS` means reinstalling every host's workers.** The control plane takes
+the new lifetime at once, but a running worker keeps the idle reclaim (`SH_WORKSPACE_IDLE`) it was
+installed with until `install-host.sh` is re-run on its host. After a raise, that idle can be shorter
+than a live sandbox's lifetime, and the worker would reclaim its workspace. So the run refuses a
+lifetime that changes the idle in the bundles it last wrote, unless `SBX_ACK_HOSTS=1` is set. To
+raise it, ideally re-run `install-host.sh` on every host first, with bundles made from the new value;
+otherwise set `SBX_ACK_HOSTS=1` and reinstall every host right after the run, which names them.
+The check reads the bundles in `deploy/sbx/.generated/workers/`: keep that directory between runs
+(it is gitignored), or the run cannot see the idle the hosts were given.
+
+**Delete and de-enrollment are not immediate.** A sandbox token already issued keeps working until
+it expires, plus the relay's 30 s clock leeway: up to `SBX_TOKEN_TTL_MINUTES` plus 30 s after a
+`mocactl sbx rm`, or after a subject is removed from `SBX_ALLOWED_SUBJECTS`. An `Exec` still running
+when that token expires is cancelled. Raising `SBX_TOKEN_TTL_MINUTES` allows longer commands at the
+cost of a slower delete.
+
+Without
 `SBX_{ATTACH,EXEC}_TLS_CERT/KEY` those Routes use self-signed certificates: the attach one ships in
 every worker bundle, and the control plane hands the exec one to clients.
 
@@ -64,7 +88,18 @@ every worker bundle, and the control plane hands the exec one to clients.
 team-only 1a image: its relay requires the harness exec token, and its control plane has no sandbox
 profile. The run deletes the static client tokens and their bundles, and removes the relay's harness
 exec token once the new relay is up. Re-run `install-host.sh` with the new worker bundles, which now
-carry the workspace idle time and image size; it refuses a 1a bundle.
+carry the workspace idle time and image size; it refuses a 1a bundle. **1a workspaces are not
+migrated:** a 1b sandbox has a workspace key of its own, which no 1a workspace matches, so tell 1a
+users to pull their work out before the upgrade.
+
+**The API Route's certificate:** without `SBX_API_TLS_CERT/KEY` the API Route uses the router's
+default certificate. If that certificate is not publicly trusted (a self-signed or internal-CA
+wildcard), `mocactl sbx login` fails its TLS check: users then need `NODE_EXTRA_CA_CERTS=<ca.pem>`
+in their environment.
+
+**No janitor yet:** 1b has none (increment 1c adds it). A deleted or expired sandbox's workspace stays
+on the host's disk until the worker's own idle sweep (`SH_WORKSPACE_IDLE`, the lifetime plus two
+days) reclaims it, so size `SBX_WORKSPACE_FS_GIB` with that in mind.
 
 ## 2. KVM host side
 

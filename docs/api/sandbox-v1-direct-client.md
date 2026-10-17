@@ -74,7 +74,7 @@ as the example client does.
   Reusing an id that is still in flight in your sandbox is refused with `ALREADY_EXISTS`. A random
   53-bit id is enough.
 - **`timeout_s`**: the worker kills the command when it runs out. It defaults to, and is capped at,
-  the token's lifetime (`exp − iat`) minus 60 s: 840 s with 15-minute tokens. See
+  the token's lifetime (`exp − iat`) minus 60 s: 840 s with the default 15-minute tokens. See
   [Tokens](#tokens) for why.
 - **`streaming: true`**, so output arrives as it is produced. `false` buffers it until the end.
 - **Keepalive every 20 s** (`grpc.keepalive_time_ms = 20000`, and permitted without calls). The
@@ -87,7 +87,8 @@ as the example client does.
 A sandbox token is an Ed25519-signed JWT (`typ: moca-sandbox+jwt`) bound to one sandbox: its
 `wrk`, its `wsk`, and the `exec` scope.
 
-- **It lives 15 minutes**, and never past the sandbox's own expiry.
+- **It lives 15 minutes by default** (the deployment sets it), and never past the sandbox's own
+  expiry.
 - **Get one by running `SBX_TOKEN_CMD`.** Keep it in memory; never write it to disk or a log.
 - **Run the command again:**
   - when the token is within 60 s of its `exp`;
@@ -106,6 +107,11 @@ before each Exec, a client:
    fires before the relay's cancel. When it cuts a longer request, it says so.
 
 The longest single command is therefore one token lifetime. Split longer work into several calls.
+
+**Delete and de-enrollment are not immediate.** A token already issued keeps working until its
+`exp`, plus the relay's 30 s leeway: up to one token lifetime plus 30 s (15.5 minutes by default)
+after `mocactl sbx rm`, or after an operator removes your account. An Exec still running at that
+point is cancelled (`DEADLINE_EXCEEDED`). No new token is issued after either.
 
 You can decode the token's payload (base64url, the middle segment) to read `iat` and `exp`; do not
 verify it, which is the relay's job.
@@ -151,8 +157,8 @@ a non-OK status. There is no exit status to report. Two have an SBX0 meaning of 
 - **16 MiB** per message, so send large trees as several calls.
 - **8 MiB** of stdout per call.
 - **The longest command** is one token lifetime minus 60 s (14 minutes by default).
-- **A sandbox lives 7 days**, then it is gone with its workspace. There is no extension: pull your
-  work out before then. `mocactl sbx ls` shows each sandbox's expiry.
+- **A sandbox lives 7 days by default**, then it is gone with its workspace. There is no
+  extension: pull your work out before then. `mocactl sbx ls` shows each sandbox's expiry.
 
 ## The stability promise
 
