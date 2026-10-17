@@ -1,9 +1,18 @@
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { main } from '../src/cli.js';
-import { authLockPath, loadAuth, loadConfig, resolvePaths, saveAuth } from '../src/config.js';
+import {
+  authLockPath,
+  DEFAULT_CONFIG,
+  loadAuth,
+  loadConfig,
+  resolvePaths,
+  saveAuth,
+  saveConfig,
+} from '../src/config.js';
 import { cmdLogin } from '../src/headless.js';
 import { buildRuntime } from '../src/runtime.js';
 import { sbxMain, sbxPaths } from '../src/sbx/cli.js';
@@ -408,7 +417,10 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     expect(out).toContain("export SBX_TLS='1'");
     expect(out).toContain("export SBX_SANDBOX_ID='sbx_node22'");
     expect(out).toContain(`export SBX_WORKSPACE_KEY='${SBX}'`);
-    expect(out).toContain(`export SBX_TOKEN_CMD='mocactl sbx token ${SBX}'`);
+    // The URL came from MOCACTL_SBX_URL, so the command names it (quoted inside the quoted value).
+    expect(out).toContain(
+      `export SBX_TOKEN_CMD='mocactl sbx token --control-plane-url '\\''${URL_}'\\'' ${SBX}'`,
+    );
     expect(out).not.toContain('eyJ.sbx.tok'); // never the token itself: it lives 15 minutes
     const ca = join(paths.stateDir, 'sbx', `${SBX}-exec-ca.crt`);
     expect(isAbsolute(ca)).toBe(true);
@@ -483,5 +495,133 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     mkdirSync(join(repo, '.git'), { recursive: true });
     expect(readBoundSandbox(repo)).toBeUndefined();
     expect(readBoundSandbox(outer)).toBe(SBX);
+  });
+
+  describe('SBX_TOKEN_CMD names the control plane unless config.json does', () => {
+    const tokenCmdLine = (out: string) => out.match(/^export SBX_TOKEN_CMD=(.*)$/m)?.[1];
+    const evalSh = (quoted: string) => execFileSync('sh', ['-c', `printf %s ${quoted}`]).toString();
+
+    it('from config.json: the bare command', async () => {
+      const { home, paths, io } = setup();
+      saveConfig(paths, { ...DEFAULT_CONFIG, sbxControlPlaneUrl: URL_ });
+      const cp = fakeCp({
+        [`POST /v1/sandboxes/${SBX}/token`]: () => ({ status: 200, body: TOKEN }),
+      });
+      expect(
+        await sbxMain(['env', SBX], { HOME: home }, io, { home, fetchImpl: cp.fetchImpl }),
+      ).toBe(0);
+      expect(evalSh(tokenCmdLine(io.outs.join(''))!)).toBe(`mocactl sbx token ${SBX}`);
+    });
+
+    it('from --control-plane-url: the URL, shell-safe even with a quote in it', async () => {
+      const { home, paths, io } = setup({ loggedIn: false });
+      const odd = "https://sbx.example.invalid/it's";
+      saveAuth(sbxPaths(paths), { ...LOGIN, controlPlaneUrl: odd });
+      saveConfig(paths, { ...DEFAULT_CONFIG, sbxControlPlaneUrl: URL_ }); // the flag wins
+      const cp = fakeCp({
+        [`POST /it's/v1/sandboxes/${SBX}/token`]: () => ({ status: 200, body: TOKEN }),
+      });
+      expect(
+        await sbxMain(['env', '--control-plane-url', odd, SBX], { HOME: home }, io, {
+          home,
+          fetchImpl: cp.fetchImpl,
+        }),
+      ).toBe(0);
+      const cmd = evalSh(tokenCmdLine(io.outs.join(''))!);
+      expect(cmd).toBe(
+        `mocactl sbx token --control-plane-url '${odd.replace(/'/g, `'\\''`)}' ${SBX}`,
+      );
+      // Run as a shell command line, it hands mocactl exactly these arguments.
+      const argv = execFileSync('sh', ['-c', `printf '%s\\n' ${cmd.slice('mocactl '.length)}`])
+        .toString()
+        .trimEnd()
+        .split('\n');
+      expect(argv).toEqual(['sbx', 'token', '--control-plane-url', odd, SBX]);
+    });
+  });
+
+  describe('a 401 whose retry refresh fails reports what the refresh hit', () => {
+    // A fresh-looking login the control plane rejects: the client refreshes once (forced), and
+    // that refresh is what fails.
+    const rejectedThenRefresh = (refresh: Handler) =>
+      fakeCp({
+        'GET /v1/sandboxes': () => ({
+          status: 401,
+          body: { error: 'token_expired', message: 'token expired' },
+        }),
+        'POST /v1/auth/token': refresh,
+      });
+
+    it('a network failure: exit 4', async () => {
+      const { home, env, io } = setup();
+      const cp = rejectedThenRefresh(() => new TypeError('fetch failed'));
+      expect(await sbxMain(['ls'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(4);
+      expect(io.errs.join('\n')).toMatch(/cannot reach the sandbox control plane/);
+      expect(cp.calls.map((c) => c.path)).toEqual(['/v1/sandboxes', '/v1/auth/token']);
+    });
+
+    it('not_enrolled: exit 1, with the operator message', async () => {
+      const { home, env, io } = setup();
+      const cp = rejectedThenRefresh(() => ({
+        status: 403,
+        body: { error: 'not_enrolled', message: 'this account is no longer enrolled' },
+      }));
+      expect(await sbxMain(['ls'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(1);
+      expect(io.errs.join('\n')).toMatch(/not enrolled.*operator/s);
+    });
+
+    it('a refused refresh token: exit 3, log in again', async () => {
+      const { home, env, io } = setup();
+      const cp = rejectedThenRefresh(() => ({
+        status: 400,
+        body: { error: 'invalid_grant', message: 'refresh token refused: revoked' },
+      }));
+      expect(await sbxMain(['ls'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(3);
+      expect(io.errs.join('\n')).toContain('mocactl sbx login');
+    });
+
+    it('a refresh that works: the retry succeeds', async () => {
+      const { home, env, io } = setup();
+      let n = 0;
+      const cp = fakeCp({
+        'GET /v1/sandboxes': () =>
+          n++ === 0
+            ? { status: 401, body: { error: 'token_expired' } }
+            : { status: 200, body: { sandboxes: [] } },
+        'POST /v1/auth/token': () => ({ status: 200, body: loginBody('api-2', 'github:1') }),
+      });
+      expect(await sbxMain(['ls'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
+      expect(cp.calls.at(-1)!.auth).toBe('Bearer api-2');
+    });
+  });
+
+  it('shows a terminated sandbox with no reason as just terminated', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({
+      'GET /v1/sandboxes': () => ({
+        status: 200,
+        body: { sandboxes: [sandbox({ state: 'terminated', reason: null })] },
+      }),
+    });
+    expect(await sbxMain(['ls'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
+    const out = io.outs.join('');
+    expect(out).toMatch(/node22\s+terminated\s+\d{4}-/);
+    expect(out).not.toMatch(/expired|\(/);
+  });
+
+  it('sanitizes before padding, so the columns still line up', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({
+      'GET /v1/sandboxes': () => ({
+        status: 200,
+        body: {
+          sandboxes: [sandbox({ name: 'w\u001b[31meb' }), sandbox({ id: 'sbx-b', name: 'web' })],
+        },
+      }),
+    });
+    expect(await sbxMain(['ls'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
+    const [a, b] = io.outs.join('').trimEnd().split('\n');
+    expect(a).not.toContain('\u001b');
+    expect(a!.indexOf('node22')).toBe(b!.indexOf('node22'));
   });
 });

@@ -25,16 +25,47 @@ export interface SbxCtx {
   io: Io;
   json: boolean;
   signal?: AbortSignal;
+  /**
+   * The control-plane URL when it came from `--control-plane-url` or MOCACTL_SBX_URL rather than
+   * config.json: `SBX_TOKEN_CMD` then names it, since another shell may have neither.
+   */
+  explicitUrl?: string;
+  /**
+   * Why the forced refresh behind the client's one 401 retry failed, if it failed for a reason
+   * other than the login itself (a network failure, `not_enrolled`): `fail` reports that cause.
+   */
+  refreshFailure?: () => RefreshFailure | undefined;
+}
+
+/** A refresh that failed for a reason other than the login being refused. */
+export interface RefreshFailure {
+  error: unknown;
 }
 
 export const NOT_ENROLLED =
   'sbx: this GitHub account is not enrolled in the sandbox service; ask an operator to add it';
 
 /**
- * One line per failure. A refusal from the control plane is exit 1 with its message; a network
- * failure (status 0) is exit 4; a token the control plane will not take any more is exit 3.
+ * A refresh that did not end in "log in again": an ApiError is reported as any other (status 0 is
+ * exit 4, `not_enrolled` exit 1); anything else (a timeout, another mocactl holding the refresh
+ * lock) means the control plane could not be asked, exit 4, as `mocactl auth token`.
  */
-export function fail(io: Io, err: unknown): number {
+export function failRefresh(io: Io, error: unknown): number {
+  if (error instanceof ApiError) return fail(io, error);
+  io.err(`sbx: cannot refresh the sandbox-service login: ${describeError(error)}`);
+  return SBX_EXIT.unreachable;
+}
+
+/**
+ * One line per failure. A refusal from the control plane is exit 1 with its message; a network
+ * failure (status 0) is exit 4; a token the control plane will not take any more is exit 3 --
+ * unless the refresh behind the client's retry failed for another reason, which is then the cause
+ * reported (`refreshFailure`).
+ */
+export function fail(io: Io, err: unknown, refreshFailure?: RefreshFailure): number {
+  if (refreshFailure && err instanceof ApiError && TOKEN_CODES.has(err.code)) {
+    return failRefresh(io, refreshFailure.error);
+  }
   if (err instanceof ApiError && err.status === 0) {
     io.err(`sbx: cannot reach the sandbox control plane: ${describeError(err)}`);
     return SBX_EXIT.unreachable;
@@ -45,13 +76,18 @@ export function fail(io: Io, err: unknown): number {
     io.err('sbx: your sandbox-service login has expired: run `mocactl sbx login`');
     return SBX_EXIT.loginRequired;
   } else if (err instanceof ApiError && err.status === 404 && err.code !== 'sandbox_not_found') {
-    // An unmounted route: a MOCA (harness profile) control plane, or one from before SBX0.
+    // A heuristic: every sandbox route's own 404 is `sandbox_not_found`, so any other 404 (the
+    // server's bare `not_found` for an unmounted route, or a proxy's page) means the URL is not a
+    // sandbox-profile control plane -- a MOCA (harness profile) one, or one from before SBX0.
     io.err('sbx: that control plane has no sandbox routes: is it the sandbox service?');
   } else {
     io.err(`sbx: ${describeError(err)}`);
   }
   return SBX_EXIT.failed;
 }
+
+/** `fail` with what this command's client saw of its refresh. */
+const failed = (c: SbxCtx, err: unknown): number => fail(c.io, err, c.refreshFailure?.());
 
 export async function cmdLogin(c: SbxCtx, remember: boolean): Promise<number> {
   if (!c.rt.cp) return SBX_EXIT.usage;
@@ -88,7 +124,7 @@ export async function cmdLogin(c: SbxCtx, remember: boolean): Promise<number> {
       c.io.err('sbx: the login code expired twice; run `mocactl sbx login` again');
       return SBX_EXIT.failed;
     }
-    return fail(c.io, err);
+    return failed(c, err);
   }
 }
 
@@ -105,7 +141,7 @@ export async function cmdTemplates(c: SbxCtx): Promise<number> {
     }
     return SBX_EXIT.ok;
   } catch (err) {
-    return fail(c.io, err);
+    return failed(c, err);
   }
 }
 
@@ -122,12 +158,13 @@ export async function cmdCreate(
     );
     return SBX_EXIT.ok;
   } catch (err) {
-    return fail(c.io, err);
+    return failed(c, err);
   }
 }
 
 function stateText(s: SbxSandbox): string {
-  return s.state === 'terminated' ? `terminated (${s.reason ?? 'expired'})` : s.state;
+  if (s.state !== 'terminated') return s.state;
+  return s.reason ? `terminated (${s.reason})` : 'terminated';
 }
 
 export async function cmdLs(c: SbxCtx, all: boolean): Promise<number> {
@@ -138,19 +175,21 @@ export async function cmdLs(c: SbxCtx, all: boolean): Promise<number> {
       return SBX_EXIT.ok;
     }
     for (const s of ss) {
+      // Sanitized before padding, so stripped control characters cannot skew the columns.
+      const cell = (v: string, width = 0) => sanitizeRemote(v).padEnd(width);
       const row = [
-        s.id.padEnd(30),
-        (s.name ?? '-').padEnd(16),
-        s.template.padEnd(12),
-        stateText(s).padEnd(22),
+        cell(s.id, 30),
+        cell(s.name ?? '-', 16),
+        cell(s.template, 12),
+        cell(stateText(s), 22),
         when(s.expiresAt),
-        ...(all ? [s.owner] : []),
+        ...(all ? [cell(s.owner)] : []),
       ].join(' ');
-      c.io.out(sanitizeRemote(row) + '\n');
+      c.io.out(row + '\n');
     }
     return SBX_EXIT.ok;
   } catch (err) {
-    return fail(c.io, err);
+    return failed(c, err);
   }
 }
 
@@ -161,7 +200,7 @@ export async function cmdRm(c: SbxCtx, id: string): Promise<number> {
     c.io.err(`${id} ${r.reason === 'expired' ? 'had already expired' : 'deleted'}`);
     return SBX_EXIT.ok;
   } catch (err) {
-    return fail(c.io, err);
+    return failed(c, err);
   }
 }
 
@@ -173,7 +212,7 @@ export async function cmdToken(c: SbxCtx, id: string): Promise<number> {
     );
     return SBX_EXIT.ok;
   } catch (err) {
-    return fail(c.io, err);
+    return failed(c, err);
   }
 }
 
@@ -196,6 +235,16 @@ function writeCa(dir: string, name: string, pem: string): string {
 }
 
 /**
+ * The command a client runs for a token. A URL from a flag or MOCACTL_SBX_URL is named in it,
+ * quoted, so the command works in a shell that has neither; one from config.json is left out.
+ */
+export function tokenCmd(explicitUrl: string | undefined, id: string): string {
+  return explicitUrl
+    ? `mocactl sbx token --control-plane-url ${q(explicitUrl)} ${id}`
+    : `mocactl sbx token ${id}`;
+}
+
+/**
  * Exports for a direct sandbox/v1 client (SBX0 §6.1, §7): where to dial, what to put in the
  * request, and the command that mints a token -- never the token itself, which lives 15 minutes.
  */
@@ -207,7 +256,7 @@ export async function cmdEnv(c: SbxCtx, id: string): Promise<number> {
       ['SBX_TLS', '1'],
       ['SBX_SANDBOX_ID', sanitizeRemote(t.wrk)],
       ['SBX_WORKSPACE_KEY', sanitizeRemote(t.wsk)],
-      ['SBX_TOKEN_CMD', `mocactl sbx token ${id}`],
+      ['SBX_TOKEN_CMD', tokenCmd(c.explicitUrl, id)],
     ];
     if (t.execCa) {
       // Absolute even when XDG_STATE_HOME is relative: the line is meant for another process.
@@ -217,6 +266,6 @@ export async function cmdEnv(c: SbxCtx, id: string): Promise<number> {
     for (const [k, v] of lines) c.io.out(`export ${k}=${q(v)}\n`);
     return SBX_EXIT.ok;
   } catch (err) {
-    return fail(c.io, err);
+    return failed(c, err);
   }
 }

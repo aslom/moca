@@ -1,8 +1,6 @@
 import { homedir, hostname } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
-import { ApiError } from '../api/errors.js';
-import { describeError } from '../core/messages.js';
 import { loadConfig, normalizeUrl, resolvePaths, type Paths, type TuiConfig } from '../config.js';
 import type { Io } from '../headless.js';
 import { buildRuntime, ensureRuntimeAuth, type Runtime } from '../runtime.js';
@@ -15,8 +13,9 @@ import {
   cmdRm,
   cmdTemplates,
   cmdToken,
-  fail,
+  failRefresh,
   SBX_EXIT,
+  type RefreshFailure,
   type SbxCtx,
 } from './commands.js';
 import { readBoundSandbox, SANDBOX_ID_RE } from './state.js';
@@ -50,6 +49,17 @@ export function resolveSbxUrl(
   return normalizeUrl(flag || env.MOCACTL_SBX_URL || config.sbxControlPlaneUrl);
 }
 
+/** Where resolveSbxUrl's answer came from, by the same precedence (and the same `||`). */
+export function sbxUrlSource(
+  flag: string | undefined,
+  env: NodeJS.ProcessEnv,
+  config: TuiConfig,
+): 'flag' | 'env' | 'config' | undefined {
+  if (flag) return 'flag';
+  if (env.MOCACTL_SBX_URL) return 'env';
+  return config.sbxControlPlaneUrl ? 'config' : undefined;
+}
+
 /**
  * mocactl's paths with the login moved to `sbx-auth.json` beside `auth.json`. auth.json holds ONE
  * login, so sharing it would make `mocactl sbx login` log the user out of MOCA; a file of its own
@@ -64,7 +74,7 @@ function open(
   url: string,
   env: NodeJS.ProcessEnv,
   deps: SbxDeps,
-): { rt: Runtime; api: SandboxApiClient } {
+): { rt: Runtime; api: SandboxApiClient; refreshFailure: () => RefreshFailure | undefined } {
   const rt = buildRuntime(
     { controlPlaneUrl: url, harnessUrl: undefined },
     env,
@@ -72,17 +82,24 @@ function open(
     deps.fetchImpl,
     { paths: sbxPaths },
   );
+  // The client turns a failed retry into the original 401; what the refresh actually hit is kept
+  // here so the command reports that instead of "log in again" (a network failure, not_enrolled).
+  let lastFailure: RefreshFailure | undefined;
   const api = new SandboxApiClient(url, () => rt.auth?.apiToken, rt.fetchImpl, {
     label: hostname(),
     onTokenRejected: async () => {
+      lastFailure = undefined;
       try {
-        return (await ensureRuntimeAuth(rt, { force: true })).kind === 'ok';
-      } catch {
+        const r = await ensureRuntimeAuth(rt, { force: true });
+        if (r.kind === 'unreachable') lastFailure = { error: r.error };
+        return r.kind === 'ok';
+      } catch (error) {
+        lastFailure = { error };
         return false;
       }
     },
   });
-  return { rt, api };
+  return { rt, api, refreshFailure: () => lastFailure };
 }
 
 /**
@@ -96,26 +113,34 @@ export async function openSbx(
   io: Io,
   deps: SbxDeps,
   opts: { login?: boolean } = {},
-): Promise<{ rt: Runtime; api: SandboxApiClient; url: string } | number> {
+): Promise<
+  | {
+      rt: Runtime;
+      api: SandboxApiClient;
+      url: string;
+      explicitUrl?: string;
+      refreshFailure: () => RefreshFailure | undefined;
+    }
+  | number
+> {
   const remembered = loadConfig(resolvePaths(env, deps.home ?? homedir())).config;
   const url = resolveSbxUrl(flags.controlPlaneUrl, env, remembered);
   if (!url) {
     io.err('sbx: no sandbox control plane: pass --control-plane-url URL, or set MOCACTL_SBX_URL');
     return SBX_EXIT.usage;
   }
-  const { rt, api } = open(url, env, deps);
-  if (opts.login) return { rt, api, url };
+  const explicitUrl =
+    sbxUrlSource(flags.controlPlaneUrl, env, remembered) === 'config' ? undefined : url;
+  const opened = { ...open(url, env, deps), url, ...(explicitUrl ? { explicitUrl } : {}) };
+  const { rt } = opened;
+  if (opts.login) return opened;
   const auth = await ensureRuntimeAuth(rt);
   if (auth.kind === 'login_required') {
     io.err('sbx: not logged in to the sandbox service: run `mocactl sbx login`');
     return SBX_EXIT.loginRequired;
   }
-  if (auth.kind === 'unreachable') {
-    if (auth.error instanceof ApiError) return fail(io, auth.error);
-    io.err(`sbx: cannot refresh the sandbox-service login: ${describeError(auth.error)}`);
-    return SBX_EXIT.unreachable;
-  }
-  return { rt, api, url };
+  if (auth.kind === 'unreachable') return failRefresh(io, auth.error);
+  return opened;
 }
 
 function parseLabels(io: Io, raw: string[]): Record<string, string> | undefined {
