@@ -414,6 +414,14 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: |
+            Sandbox profile only: `not_enrolled` -- the approving GitHub account is not in
+            SH_ALLOWED_SUBJECTS and is not an admin (SBX0 §4.2). No refresh family is issued. The
+            `message` names the caller's own subject (`github:<id>`) for an operator to enroll.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '410':
           description: device_code_expired — the code expired before it was approved; start a new one
           content:
@@ -456,6 +464,15 @@ paths:
                   refreshExpiresAt: { type: integer, description: epoch seconds }
         '400':
           description: invalid_request, or invalid_grant — the refresh token is unknown, revoked, expired or replayed; log in again
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: |
+            Sandbox profile only: `not_enrolled` -- the login's subject was removed from
+            SH_ALLOWED_SUBJECTS since it logged in (SBX0 §4.2). The control plane revokes the login
+            (audited `refresh_revoked`, reason `not_enrolled`), so the refresh token presented is
+            refused from then on; the client should forget it. The `message` names the subject.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

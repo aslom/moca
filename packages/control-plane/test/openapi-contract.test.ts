@@ -168,6 +168,23 @@ describe('§9.3 test 3 — contract drift', () => {
     expect(json).not.toContain('anthropicAuthToken');
   });
 
+  it('declares a 403 on every route that can answer not_enrolled (SBX0 §4.2)', () => {
+    // Every authenticated sandbox-profile route goes through requireEnrolled, and both login
+    // completions check enrollment; the janitor's bearer has no subject to enroll.
+    const enrollable = ROUTES.filter(
+      (r) =>
+        r.operationId === 'completeDeviceAuth' ||
+        r.operationId === 'refreshAuth' ||
+        (r.profiles.includes('sandbox') && r.profiles.length === 1 && r.auth === 'api'),
+    ).map((r) => `${r.method} ${r.path}`);
+    expect(enrollable.length).toBe(8);
+    const missing = operations()
+      .filter(({ path, method }) => enrollable.includes(`${method} ${path}`))
+      .filter(({ op }) => !(op as { responses?: Record<string, unknown> }).responses?.['403'])
+      .map(({ path, method }) => `${method} ${path}`);
+    expect(missing, 'can answer 403 not_enrolled, but declares no 403').toEqual([]);
+  });
+
   it('documents EXACTLY the error codes the taxonomy can emit -- no more, no fewer', () => {
     // Set equality against the code's own list, not a transcribed subset, and against the machine-
     // readable `enum` rather than the file's raw text. Both halves matter:
