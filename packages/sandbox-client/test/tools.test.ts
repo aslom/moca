@@ -345,17 +345,44 @@ describe('sandbox tools (SBX0 §6.4)', () => {
       expect(readdirSync(l.dir)).toEqual(['keep.txt']);
     });
 
-    it('a directory it cannot write into fails, and the original is intact', async () => {
+    it.skipIf(process.getuid?.() === 0)(
+      'a directory it cannot write into fails, and the original is intact',
+      async () => {
+        const l = local();
+        const f = join(l.dir, 'ro.txt');
+        writeFileSync(f, 'precious\n');
+        chmodSync(l.dir, 0o555);
+        const w = await t(l.tools, 'write').run({ path: 'ro.txt', content: 'gone' }, l.exec);
+        chmodSync(l.dir, 0o755);
+        expect(w.isError).toBe(true);
+        expect(txt(w)).toMatch(/^Could not write .*ro\.txt: /);
+        expect(readFileSync(f, 'utf8')).toBe('precious\n');
+        expect(readdirSync(l.dir)).toEqual(['ro.txt']);
+      },
+    );
+
+    it.skipIf(process.getuid?.() === 0)(
+      'a read-only file is refused, as a plain write would refuse it',
+      async () => {
+        const l = local();
+        const f = join(l.dir, 'locked.txt');
+        writeFileSync(f, 'precious\n');
+        chmodSync(f, 0o444);
+        const r = await put(l, f, 'gone');
+        chmodSync(f, 0o644);
+        expect(r.exitCode).not.toBe(0);
+        expect(r.stderr.toString()).toMatch(/Permission denied/);
+        expect(readFileSync(f, 'utf8')).toBe('precious\n');
+        expect(readdirSync(l.dir)).toEqual(['locked.txt']);
+      },
+    );
+
+    it('a symlink it cannot resolve says so', async () => {
       const l = local();
-      const f = join(l.dir, 'ro.txt');
-      writeFileSync(f, 'precious\n');
-      chmodSync(l.dir, 0o555);
-      const w = await t(l.tools, 'write').run({ path: 'ro.txt', content: 'gone' }, l.exec);
-      chmodSync(l.dir, 0o755);
-      expect(w.isError).toBe(true);
-      expect(txt(w)).toMatch(/^Could not write .*ro\.txt: /);
-      expect(readFileSync(f, 'utf8')).toBe('precious\n');
-      expect(readdirSync(l.dir)).toEqual(['ro.txt']);
+      symlinkSync('loop', join(l.dir, 'loop'));
+      const r = await put(l, join(l.dir, 'loop'), 'x');
+      expect(r.exitCode).not.toBe(0);
+      expect(r.stderr.toString()).toMatch(/cannot resolve the symlink/);
     });
 
     it('a directory at the path is refused', async () => {

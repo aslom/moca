@@ -78,7 +78,9 @@ export const q = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
  * disk or a killed VM leaves either the old file or the new one, never a cut one. It creates the
  * parent directories, keeps an existing target's mode (a new file gets the umask's), and writes
  * through a symlink to the file it points to, keeping the link. On any failure it removes the temp
- * file and exits non-zero. A hard link to the target is not updated (the inode is replaced).
+ * file and exits non-zero. A read-only target is refused, as a plain write would refuse it. A
+ * hard link to the target is not updated (the inode is replaced), and a kill mid-write can leave a
+ * hidden `.sbx-*` temp beside the target.
  */
 export function writeFileCommand(path: string): string {
   // GNU `chmod --reference` on the sandbox; `stat -f %Lp` is the BSD fallback (local tests).
@@ -87,8 +89,11 @@ export function writeFileCommand(path: string): string {
     'chmod "$(stat -c %a -- "$p" 2>/dev/null || stat -f %Lp "$p")" "$t"; ' +
     `else chmod "$(printf '%o' $(( 0666 & ~$(umask) )))" "$t"; fi`;
   return (
-    `p=${q(path)}; if [ -L "$p" ]; then p=$(readlink -f -- "$p") || exit 1; fi; ` +
+    `p=${q(path)}; if [ -L "$p" ]; then ` +
+    'p=$(readlink -f -- "$p") || { echo "$p: cannot resolve the symlink" >&2; exit 1; }; fi; ' +
     'if [ -d "$p" ]; then echo "$p: Is a directory" >&2; exit 1; fi; ' +
+    // The rename would replace a read-only file in a writable directory; refuse it, as a plain write would.
+    'if [ -e "$p" ] && [ ! -w "$p" ]; then echo "$p: Permission denied" >&2; exit 1; fi; ' +
     'd=$(dirname -- "$p"); mkdir -p -- "$d" || exit 1; ' +
     't=$(mktemp "$d/.sbx-XXXXXX") || exit 1; ' +
     `if cat > "$t" && { ${mode}; } && mv -f -- "$t" "$p"; then exit 0; fi; ` +
