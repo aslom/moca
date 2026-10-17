@@ -11,8 +11,9 @@
 #
 # Touches ONLY its own files: the template unit, sbx.slice, sbx-<id>.slice, $SBX_ENV_DIR, and the
 # worker's directories under $SBX_SRV. Never another install on the same host. Every file it writes
-# is listed in $SBX_ENV_DIR/manifest; --uninstall removes the worker's files and leaves its workspace
-# data in place (the janitor, or the operator, removes that).
+# is listed in $SBX_ENV_DIR/manifest, and --uninstall is the undo (spec §8.2): it removes the
+# worker's files and, once no worker is left in the manifest, the shared template unit and
+# sbx.slice too. It leaves workspace data in place (the janitor, or the operator, removes that).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -98,6 +99,10 @@ install_worker() {
   # enable, then exactly one restart: a first install starts the unit, a re-install picks up the new
   # env file once (enable --now followed by restart would start a fresh unit twice).
   systemctl enable "sbx-worker@$id.service"
+  # A worker that crash-looped into `failed` (StartLimitBurst, e.g. a missing snapshot) refuses a
+  # restart with "start request repeated too quickly" until reset; a re-run after the fix is how an
+  # operator brings it back (as deploy/microvm/setup-microvm.sh does).
+  systemctl reset-failed "sbx-worker@$id.service" || true
   systemctl restart "sbx-worker@$id.service"
   wait_attached "$id"
 }
@@ -152,6 +157,26 @@ wait_attached() {
   die "sbx-worker@$id did not stay attached within ${SBX_ATTACH_TIMEOUT}s (a wrong or revoked token, TLS or DNS; a newly added worker's token can take about a minute to reach the relay, so re-run or raise SBX_ATTACH_TIMEOUT). The reason is in: journalctl -u sbx-worker@$id _SYSTEMD_INVOCATION_ID=$inv"
 }
 
+drop_manifest_lines() { # drop_manifest_lines -e FIXED... : remove every manifest line containing one
+  { grep -v -F "$@" "$SBX_ENV_DIR/manifest" || true; } >"$SBX_ENV_DIR/manifest.new"
+  mv "$SBX_ENV_DIR/manifest.new" "$SBX_ENV_DIR/manifest"
+}
+
+# Once the manifest names no worker, the units it lists as shared (`unit <path>`: the template unit
+# and sbx.slice) have nothing left to serve: remove them and their lines. Only what the manifest
+# lists, so a host whose manifest is gone keeps whatever is there.
+remove_shared_units() {
+  local kind path
+  [[ -f "$SBX_ENV_DIR/manifest" ]] || return 0
+  ! grep -q '^worker ' "$SBX_ENV_DIR/manifest" || return 0
+  while read -r kind path; do
+    [[ "$kind" == unit && -n "$path" ]] || continue
+    rm -f "$path"
+    drop_manifest_lines -x -e "unit $path"
+    log "removed $path (no SBX0 worker left on this host)"
+  done < <(grep '^unit ' "$SBX_ENV_DIR/manifest" || true)
+}
+
 uninstall_worker() {
   local id="$1"
   valid_id "$id" || die "not a worker id: $id"
@@ -159,9 +184,12 @@ uninstall_worker() {
   # A stop that hit TimeoutStopSec can leave the worker's VMs in its slice; stopping the slice ends them.
   systemctl stop "sbx-$id.slice" || true
   rm -f "$SBX_ENV_DIR/workers/$id.env" "$SBX_ENV_DIR/workers/$id-relay-ca.crt" "$SBX_UNIT_DIR/sbx-$id.slice"
-  [[ ! -f "$SBX_ENV_DIR/manifest" ]] || { grep -v -e "sbx-worker@$id " -e "$id-relay-ca.crt" "$SBX_ENV_DIR/manifest" >"$SBX_ENV_DIR/manifest.new" || true; mv "$SBX_ENV_DIR/manifest.new" "$SBX_ENV_DIR/manifest"; }
-  systemctl daemon-reload
+  # Fixed strings, so worker `a` never takes `ba`'s lines: `@a ` and `/a-relay-ca.crt` are not
+  # substrings of `@ba ` and `/ba-relay-ca.crt`.
+  [[ ! -f "$SBX_ENV_DIR/manifest" ]] || drop_manifest_lines -e "worker sbx-worker@$id " -e "/$id-relay-ca.crt"
   log "removed sbx-worker@$id"
+  remove_shared_units
+  systemctl daemon-reload
   log "left in place: $SBX_SRV/workspaces/$id and $SBX_SRV/jail/$id (workspace data; remove by hand when no sandbox needs it)"
 }
 
