@@ -1,0 +1,16 @@
+export {
+  CLIENT_CHANNEL_OPTIONS,
+  ExecMachineryError,
+  ExecRefusedError,
+  SandboxExecConn,
+  TOKEN_MARGIN_S,
+  newReqId,
+  type Exec,
+  type ExecConnOptions,
+  type ExecFailureKind,
+  type ExecOptions,
+  type ExecResult,
+  type SandboxTokenGrant,
+  type TokenFn,
+  type TokenRequest,
+} from './exec-conn.js';

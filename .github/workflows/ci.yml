@@ -212,8 +212,8 @@ jobs:
 
       - name: Verify no codegen drift
         run: |
-          git add -A -- packages/k8s-sandbox/src/gen gen
-          git diff --cached --exit-code -- packages/k8s-sandbox/src/gen gen \
+          git add -A -- packages/k8s-sandbox/src/gen packages/sandbox-client/src/gen gen
+          git diff --cached --exit-code -- packages/k8s-sandbox/src/gen packages/sandbox-client/src/gen gen \
             || { echo "::error::Generated stubs are out of date or untracked. Run 'buf generate' and commit."; exit 1; }
 
       # A module left out of go.work falls back to standalone resolution and brings
