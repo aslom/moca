@@ -442,26 +442,27 @@ function addExecService(server: Server, relay: Relay, auth: ExecAuth): void {
       return;
     }
     const entry = { wrk: sandboxId, wid };
-    owned.set(key, entry);
-    inflight.set(claims.sbx, n + 1);
     // No Exec outlives its token (SBX0 §3.6): at exp + leeway the worker is told to abort and
     // the call ends at once. The handler then drains the worker's acknowledgement without
     // writing it, so the slot and the ownership entry are held until the worker lets go.
     let expired = false;
-    const disarm = armDeadline(
-      (claims.exp + leewayS) * 1000,
-      () => {
-        if (call.cancelled) return;
-        expired = true;
-        relay.routeAbort(sandboxId, wid);
-        failExecStream(
-          call,
-          grpcError(status.DEADLINE_EXCEEDED, 'sandbox token expired during the Exec'),
-        );
-      },
-      auth.timers,
-    );
+    let disarm: ReturnType<typeof armDeadline> | undefined;
     try {
+      owned.set(key, entry);
+      inflight.set(claims.sbx, n + 1);
+      disarm = armDeadline(
+        (claims.exp + leewayS) * 1000,
+        () => {
+          if (call.cancelled) return;
+          expired = true;
+          relay.routeAbort(sandboxId, wid);
+          failExecStream(
+            call,
+            grpcError(status.DEADLINE_EXCEEDED, 'sandbox token expired during the Exec'),
+          );
+        },
+        auth.timers,
+      );
       await pumpExec(
         call,
         relay,
@@ -481,7 +482,7 @@ function addExecService(server: Server, relay: Relay, auth: ExecAuth): void {
         },
       );
     } finally {
-      disarm();
+      if (disarm) disarm();
       if (owned.get(key) === entry) owned.delete(key);
       const left = (inflight.get(claims.sbx) ?? 1) - 1;
       if (left > 0) inflight.set(claims.sbx, left);
