@@ -32,6 +32,8 @@ case "$1 $2" in
 'get secret')
   f="$MOCK_STATE/secret-$3.json"
   # MOCK_BLANK_GET=NAME: that Secret reads back with no data (emptied by someone else mid-run).
+  # MOCK_FAIL_GET=NAME: reading that Secret fails (a transient API or RBAC error).
+  [[ "$3" != "${MOCK_FAIL_GET:-}" ]] || { echo 'Error from server (InternalError): etcdserver: request timed out' >&2; exit 1; }
   if [[ -f "$f" && "$3" == "${MOCK_BLANK_GET:-}" ]]; then jq -c 'del(.data)' "$f"; elif [[ -f "$f" ]]; then cat "$f"; fi
   exit 0 ;;
 'create secret')
@@ -100,12 +102,18 @@ secret_val() { jq -r --arg k "$2" '.data[$k] // empty' "$MOCK_STATE/secret-$1.js
 # 1. Refusals, each before anything is applied.
 for bad in 'unset SBX_NAMESPACE' 'export SBX_WORKERS=sbx-dash' 'export SBX_WORKERS=DIR' \
   'export SBX_WORKERS="a a"' 'export SBX_CLIENTS=Alice' 'export SBX_EXEC_HOST=$SBX_ATTACH_HOST' \
-  'unset SBX_IMAGE'; do
+  'unset SBX_IMAGE' 'export SBX_CLIENTS=bob-x' 'export SBX_CLIENTS="bob bob-x"'; do
   : >"$MOCK_LOG"
   ! run_setup eval "$bad" || fail "accepted: $bad"
   ! grep -q 'apply' "$MOCK_LOG" || fail "applied something before refusing: $bad"
 done
 pass 'refuses missing or malformed inputs before applying anything'
+
+# A '-' in a client name would let one client's key prefix (sbx-exec-bob-) cover another's keys.
+! run_setup export SBX_CLIENTS='bob bob-x' || fail 'accepted client names bob and bob-x'
+grep -q "client name 'bob-x' must match .* no '-'" "$TMP/out" || fail "the '-' refusal does not say why"
+grep -q 'also prefix another client' "$TMP/out" || fail "the '-' refusal does not name the prefix collision"
+pass "refuses a client name with '-' and says why (its key prefix would cover another client's keys)"
 
 : >"$MOCK_LOG"
 ! run_setup export MOCK_NO_NAMESPACE=moca-sbx-test || fail 'ran against a missing namespace'
@@ -128,9 +136,12 @@ done
 [[ "$(secret_val moca-relay-sandbox-tokens sbx_default)" =~ ^[0-9a-f]{64}$ ]] || fail 'no worker token for sbx_default'
 [[ "$(secret_val moca-relay SH_RELAY_TOKEN)" != "$(secret_val moca-relay MOCA_RELAY_EXEC_TOKEN)" ]] || fail 'equal relay tokens'
 clients="$(secret_val sbx-relay-clients MOCA_RELAY_CLIENT_TOKENS)"
-[[ "$(printf '%s\n' "$clients" | tr ',' '\n' | wc -l | tr -d ' ')" == 4 ]] || fail "want 4 client entries (2 clients x 2 workers): $clients"
-printf '%s' "$clients" | tr ',' '\n' | grep -Eqx 'sbx_py312:sbx-exec-bob-:[0-9a-f]{64}' || fail "no bob/sbx_py312 entry: $clients"
-pass 'creates every Secret, one worker token per worker, one client entry per (client, worker)'
+[[ "$(printf '%s\n' "$clients" | tr ',' '\n' | wc -l | tr -d ' ')" == 2 ]] || fail "want 2 client entries (one per client): $clients"
+printf '%s' "$clients" | tr ',' '\n' | grep -Eqx 'sbx_default:sbx-exec-bob-:[0-9a-f]{64}' || fail "no bob/sbx_default entry: $clients"
+! printf '%s' "$clients" | grep -q 'sbx_py312:' || fail "a client token was minted for a worker no bundle names: $clients"
+[[ "$(jq -r '.data | keys | join(" ")' "$MOCK_STATE/secret-sbx-relay-client-keys.json")" == 'alice.sbx_default bob.sbx_default' ]] ||
+  fail "sbx-relay-client-keys holds more than the delivered pairs: $(jq -r '.data | keys | join(" ")' "$MOCK_STATE/secret-sbx-relay-client-keys.json")"
+pass 'creates every Secret, one worker token per worker, one client token per client on the first worker only'
 
 K="$MOCK_STATE/applied-kustomization.yaml"
 grep -qx 'namespace: moca-sbx-test' "$K" || fail 'generated overlay has the wrong namespace'
@@ -191,6 +202,18 @@ grep -qx 'SBX_SANDBOX_ID=sbx_default' "$REPO/deploy/sbx/.generated/clients/bob/c
 [[ "$(tokens_hash)" == "$hash_before" ]] || fail 'the client-tokens hash moved on a re-run with the same inputs'
 pass 'newline- or tab-separated SBX_WORKERS / SBX_CLIENTS keep every token, and the relay hash is stable'
 
+# 4b. A token for a pair no bundle delivers (a client on a worker other than the first, as the
+# all-pairs 1a script minted) is revoked on re-run with the explicit null patch.
+jq --arg v "$(printf '%064d' 9 | base64 | tr -d '\n')" '.data["alice.sbx_py312"] = $v' \
+  "$MOCK_STATE/secret-sbx-relay-client-keys.json" >"$TMP/k.json" && mv "$TMP/k.json" "$MOCK_STATE/secret-sbx-relay-client-keys.json"
+: >"$MOCK_LOG"
+run_setup true || fail 'run with an undelivered pair failed'
+[[ -z "$(secret_val sbx-relay-client-keys alice.sbx_py312)" ]] || fail 'the undelivered alice.sbx_py312 token was not revoked'
+[[ -n "$(secret_val sbx-relay-client-keys alice.sbx_default)" ]] || fail 'the delivered alice.sbx_default token was lost'
+grep -q 'kubectl patch secret sbx-relay-client-keys' "$MOCK_LOG" || fail 'the undelivered pair was not revoked by an explicit null patch'
+! secret_val sbx-relay-clients MOCA_RELAY_CLIENT_TOKENS | grep -q 'sbx_py312:' || fail 'the relay list still names sbx_py312'
+pass 'revokes a client token on a worker other than the first (never delivered) on re-run'
+
 # 5. Removing a worker or a client revokes exactly it (with explicit null patch, not apply pruning).
 : >"$MOCK_LOG"
 run_setup export SBX_WORKERS=sbx_default SBX_CLIENTS=alice || fail 'shrinking run failed'
@@ -245,3 +268,26 @@ for v in $(jq -r '.data[]' "$MOCK_STATE/secret-sbx-relay-client-keys.json" | whi
   ! grep -qF "$v" "$TMP/out" || fail 'the refusal printed a token value'
 done
 pass 'refuses, naming the id and no value, when a worker or client token reads back empty'
+
+# 9. A failing `kubectl get` of a route certificate stops the run; it never reads as "no Secret",
+# which would mint a new self-signed certificate and break the CA in every bundle already out.
+run_setup true || fail 're-populate run failed'
+before_tls="$(jq -S . "$MOCK_STATE/secret-moca-relay-tls.json")"
+: >"$MOCK_LOG"
+! run_setup export MOCK_FAIL_GET=moca-relay-tls || fail 'carried on past a failing kubectl get of moca-relay-tls'
+! grep -q 'kubectl create secret tls moca-relay-tls' "$MOCK_LOG" || fail 'minted a new certificate after a failing kubectl get'
+! grep -q 'kubectl apply -k' "$MOCK_LOG" || fail 'applied the stack after a failing kubectl get'
+! grep -q 'self-signed one' "$TMP/out" || fail 'claimed to issue a self-signed certificate after a failing kubectl get'
+[[ "$(jq -S . "$MOCK_STATE/secret-moca-relay-tls.json")" == "$before_tls" ]] || fail 'moca-relay-tls changed after a failing kubectl get'
+pass 'a failing kubectl get of a route certificate fails the run and mints nothing'
+
+# 10. An image pinned by digest: newName drops any tag (repo:tag@sha256:... renders invalid otherwise),
+# and a registry port is not mistaken for a tag.
+D="sha256:$(printf '%064d' 1)"
+run_setup export SBX_IMAGE="ghcr.io/example/moca:sbx-1a@$D" || fail 'run with repo:tag@digest failed'
+grep -qx '    newName: ghcr.io/example/moca' "$K" || fail "newName keeps the tag: $(grep newName "$K")"
+grep -qx "    digest: $D" "$K" || fail 'digest not set'
+! grep -q 'newTag' "$K" || fail 'newTag set alongside a digest'
+run_setup export SBX_IMAGE="registry.example.invalid:5000/moca@$D" || fail 'run with host:port/repo@digest failed'
+grep -qx '    newName: registry.example.invalid:5000/moca' "$K" || fail "newName lost the registry port: $(grep newName "$K")"
+pass 'a digest-pinned image renders newName without the tag (and keeps a registry port)'

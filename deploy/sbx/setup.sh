@@ -45,7 +45,9 @@ parse_args() {
 }
 
 WORKER_RE='^[A-Za-z_][A-Za-z0-9_]*$'
-CLIENT_RE='^[a-z0-9][a-z0-9-]{0,30}$'
+# No '-' in a client name: its 1a token admits workspace keys under sbx-exec-<name>-, and with a '-'
+# allowed, client bob's prefix sbx-exec-bob- would also be a prefix of client bob-x's keys.
+CLIENT_RE='^[a-z0-9][a-z0-9_]{0,30}$'
 HOST_RE='^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'
 NS_RE='^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
 
@@ -65,7 +67,8 @@ validate() {
   done
   seen=' '
   for c in ${SBX_CLIENTS:-}; do
-    [[ "$c" =~ $CLIENT_RE ]] || die "client name '$c' must match $CLIENT_RE"
+    [[ "$c" =~ $CLIENT_RE ]] ||
+      die "client name '$c' must match $CLIENT_RE, with no '-': its token admits workspace keys under sbx-exec-$c-, which would then also prefix another client's keys (bob and bob-x)"
     [[ "$seen" != *" $c "* ]] || die "client name '$c' is listed twice"
     seen+="$c "
   done
@@ -168,13 +171,16 @@ ensure_worker_tokens() {
   fi
 }
 
-# 1a only (spec §3.1): the prototype relay's static client tokens, one per (client, worker), each
-# limited to workspace keys under sbx-exec-<client>-. The tokens are kept per pair in
-# sbx-relay-client-keys; the relay reads the joined list from sbx-relay-clients.
+# 1a only (spec §3.1): the prototype relay's static client tokens, each limited to workspace keys
+# under sbx-exec-<client>-. One per client, on the FIRST worker in SBX_WORKERS only: that is the one
+# its bundle names (1a ships one template worker, spec §11), and a token nobody is handed should not
+# be live in the relay. 1b's per-sandbox tokens replace these. The tokens are kept per (client,
+# worker) pair in sbx-relay-client-keys; the relay reads the joined list from sbx-relay-clients.
 ensure_client_tokens() {
-  local keys_json pairs=() c w stale patch
+  local keys_json pairs=() c first stale patch
   keys_json="$(secret_json sbx-relay-client-keys)"
-  for c in ${SBX_CLIENTS:-}; do for w in $SBX_WORKERS; do pairs+=("$c.$w"); done; done
+  first="${SBX_WORKERS%% *}"
+  for c in ${SBX_CLIENTS:-}; do pairs+=("$c.$first"); done
   (
     i=0
     joined=''
@@ -189,12 +195,13 @@ ensure_client_tokens() {
     export S_0="$joined"
     apply_secret sbx-relay-clients MOCA_RELAY_CLIENT_TOKENS
   )
-  # Revoke any (client, worker) pair no longer in the current list with an explicit null patch.
+  # Revoke any (client, worker) pair not delivered now -- a dropped client, or a client's token on a
+  # worker other than the first -- with an explicit null patch.
   stale="$(printf '%s' "$keys_json" | jq -r '.data // {} | keys[]' | while read -r k; do
     [[ " ${pairs[*]+"${pairs[*]}"} " == *" $k "* ]] || printf '%s\n' "$k"
   done)"
   if [[ -n "$stale" ]]; then
-    log "revoking the client token(s) no longer listed: $(printf '%s' "$stale" | tr '\n' ' ')"
+    log "revoking the client token(s) no longer delivered: $(printf '%s' "$stale" | tr '\n' ' ')"
     patch="$(printf '%s\n' "$stale" | jq -Rnc '{data: ([inputs | {key: ., value: null}] | from_entries)}')"
     kc patch secret sbx-relay-client-keys -n "$NS" --type=merge -p "$patch" >/dev/null
   fi
@@ -210,18 +217,24 @@ route_cert() {
     log "installing the $secret certificate from $cert"
     kc create secret tls "$secret" -n "$NS" --cert="$cert" --key="$key" --dry-run=client -o json |
       kc apply --server-side --force-conflicts --field-manager=sbx-setup -f - >/dev/null
-  elif [[ -z "$(secret_json "$secret")" ]]; then
-    dir="$(mktemp -d)"
-    (
-      trap 'rm -rf "$dir"' EXIT
-      chmod 700 "$dir"
-      openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj "/CN=$host" \
-        -addext "subjectAltName=DNS:$host" -keyout "$dir/tls.key" -out "$dir/tls.crt" 2>"$dir/err" ||
-        { cat "$dir/err" >&2; die "openssl could not create the self-signed certificate for $host"; }
-      kc create secret tls "$secret" -n "$NS" --cert="$dir/tls.crt" --key="$dir/tls.key" --dry-run=client -o json |
-        kc apply --server-side --force-conflicts --field-manager=sbx-setup -f - >/dev/null
-    )
-    log "WARNING: no certificate given for $host: using a self-signed one, shipped in every bundle"
+  else
+    # Captured first, so a failing `kubectl get` stops the run (errexit). Tested inside [[ ]], a
+    # transient API or RBAC error would read as "no Secret" and replace the certificate every
+    # bundle already handed out trusts.
+    json="$(secret_json "$secret")"
+    if [[ -z "$json" ]]; then
+      dir="$(mktemp -d)"
+      (
+        trap 'rm -rf "$dir"' EXIT
+        chmod 700 "$dir"
+        openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj "/CN=$host" \
+          -addext "subjectAltName=DNS:$host" -keyout "$dir/tls.key" -out "$dir/tls.crt" 2>"$dir/err" ||
+          { cat "$dir/err" >&2; die "openssl could not create the self-signed certificate for $host"; }
+        kc create secret tls "$secret" -n "$NS" --cert="$dir/tls.crt" --key="$dir/tls.key" --dry-run=client -o json |
+          kc apply --server-side --force-conflicts --field-manager=sbx-setup -f - >/dev/null
+      )
+      log "WARNING: no certificate given for $host: using a self-signed one, shipped in every bundle"
+    fi
   fi
   json="$(secret_json "$secret")"
   crt="$(json_value "$json" tls.crt)"
@@ -236,7 +249,10 @@ route_cert() {
 image_entry() {
   local from="$1" ref="$2" name tag=''
   if [[ "$ref" == *@* ]]; then
-    printf '  - name: %s\n    newName: %s\n    digest: %s\n' "$from" "${ref%@*}" "${ref#*@}"
+    # repo:tag@sha256:... -- the digest pins the image; a tag left in newName renders an invalid ref.
+    name="${ref%@*}"
+    [[ "${name##*/}" != *:* ]] || name="${name%:*}"
+    printf '  - name: %s\n    newName: %s\n    digest: %s\n' "$from" "$name" "${ref#*@}"
     return 0
   fi
   name="$ref"
@@ -248,7 +264,10 @@ image_entry() {
 # 16 hex characters of the SHA-256 of the relay's MOCA_RELAY_CLIENT_TOKENS, as applied. Not secret
 # (a hash of random tokens), but computed through a pipe all the same: the value never reaches argv.
 client_tokens_hash() {
-  json_value "$(secret_json sbx-relay-clients)" MOCA_RELAY_CLIENT_TOKENS | openssl dgst -sha256 -hex |
+  local json
+  # `|| return`: this runs in a command substitution, where errexit does not apply.
+  json="$(secret_json sbx-relay-clients)" || return 1
+  json_value "$json" MOCA_RELAY_CLIENT_TOKENS | openssl dgst -sha256 -hex |
     awk '{print substr($NF, 1, 16)}'
 }
 
