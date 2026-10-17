@@ -75,7 +75,7 @@ if ARGV[8] == '1' then redis.call('SET', KEYS[5], id, 'PXAT', ARGV[9]) end
 return 'ok'
 `;
 
-// KEYS: rec, live, ended, name (a placeholder when unnamed).
+// KEYS: rec, live, name (a placeholder when unnamed).
 // ARGV: now, retention, id, hasName.
 const DELETE = `
 if redis.call('EXISTS', KEYS[1]) == 0 then return 'not_found' end
@@ -85,9 +85,7 @@ if now >= tonumber(redis.call('HGET', KEYS[1], 'expiresAt')) then return 'alread
 redis.call('HSET', KEYS[1], 'deletedAt', ARGV[1])
 redis.call('EXPIRE', KEYS[1], ret)
 redis.call('ZREM', KEYS[2], ARGV[3])
-redis.call('ZADD', KEYS[3], now, ARGV[3])
-redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', now - ret)
-if ARGV[4] == '1' and redis.call('GET', KEYS[4]) == ARGV[3] then redis.call('DEL', KEYS[4]) end
+if ARGV[4] == '1' and redis.call('GET', KEYS[3]) == ARGV[3] then redis.call('DEL', KEYS[3]) end
 return 'deleted'
 `;
 
@@ -103,9 +101,6 @@ export class RedisSandboxStore implements SandboxStore {
     `${this.prefix}name:${subjectHash(subject)}:${name}`;
   private get liveKey() {
     return `${this.prefix}live`;
-  }
-  private get endedKey() {
-    return `${this.prefix}ended`;
   }
   private get allKey() {
     return `${this.prefix}all`;
@@ -195,23 +190,10 @@ export class RedisSandboxStore implements SandboxStore {
         keys: [
           this.recKey(id),
           this.liveKey,
-          this.endedKey,
           r.name ? this.nameKey(r.owner, r.name) : this.noneKey,
         ],
         arguments: [String(nowS), String(retentionS), id, r.name ? '1' : '0'],
       })) as DeleteOutcome;
-    });
-  }
-
-  terminatedBefore(cutoffS: number, nowS: number): Promise<SandboxRecord[]> {
-    return this.guard(async () => {
-      const [deleted, expired] = await Promise.all([
-        this.redis.zRange(this.endedKey, '-inf', cutoffS, { BY: 'SCORE' }),
-        // `live` holds every undeleted sandbox scored by expiresAt; the expired ones end at that score.
-        this.redis.zRange(this.liveKey, '-inf', Math.min(cutoffS, nowS), { BY: 'SCORE' }),
-      ]);
-      const ids = [...new Set([...deleted, ...expired])];
-      return this.readAll(ids, [this.endedKey, this.liveKey]);
     });
   }
 }

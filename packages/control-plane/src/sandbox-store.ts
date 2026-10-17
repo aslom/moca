@@ -59,8 +59,6 @@ export interface SandboxStore {
   /** Newest first, terminated (but retained) records included. */
   listAll(nowS: number): Promise<SandboxRecord[]>;
   markDeleted(id: string, nowS: number, retentionS: number): Promise<DeleteOutcome>;
-  /** Deleted or expired records whose terminatedAt is at or before the cutoff (the janitor's list). */
-  terminatedBefore(cutoffS: number, nowS: number): Promise<SandboxRecord[]>;
 }
 
 /** Live: not deleted and not yet expired. Quotas and name uniqueness count only these. */
@@ -128,10 +126,6 @@ export class MemorySandboxStore implements SandboxStore {
     r.deletedAt = nowS;
     r.retentionS = retentionS;
     return 'deleted';
-  }
-
-  async terminatedBefore(cutoffS: number, nowS: number): Promise<SandboxRecord[]> {
-    return this.list(nowS, (r) => !isLive(r, nowS) && endOf(r) <= cutoffS);
   }
 }
 

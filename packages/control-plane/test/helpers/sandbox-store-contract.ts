@@ -161,20 +161,5 @@ export function sandboxStoreContract(name: string, make: MakeStore): void {
       expect((await store.listAll(T0)).map((r) => r.id)).toEqual([other.id, b.id, a.id]);
       await done();
     });
-
-    it('lists for the janitor only what ended at or before the cutoff', async () => {
-      const { store, done } = await make();
-      const deletedOld = rec();
-      const deletedNew = rec();
-      const expiredOld = rec({ expiresAt: T0 + 5 });
-      const live = rec();
-      for (const r of [deletedOld, deletedNew, expiredOld, live])
-        await store.create(r, { ...LIMITS, perSubject: 9, total: 9 }, T0);
-      await store.markDeleted(deletedOld.id, T0 + 1, LIMITS.retentionS);
-      await store.markDeleted(deletedNew.id, T0 + 100, LIMITS.retentionS);
-      const ids = (await store.terminatedBefore(T0 + 50, T0 + 200)).map((r) => r.id).sort();
-      expect(ids).toEqual([deletedOld.id, expiredOld.id].sort());
-      await done();
-    });
   });
 }
