@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { rootCertificates } from 'node:tls';
+import * as tls from 'node:tls';
 import { credentials, Metadata, status, type ServiceError } from '@grpc/grpc-js';
 import { SandboxExecClient, Stream, type ExecEvent } from './gen/sandbox/v1/sandbox.js';
 
@@ -91,6 +91,11 @@ export interface ExecConnOptions {
   workspaceKey: string;
   token: TokenFn;
   keepaliveMs?: number;
+  /**
+   * Seconds beyond `timeout_s` before the client gives up on an unanswered Exec (default 90): a
+   * backstop for a relay or connection that goes silent without closing. Lowered only by tests.
+   */
+  backstopMarginS?: number;
   /** The clock, in epoch milliseconds (tests). */
   now?: () => number;
 }
@@ -123,6 +128,10 @@ export const CLIENT_CHANNEL_OPTIONS: Record<string, number> = {
 export const TOKEN_MARGIN_S = 60;
 /** The timeout when the token's lifetime cannot be read. */
 const FALLBACK_TIMEOUT_S = 120;
+/** A token lifetime must leave at least this much timeout after the margin: 121 s gives 61 s. */
+const MIN_LIFETIME_S = 2 * TOKEN_MARGIN_S + 1;
+/** The client-side backstop deadline is `timeout_s` plus this (spec §6.5: never wait forever). */
+const BACKSTOP_MARGIN_S = 90;
 
 /** The worker's ExecError for a command that ran out of `timeout_s`. */
 const TIMEOUT_MESSAGE = /^timeout:(\d+)$/;
@@ -136,6 +145,27 @@ export function newReqId(): number {
 
 class NotStarted extends Error {}
 
+/** Where the trusted roots come from: `node:tls`, or a fake in tests. */
+export interface RootSource {
+  getCACertificates?: (type: 'default') => string[];
+  rootCertificates: readonly string[];
+}
+
+/**
+ * The CA bundle for a self-issued exec certificate: Node's default roots, then the extra PEM. The
+ * default roots are `tls.getCACertificates('default')` where it exists (Node >= 22.15), which also
+ * carries NODE_EXTRA_CA_CERTS and, under --use-system-ca, the OS store. Older Nodes fall back to
+ * the bundled `tls.rootCertificates`. grpc-js REPLACES the roots with whatever it is given, so the
+ * defaults must be in the bundle or a relay behind a public certificate would stop verifying.
+ */
+export function caBundle(extraPem: string, source: RootSource = tls): Buffer {
+  const roots =
+    typeof source.getCACertificates === 'function'
+      ? source.getCACertificates('default')
+      : source.rootCertificates;
+  return Buffer.from([...roots, extraPem].join('\n'));
+}
+
 function abortReason(signal: AbortSignal): unknown {
   return signal.reason ?? new DOMException('The operation was aborted', 'AbortError');
 }
@@ -148,9 +178,7 @@ export class SandboxExecConn {
 
   constructor(private readonly o: ExecConnOptions) {
     const creds = o.tls
-      ? credentials.createSsl(
-          o.caPem ? Buffer.from([...rootCertificates, o.caPem].join('\n')) : null,
-        )
+      ? credentials.createSsl(o.caPem ? caBundle(o.caPem) : null)
       : credentials.createInsecure();
     this.client = new SandboxExecClient(o.addr, creds, {
       ...CLIENT_CHANNEL_OPTIONS,
@@ -165,30 +193,32 @@ export class SandboxExecConn {
       throw new RangeError(`timeoutS must be a positive number of seconds, got ${requested}`);
     }
     if (opts.signal?.aborted) throw abortReason(opts.signal);
-    const { grant, timeoutS, capped } = await this.prepare(
-      requested === undefined ? undefined : Math.ceil(requested),
-    );
+    const want = requested === undefined ? undefined : Math.ceil(requested);
     // Unique within the sandbox, and reused for the one retry: the relay namespaces it per sandbox.
     const reqId = newReqId();
-    const finish = (r: ExecResult): ExecResult => (capped ? { ...r, capped: true } : r);
+    const attempt = async (force: boolean) => {
+      const { grant, timeoutS, capped } = await this.prepare(want, force);
+      const r = await this.once(command, opts, reqId, timeoutS, grant.token);
+      return capped ? { ...r, capped: true } : r;
+    };
     try {
-      return finish(await this.once(command, opts, reqId, timeoutS, grant.token));
+      return await attempt(false);
     } catch (err) {
       if (!(err instanceof NotStarted)) throw err;
     }
-    // The token was refused before anything ran: refresh once and retry.
-    const fresh = await this.o.token({ force: true, minValidS: timeoutS + TOKEN_MARGIN_S });
-    this.learn(fresh);
+    // The token was refused before anything ran (the relay refuses before routing): refresh once
+    // and retry under the same req_id. The fresh token is fitted by the same freshness rules, as it
+    // may be shorter than the first (one minted near the sandbox's expiry).
     try {
-      return finish(await this.once(command, opts, reqId, timeoutS, fresh.token));
-    } catch (again) {
-      if (again instanceof NotStarted) {
+      return await attempt(true);
+    } catch (err) {
+      if (err instanceof NotStarted) {
         throw new ExecRefusedError(
-          `${again.message} (after one token refresh)`,
+          `${err.message} (after one token refresh)`,
           status.UNAUTHENTICATED,
         );
       }
-      throw again;
+      throw err;
     }
   };
 
@@ -197,7 +227,15 @@ export class SandboxExecConn {
   };
 
   private learn(g: SandboxTokenGrant): void {
-    if (g.lifetimeS > 0) this.lifetimeS = g.lifetimeS;
+    if (g.lifetimeS <= 0) return;
+    if (g.lifetimeS < MIN_LIFETIME_S) {
+      // Lifetime minus the 60 s margin would leave a timeout of a minute or less, cut to 1 s at
+      // worst: fail loudly instead of running every command under a uselessly short timeout.
+      throw new ExecMachineryError(
+        `sandbox token lifetime ${g.lifetimeS}s is too short (minimum ${MIN_LIFETIME_S}s)`,
+      );
+    }
+    this.lifetimeS = g.lifetimeS;
   }
 
   /** Seconds the grant has left by this machine's clock; undefined if its expiry is unreadable. */
@@ -206,47 +244,49 @@ export class SandboxExecConn {
   }
 
   /**
-   * Token freshness (spec §6.5): the token to send, the timeout to send, and whether a requested
-   * timeout was cut. `timeout_s` defaults to, and is capped at, the token lifetime minus 60 s, and
-   * the token must have the timeout plus 60 s left, or the relay would cancel the Exec at `exp`.
+   * Token freshness (spec §6.5): the token to send, the timeout to send, and whether the timeout
+   * was cut. `timeout_s` defaults to, and is capped at, the token lifetime minus 60 s, and the token
+   * must have the timeout plus 60 s left, or the relay would cancel the Exec at `exp`. `force` is
+   * the one retry after UNAUTHENTICATED: a fresh token, fitted the same way.
    */
-  private async prepare(requested: number | undefined) {
-    const timeoutFor = (life: number) => {
-      if (!life) return { timeoutS: requested ?? FALLBACK_TIMEOUT_S, capped: false };
-      const cap = Math.max(1, life - TOKEN_MARGIN_S);
-      return requested === undefined
-        ? { timeoutS: cap, capped: false }
-        : { timeoutS: Math.min(requested, cap), capped: requested > cap };
+  private async prepare(requested: number | undefined, force = false) {
+    const ask = async (f: boolean, minValidS: number) => {
+      const g = await this.o.token({ force: f, minValidS });
+      this.learn(g);
+      return g;
     };
     let grant: SandboxTokenGrant;
-    let t: { timeoutS: number; capped: boolean };
-    if (this.lifetimeS) {
-      t = timeoutFor(this.lifetimeS);
-      grant = await this.o.token({ force: false, minValidS: t.timeoutS + TOKEN_MARGIN_S });
-      this.learn(grant);
+    if (this.lifetimeS || force) {
+      grant = await ask(force, this.timeoutFor(requested).timeoutS + TOKEN_MARGIN_S);
     } else {
       // The lifetime is learnt from the first token; then ask once more only if it falls short.
-      grant = await this.o.token({ force: false, minValidS: TOKEN_MARGIN_S });
-      this.learn(grant);
-      t = timeoutFor(grant.lifetimeS);
+      grant = await ask(false, TOKEN_MARGIN_S);
+      const want = this.timeoutFor(requested).timeoutS + TOKEN_MARGIN_S;
       // ceil, as below: a token minted within the last second is as fresh as one can be.
       const left = this.left(grant);
-      if (left !== undefined && Math.ceil(left) < t.timeoutS + TOKEN_MARGIN_S) {
-        grant = await this.o.token({ force: false, minValidS: t.timeoutS + TOKEN_MARGIN_S });
-        this.learn(grant);
-      }
+      if (left !== undefined && Math.ceil(left) < want) grant = await ask(false, want);
     }
+    let t = this.timeoutFor(requested);
     // Even a fresh token may not cover it: one minted near the sandbox's expiry is shorter, and
-    // clocks differ. Then the timeout is cut to what the token has left, less 60 s.
+    // clocks differ. Then the timeout is cut to what the token has left, less 60 s, and the
+    // result says so -- a defaulted timeout included, since it was cut below the default.
     const left = this.left(grant);
     if (left !== undefined && t.timeoutS + TOKEN_MARGIN_S > left) {
       // ceil: a token minted this instant keeps its full cap.
       const cut = Math.max(1, Math.ceil(left) - TOKEN_MARGIN_S);
-      if (cut < t.timeoutS) {
-        t = { timeoutS: cut, capped: t.capped || requested !== undefined };
-      }
+      if (cut < t.timeoutS) t = { timeoutS: cut, capped: true };
     }
     return { grant, ...t };
+  }
+
+  /** The timeout for the lifetime known so far: the default, or the request capped to it. */
+  private timeoutFor(requested: number | undefined): { timeoutS: number; capped: boolean } {
+    const life = this.lifetimeS;
+    if (!life) return { timeoutS: requested ?? FALLBACK_TIMEOUT_S, capped: false };
+    const cap = life - TOKEN_MARGIN_S;
+    return requested === undefined
+      ? { timeoutS: cap, capped: false }
+      : { timeoutS: Math.min(requested, cap), capped: requested > cap };
   }
 
   private once(
@@ -260,6 +300,7 @@ export class SandboxExecConn {
     if (signal?.aborted) return Promise.reject(abortReason(signal));
     const md = new Metadata();
     md.set('authorization', `Bearer ${token}`);
+    const backstopS = timeoutS + (this.o.backstopMarginS ?? BACKSTOP_MARGIN_S);
     const call = this.client.exec(
       {
         sandboxId: this.o.sandboxId,
@@ -273,6 +314,8 @@ export class SandboxExecConn {
         },
       },
       md,
+      // Real wall time, not `now`: grpc-js measures the deadline against the system clock.
+      { deadline: Date.now() + backstopS * 1000 },
     );
     // A call can report both 'error' and 'end' on some grpc-js paths; a settled promise ignores
     // the second, so both handlers only resolve or reject.
@@ -336,6 +379,7 @@ export class SandboxExecConn {
         if (!started && e.code === status.PERMISSION_DENIED) {
           return reject(new ExecRefusedError(details, e.code));
         }
+        // Only the relay's "sandbox busy" is busy: grpc-js message-size limits are RESOURCE_EXHAUSTED too.
         if (e.code === status.RESOURCE_EXHAUSTED && details.startsWith('sandbox busy')) {
           return reject(new ExecMachineryError(details, e.code, 'busy'));
         }
@@ -348,6 +392,16 @@ export class SandboxExecConn {
               `${details}: the command outlived its sandbox token and was cancelled`,
               e.code,
               'token_expired',
+            ),
+          );
+        }
+        if (e.code === status.DEADLINE_EXCEEDED) {
+          // Not the relay's token expiry (matched by its text above): this client's own deadline.
+          return reject(
+            new ExecMachineryError(
+              `sandbox failure: no answer within ${backstopS}s, the client-side backstop deadline ` +
+                `(timeout_s ${timeoutS} + ${backstopS - timeoutS}s): ${details}`,
+              e.code,
             ),
           );
         }

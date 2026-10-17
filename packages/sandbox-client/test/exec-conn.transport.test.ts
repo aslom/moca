@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { createServer, connect as netConnect, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
+import * as nodeTls from 'node:tls';
 import { join } from 'node:path';
 import { Server, ServerCredentials, status, type ServerWritableStream } from '@grpc/grpc-js';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -16,6 +17,7 @@ import {
   ExecMachineryError,
   ExecRefusedError,
   SandboxExecConn,
+  caBundle,
   newReqId,
   type ExecConnOptions,
   type TokenRequest,
@@ -359,7 +361,7 @@ describe('SandboxExecConn (SBX0 §6.5)', () => {
     expect(r.seen).toHaveLength(0);
   });
 
-  it('speaks TLS with an extra CA, keeping the system roots', async () => {
+  it('speaks TLS to a relay whose self-issued certificate the extra CA trusts', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'sbx-tls-'));
     execFileSync(
       'openssl',
@@ -390,6 +392,53 @@ describe('SandboxExecConn (SBX0 §6.5)', () => {
       caPem: cert.toString(),
     });
     expect((await c.exec('x')).exitCode).toBe(3);
+  });
+
+  it("keeps Node's default roots beside the extra CA (getCACertificates where it exists)", () => {
+    const extra = '-----BEGIN CERTIFICATE-----\nEXTRA\n-----END CERTIFICATE-----';
+    const asked: string[] = [];
+    const modern = {
+      getCACertificates: (type: 'default') => (asked.push(type), ['DEFAULT-1', 'OS-ROOT']),
+      rootCertificates: ['BUNDLED-ONLY'],
+    };
+    expect(caBundle(extra, modern).toString()).toBe(`DEFAULT-1\nOS-ROOT\n${extra}`);
+    expect(asked).toEqual(['default']);
+    // Node < 22.15 has no getCACertificates: the bundled roots.
+    expect(caBundle(extra, { rootCertificates: ['BUNDLED-1', 'BUNDLED-2'] }).toString()).toBe(
+      `BUNDLED-1\nBUNDLED-2\n${extra}`,
+    );
+    // And with the real node:tls, every default root is in the bundle.
+    const real = caBundle(extra).toString();
+    const defaults = nodeTls.getCACertificates?.('default') ?? nodeTls.rootCertificates;
+    expect(defaults.length).toBeGreaterThan(0);
+    for (const root of defaults) expect(real).toContain(root);
+    expect(real.endsWith(extra)).toBe(true);
+  });
+
+  it('gives up on a silent relay at a client-side backstop of timeout_s + 90 s', async () => {
+    // The relay accepts the Exec and then says nothing, ever.
+    const r = await fakeRelay(() => {});
+    const { c } = conn(r.addr, { backstopMarginS: 0.3 });
+    const t0 = Date.now();
+    const e = await c.exec('x', { timeoutS: 1 }).catch((x: unknown) => x);
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(1200);
+    expect(e).toBeInstanceOf(ExecMachineryError);
+    expect(e).toMatchObject({ kind: 'machinery', grpcCode: status.DEADLINE_EXCEEDED });
+    expect((e as Error).message).toMatch(/client-side backstop deadline/);
+    expect(r.seen).toHaveLength(1);
+  });
+
+  it('defaults the backstop to timeout_s + 90 s', async () => {
+    let deadline: number | undefined;
+    const r = await fakeRelay((call, n) => {
+      deadline = Number(call.getDeadline());
+      ok(call, n);
+    });
+    const { c } = conn(r.addr);
+    const t0 = Date.now();
+    await c.exec('x', { timeoutS: 30 });
+    expect(deadline! - t0).toBeGreaterThan(119_000);
+    expect(deadline! - t0).toBeLessThanOrEqual(121_000);
   });
 
   it('pings every 20 s, and draws req_ids below 2^53', () => {
@@ -487,12 +536,72 @@ describe('SandboxExecConn token freshness (SBX0 §6.5)', () => {
     expect(asks).toHaveLength(2);
   });
 
-  it('does not mark a cut DEFAULT timeout as capped', async () => {
+  it('marks a DEFAULT timeout as capped when, and only when, it was cut', async () => {
     const r = await fakeRelay(ok);
-    const { c } = conn(r.addr, {}, { lifetimeS: 900, leftS: () => 300 });
-    const res = await c.exec('x');
+    const short = conn(r.addr, {}, { lifetimeS: 900, leftS: () => 300 });
+    expect((await short.c.exec('x')).capped).toBe(true);
     expect(r.seen[0]!.req.exec!.timeoutS).toBe(240);
-    expect(res.capped).toBeUndefined();
+    const full = conn(r.addr, {}, { lifetimeS: 900 });
+    expect((await full.c.exec('x')).capped).toBeUndefined();
+    expect(r.seen[1]!.req.exec!.timeoutS).toBe(840);
+  });
+
+  it.each([120, 61, 1])(
+    'refuses a token lifetime of %is (too short for the 60 s margin), sending nothing',
+    async (lifetimeS) => {
+      const r = await fakeRelay(ok);
+      const { c } = conn(r.addr, {}, { lifetimeS });
+      const e = await c.exec('x', { timeoutS: 10 }).catch((x: unknown) => x);
+      expect(e).toBeInstanceOf(ExecMachineryError);
+      expect(e).toMatchObject({
+        kind: 'machinery',
+        message: `sandbox token lifetime ${lifetimeS}s is too short (minimum 121s)`,
+      });
+      expect(r.seen).toHaveLength(0);
+    },
+  );
+
+  it('accepts the shortest usable lifetime, 121 s, with a 61 s default timeout', async () => {
+    const r = await fakeRelay(ok);
+    const { c } = conn(r.addr, {}, { lifetimeS: 121 });
+    expect((await c.exec('x')).capped).toBeUndefined();
+    expect(r.seen[0]!.req.exec!.timeoutS).toBe(61);
+  });
+
+  it('fits the timeout again to a fresh token shorter than the first, on the UNAUTHENTICATED retry', async () => {
+    const r = await fakeRelay((call, n) =>
+      n === 1 ? fail(status.UNAUTHENTICATED, 'exec authentication failed')(call, n) : ok(call, n),
+    );
+    // The first token covers 600 + 60; the fresh one, minted near the sandbox's expiry, has 200 s.
+    const { c, asks } = conn(r.addr, {}, { lifetimeS: 900, leftS: (force) => (force ? 200 : 900) });
+    const res = await c.exec('x', { timeoutS: 600 });
+    expect(r.seen.map((s) => s.req.exec!.timeoutS)).toEqual([600, 140]);
+    expect(r.seen[1]!.req.exec!.reqId).toBe(r.seen[0]!.req.exec!.reqId);
+    expect(r.seen[1]!.auth).toBe('Bearer fresh');
+    expect(res.capped).toBe(true);
+    expect(asks.at(-1)).toEqual({ force: true, minValidS: 660 });
+  });
+
+  it('applies the lifetime cap of a fresh token with a shorter lifetime on the retry', async () => {
+    const r = await fakeRelay((call, n) =>
+      n === 1 ? fail(status.UNAUTHENTICATED, 'exec authentication failed')(call, n) : ok(call, n),
+    );
+    let lifetime = 900;
+    const { c } = conn(r.addr, {
+      token: async (o) => {
+        if (o.force) lifetime = 300;
+        return {
+          token: o.force ? 'fresh' : 'stale',
+          expiresAt: NOW_S + lifetime,
+          lifetimeS: lifetime,
+        };
+      },
+    });
+    // A defaulted timeout is that token's own default, lifetime - 60: not a cut.
+    expect((await c.exec('x')).capped).toBeUndefined();
+    // A requested one over the new cap is cut, and says so (no retry this time: n > 1).
+    expect((await c.exec('y', { timeoutS: 600 })).capped).toBe(true);
+    expect(r.seen.map((s) => s.req.exec!.timeoutS)).toEqual([840, 240, 240]);
   });
 
   it('uses 120 s by default when no lifetime can be read, and still cuts to the life left', async () => {
