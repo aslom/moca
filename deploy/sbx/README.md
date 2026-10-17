@@ -88,4 +88,4 @@ Users log in with GitHub and create sandboxes from a template:
     mocactl sbx login --control-plane-url https://<api host>
     mocactl sbx create --template <id>
 
-To call the gRPC API directly, see `docs/api/sandbox-v1-direct-client.md`.
+To call the gRPC API directly, see [the direct-client guide](../../docs/api/sandbox-v1-direct-client.md).
