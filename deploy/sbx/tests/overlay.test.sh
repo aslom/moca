@@ -75,7 +75,8 @@ for k in SH_CREDENTIAL_STORE SH_CREDENTIAL_NAMESPACE SH_SANDBOX_NAMESPACE SH_SAN
   ! grep -q "$k" <<<"$CP" || fail "the control plane still configures $k"
 done
 for k in SH_ALLOWED_SUBJECTS SH_SANDBOX_TEMPLATES SH_SANDBOX_EXEC_ENDPOINT SH_SANDBOX_EXEC_CA \
-  SH_SANDBOX_TOKEN_ISSUER SH_SANDBOX_LIFETIME_SECONDS SH_SANDBOX_MAX_PER_SUBJECT SH_SANDBOX_MAX_TOTAL; do
+  SH_SANDBOX_TOKEN_ISSUER SH_SANDBOX_LIFETIME_SECONDS SH_SANDBOX_TOKEN_TTL_SECONDS SH_SANDBOX_RETENTION_SECONDS \
+  SH_SANDBOX_MAX_PER_SUBJECT SH_SANDBOX_MAX_TOTAL; do
   grep -A4 -- "- name: $k\$" <<<"$CP" | grep -q 'name: sbx-settings' || fail "the control plane does not read $k from sbx-settings"
 done
 grep -A5 -- '- name: SH_SANDBOX_EXEC_CA$' <<<"$CP" | grep -q 'optional: true' ||
@@ -92,6 +93,14 @@ cp_ingress="$(object NetworkPolicy moca-control-plane | awk '/^  ingress:/ { f =
 object NetworkPolicy moca-control-plane-from-router | grep -q 'policy-group.network.openshift.io/ingress' ||
   fail 'the router may not reach the control plane'
 pass 'only the router reaches the control plane'
+
+# The sandbox profile calls no Kubernetes API (no credential store, no service account token), so its
+# egress is Redis and 443 (GitHub's device flow) only: the base's 6443 (kube API after DNAT) is dropped.
+cp_policy="$(object NetworkPolicy moca-control-plane)"
+grep -q 'port: 443$' <<<"$cp_policy" || fail 'the control plane lost its 443 egress (GitHub device flow)'
+grep -q 'port: 6379$' <<<"$cp_policy" || fail 'the control plane lost its Redis egress'
+! grep -q 'port: 6443' <<<"$cp_policy" || fail 'the sandbox control plane still has 6443 (Kubernetes API) egress'
+pass 'the control plane has no Kubernetes API egress (6443)'
 
 awk '/^kind: Route$/,/^---$/' "$OUT" | grep -c 'termination: edge' | grep -qx 1 || fail 'want one edge Route (the API)'
 object Route sbx-api | grep -q 'name: moca-control-plane' || fail 'the API Route does not target the control plane'

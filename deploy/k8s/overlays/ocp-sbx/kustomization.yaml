@@ -42,6 +42,9 @@ patches:
       - op: replace
         path: /spec/ingress
         value: []
+  # The sandbox profile makes no Kubernetes API call (no credential store, no service account
+  # token), so its egress keeps Redis and 443 (GitHub's device flow) and drops the base's 6443 (the
+  # kube API after DNAT). The `test` op pins the index: the render fails if the base reorders it.
   - target:
       kind: NetworkPolicy
       name: moca-control-plane
@@ -49,6 +52,11 @@ patches:
       - op: replace
         path: /spec/ingress
         value: []
+      - op: test
+        path: /spec/egress/1/ports/1/port
+        value: 6443
+      - op: remove
+        path: /spec/egress/1/ports/1
   - patch: |-
       $patch: delete
       apiVersion: apps/v1

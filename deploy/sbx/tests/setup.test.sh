@@ -169,6 +169,11 @@ refusals=(
   'export SBX_LIFETIME_DAYS=0 => SBX_LIFETIME_DAYS must be'
   'export SBX_MAX_TOTAL=0 => SBX_MAX_TOTAL must be a positive whole number'
   'export SBX_MAX_PER_SUBJECT=x => SBX_MAX_PER_SUBJECT must be a positive whole number'
+  'export SBX_TOKEN_TTL_MINUTES=4 => SBX_TOKEN_TTL_MINUTES must be a whole number of minutes, 5-60'
+  'export SBX_TOKEN_TTL_MINUTES=61 => SBX_TOKEN_TTL_MINUTES must be'
+  'export SBX_TOKEN_TTL_MINUTES=15m => SBX_TOKEN_TTL_MINUTES must be'
+  'export SBX_RETENTION_DAYS=0 => SBX_RETENTION_DAYS must be a whole number of days, 1-90'
+  'export SBX_RETENTION_DAYS=91 => SBX_RETENTION_DAYS must be'
   'export SBX_MAX_INFLIGHT=0 => SBX_MAX_INFLIGHT must be 1-8'
   'export SBX_MAX_INFLIGHT=9 => SBX_MAX_INFLIGHT must be 1-8'
   'export SBX_WORKSPACE_IMAGE_MB=-1 => SBX_WORKSPACE_IMAGE_MB must be a positive whole number'
@@ -285,6 +290,8 @@ fi
 [[ "$(cm sbx-settings SH_SANDBOX_LIFETIME_SECONDS)" == 604800 ]] || fail 'lifetime'
 [[ "$(cm sbx-settings SH_SANDBOX_MAX_PER_SUBJECT)" == 3 && "$(cm sbx-settings SH_SANDBOX_MAX_TOTAL)" == 40 ]] || fail 'quotas'
 [[ "$(cm sbx-settings SH_SANDBOX_MAX_INFLIGHT)" == 2 ]] || fail 'in-flight cap'
+[[ "$(cm sbx-settings SH_SANDBOX_TOKEN_TTL_SECONDS)" == 900 ]] || fail 'token TTL default (15 min)'
+[[ "$(cm sbx-settings SH_SANDBOX_RETENTION_SECONDS)" == 1209600 ]] || fail 'retention default (14 d)'
 [[ "$(cm sbx-settings SH_SANDBOX_TOKEN_ISSUER)" == sbx-control-plane ]] || fail 'issuer'
 [[ "$(cm sbx-settings SH_ALLOWED_SUBJECTS)" == 'github:1,github:2' ]] || fail 'allowed subjects'
 cm sbx-settings SH_SANDBOX_TEMPLATES | jq -e 'length == 2 and .[1].worker == "sbx_py312"' >/dev/null || fail 'templates'
@@ -346,18 +353,57 @@ render
 [[ "$(pod_hash moca-control-plane)" == "$cp_hash" ]] || fail 'the settings hash moved with only the list separators'
 pass 'a newline- or tab-separated SBX_WORKERS keeps every token, and the settings hash is stable'
 
-# 4b. A settings change moves the hash on both pods (so the apply rolls them); the idle follows.
-run_setup export SBX_LIFETIME_DAYS=10 SBX_MAX_INFLIGHT=4 || fail 'a run with a longer lifetime failed'
+# 4b. A lifetime change alters the workers' SH_WORKSPACE_IDLE, which a running worker keeps until
+# install-host.sh is re-run on its host: refused before anything is applied, unless acknowledged.
+: >"$MOCK_LOG"
+! run_setup export SBX_LIFETIME_DAYS=10 || fail 'a lifetime change was applied without SBX_ACK_HOSTS=1'
+grep -q 'SH_WORKSPACE_IDLE changes from 216h to 288h' "$TMP/out" || fail 'the refusal does not name SH_WORKSPACE_IDLE and both values'
+grep -q 'install-host.sh' "$TMP/out" || fail 'the refusal does not say to re-run install-host.sh'
+grep -q 'SBX_ACK_HOSTS=1' "$TMP/out" || fail 'the refusal does not say how to acknowledge (SBX_ACK_HOSTS=1)'
+grep -q 'sbx_default sbx_py312' "$TMP/out" || fail 'the refusal does not name the workers'
+! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail 'the lifetime refusal changed something first'
+[[ "$(cm sbx-settings SH_SANDBOX_LIFETIME_SECONDS)" == 604800 ]] || fail 'the refused lifetime reached sbx-settings'
+grep -qx 'SH_WORKSPACE_IDLE=216h' "$GEN/workers/sbx_default/worker.env" || fail 'the refused run rewrote a bundle'
+pass 'refuses a lifetime change that alters SH_WORKSPACE_IDLE without SBX_ACK_HOSTS=1, naming it and install-host.sh'
+
+# Acknowledged: applied, with the hosts to reinstall named. A settings change moves the hash on both
+# pods (so the apply rolls them); the idle follows.
+run_setup export SBX_LIFETIME_DAYS=10 SBX_MAX_INFLIGHT=4 SBX_ACK_HOSTS=1 || fail 'an acknowledged longer lifetime failed'
+grep -q 'WARNING: SH_WORKSPACE_IDLE changes from 216h to 288h' "$TMP/out" || fail 'the acknowledged run does not warn'
+grep -q 're-run deploy/sbx/install-host.sh now on the host of each of: sbx_default sbx_py312' "$TMP/out" ||
+  fail 'the acknowledged run does not end by naming the hosts to reinstall'
 [[ "$(cm sbx-settings SH_SANDBOX_LIFETIME_SECONDS)" == 864000 && "$(cm sbx-settings SH_SANDBOX_MAX_INFLIGHT)" == 4 ]] ||
   fail 'lifetime or in-flight cap not written'
 grep -qx 'SH_WORKSPACE_IDLE=288h' "$GEN/workers/sbx_default/worker.env" || fail 'the idle does not follow the lifetime (10 d -> 288h)'
 render
 [[ "$(pod_hash moca-control-plane)" != "$cp_hash" && "$(pod_hash sandbox-relay)" == "$(pod_hash moca-control-plane)" ]] ||
   fail 'a settings change did not move the hash on both pods'
-run_setup true || fail 'the run back to the defaults failed'
+pass 'with SBX_ACK_HOSTS=1 a lifetime change applies, warns, and the idle and the hash follow'
+
+# An unchanged lifetime says nothing about hosts, and needs no ack.
+run_setup export SBX_LIFETIME_DAYS=10 SBX_MAX_INFLIGHT=4 || fail 'a re-run with the same lifetime was refused'
+! grep -q 'SH_WORKSPACE_IDLE' "$TMP/out" || fail 'an unchanged lifetime still warns about SH_WORKSPACE_IDLE'
+pass 'an unchanged lifetime needs no ack and gives no warning'
+
+run_setup export SBX_ACK_HOSTS=1 || fail 'the run back to the defaults failed'
 render
 [[ "$(pod_hash moca-control-plane)" == "$cp_hash" ]] || fail 'the hash is not a function of the settings'
-pass 'a settings change moves the hash on both pod templates, and the idle follows the lifetime'
+pass 'the settings hash is a function of the settings'
+
+# 4c. The token lifetime and the retention are inputs, written in seconds, and in the hash.
+run_setup export SBX_TOKEN_TTL_MINUTES=30 SBX_RETENTION_DAYS=30 || fail 'a run with a token TTL and retention failed'
+[[ "$(cm sbx-settings SH_SANDBOX_TOKEN_TTL_SECONDS)" == 1800 ]] || fail 'SBX_TOKEN_TTL_MINUTES=30 is not 1800 s'
+[[ "$(cm sbx-settings SH_SANDBOX_RETENTION_SECONDS)" == 2592000 ]] || fail 'SBX_RETENTION_DAYS=30 is not 2592000 s'
+render
+[[ "$(pod_hash moca-control-plane)" != "$cp_hash" ]] || fail 'the token TTL and retention are not in the settings hash'
+grep -A4 -- '- name: SH_SANDBOX_TOKEN_TTL_SECONDS$' "$TMP/render.yaml" | grep -q 'name: sbx-settings' ||
+  fail 'the control plane does not read SH_SANDBOX_TOKEN_TTL_SECONDS from sbx-settings'
+grep -A4 -- '- name: SH_SANDBOX_RETENTION_SECONDS$' "$TMP/render.yaml" | grep -q 'name: sbx-settings' ||
+  fail 'the control plane does not read SH_SANDBOX_RETENTION_SECONDS from sbx-settings'
+run_setup true || fail 'the run back to the defaults failed'
+render
+[[ "$(pod_hash moca-control-plane)" == "$cp_hash" ]] || fail 'the hash did not return with the defaults'
+pass 'SBX_TOKEN_TTL_MINUTES and SBX_RETENTION_DAYS reach sbx-settings in seconds, and move the hash'
 
 # 5. Removing a worker revokes exactly it (with an explicit null patch, not apply pruning: the mock
 # merges, as server-side apply keeps keys it did not set).
