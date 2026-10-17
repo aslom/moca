@@ -116,12 +116,14 @@ describe('sandbox token (SBX0 §4.3)', () => {
         iss: DEFAULT_SANDBOX_ISSUER,
         aud: SANDBOX_TOKEN_AUDIENCE,
         sub: 'github:1',
+        tenant: 'github:1',
         sbx: 'sbx-a',
         wrk: 'w',
         wsk: 'sbx-a',
         scope: ['exec'],
         iat: NOW,
         exp: NOW + 60,
+        jti: 'j-1',
         [field]: '',
       });
       expect(
@@ -133,12 +135,14 @@ describe('sandbox token (SBX0 §4.3)', () => {
       iss: DEFAULT_SANDBOX_ISSUER,
       aud: SANDBOX_TOKEN_AUDIENCE,
       sub: 's',
+      tenant: 't',
       sbx: 'b',
       wrk: 'w',
       wsk: 'b',
       scope: ['files:read'],
       iat: NOW,
       exp: NOW + 60,
+      jti: 'j-1',
     });
     expect(() =>
       verifySandboxToken(noScope, ring, { issuer: DEFAULT_SANDBOX_ISSUER, now: NOW }),
@@ -159,15 +163,17 @@ describe('sandbox token (SBX0 §4.3)', () => {
       exp: NOW + 60,
     });
     expect(() => verifySandboxToken(t, ring, { issuer: DEFAULT_SANDBOX_ISSUER, now: NOW })).toThrow(
-      expect.objectContaining({ code: 'token_invalid' }),
+      expect.objectContaining({ code: 'token_invalid', message: 'wrong token audience' }),
     );
   });
 
-  it('refuses an unsigned token (alg: none)', () => {
-    const { ring } = keys();
-    const h = Buffer.from(JSON.stringify({ alg: 'none', typ: SANDBOX_TOKEN_TYP })).toString(
-      'base64url',
-    );
+  it('refuses an unsigned token (alg: none) at the alg check, not as malformed', () => {
+    const { signer, ring } = keys();
+    // A known kid, the right typ and a NON-EMPTY signature segment: only the alg check refuses it.
+    // An empty third segment would be refused earlier, as malformed, and test nothing about alg.
+    const h = Buffer.from(
+      JSON.stringify({ alg: 'none', typ: SANDBOX_TOKEN_TYP, kid: signer.kid }),
+    ).toString('base64url');
     const p = Buffer.from(
       JSON.stringify({
         iss: DEFAULT_SANDBOX_ISSUER,
@@ -181,9 +187,40 @@ describe('sandbox token (SBX0 §4.3)', () => {
         exp: NOW + 60,
       }),
     ).toString('base64url');
-    const t = `${h}.${p}.`;
+    const t = `${h}.${p}.${Buffer.from('not-a-signature').toString('base64url')}`;
     expect(() => verifySandboxToken(t, ring, { issuer: DEFAULT_SANDBOX_ISSUER, now: NOW })).toThrow(
-      expect.objectContaining({ code: 'token_invalid' }),
+      expect.objectContaining({ code: 'token_invalid', message: 'unsupported alg' }),
+    );
+  });
+
+  // Task 1 returned tenant, iat and jti unvalidated: a signed token missing them came back typed as
+  // SandboxTokenClaims anyway. They are checked for type now; tenant must also be non-empty.
+  it.each([
+    ['tenant', { tenant: '' }],
+    ['tenant', { tenant: 7 }],
+    ['tenant', { tenant: undefined }],
+    ['iat', { iat: 'yesterday' }],
+    ['iat', { iat: undefined }],
+    ['jti', { jti: 12 }],
+    ['jti', { jti: undefined }],
+  ] as const)('refuses a bad %s claim (%j)', (field, over) => {
+    const { signer, ring } = keys();
+    const t = signer.signJws(SANDBOX_TOKEN_TYP, {
+      iss: DEFAULT_SANDBOX_ISSUER,
+      aud: SANDBOX_TOKEN_AUDIENCE,
+      sub: 'github:1',
+      tenant: 'github:1',
+      sbx: 'sbx-a',
+      wrk: 'w',
+      wsk: 'sbx-a',
+      scope: ['exec'],
+      iat: NOW,
+      exp: NOW + 60,
+      jti: 'j-1',
+      ...over,
+    });
+    expect(() => verifySandboxToken(t, ring, { issuer: DEFAULT_SANDBOX_ISSUER, now: NOW })).toThrow(
+      expect.objectContaining({ code: 'token_invalid', message: expect.stringContaining(field) }),
     );
   });
 });

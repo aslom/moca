@@ -82,9 +82,13 @@ export function verifySandboxToken(
   const c = verifyJws(token, keys, SANDBOX_TOKEN_TYP).claims as Partial<SandboxTokenClaims>;
   if (c.aud !== SANDBOX_TOKEN_AUDIENCE) bad('wrong token audience');
   if (c.iss !== opts.issuer) bad('wrong token issuer');
-  for (const f of ['sub', 'sbx', 'wrk', 'wsk'] as const) {
+  for (const f of ['sub', 'tenant', 'sbx', 'wrk', 'wsk'] as const) {
     if (typeof c[f] !== 'string' || c[f].length === 0) bad(`token has no ${f}`);
   }
+  // Checked for type, so the returned claims are what their type says: nothing here is trusted as
+  // a SandboxTokenClaims field that was not checked (the relay logs iat and jti; §3.5).
+  if (typeof c.iat !== 'number') bad('token has no iat');
+  if (typeof c.jti !== 'string') bad('token has no jti');
   if (typeof c.exp !== 'number') bad('token has no expiry');
   const now = opts.now ?? Math.floor(Date.now() / 1000);
   if (now > c.exp + (opts.leewayS ?? SANDBOX_CLOCK_LEEWAY_S)) {
