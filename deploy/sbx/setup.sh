@@ -163,8 +163,10 @@ check_host_idle() {
   done
   [[ -n "$changed" ]] || return 0
   HOSTS_TO_REINSTALL="${changed# }"
+  local cause='SBX_LIFETIME_DAYS changed'
+  [[ " $olds " != *" unset "* ]] || cause='a bundle from before increment 1b carries none'
   if [[ "${SBX_ACK_HOSTS:-}" != 1 ]]; then
-    die "SH_WORKSPACE_IDLE changes from${olds} to ${WORKSPACE_IDLE_H}h for worker(s) ${HOSTS_TO_REINSTALL} (SBX_LIFETIME_DAYS changed), and a running worker keeps its old value until deploy/sbx/install-host.sh is re-run on its host. Re-run install-host.sh on every host first, or set SBX_ACK_HOSTS=1 to apply now and re-run install-host.sh with the new bundles on every host right after"
+    die "SH_WORKSPACE_IDLE changes from${olds} to ${WORKSPACE_IDLE_H}h for worker(s) ${HOSTS_TO_REINSTALL} (${cause}), and a running worker keeps its old value until deploy/sbx/install-host.sh is re-run on its host. Re-run install-host.sh on every host first, or set SBX_ACK_HOSTS=1 to apply now and re-run install-host.sh with the new bundles on every host right after"
   fi
   log "WARNING: SH_WORKSPACE_IDLE changes from${olds} to ${WORKSPACE_IDLE_H}h (SBX_ACK_HOSTS=1): re-run deploy/sbx/install-host.sh with the new bundle on the host of each of: ${HOSTS_TO_REINSTALL}"
 }

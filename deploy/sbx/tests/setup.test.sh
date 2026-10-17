@@ -380,6 +380,16 @@ render
   fail 'a settings change did not move the hash on both pods'
 pass 'with SBX_ACK_HOSTS=1 a lifetime change applies, warns, and the idle and the hash follow'
 
+# A bundle from 1a carries no SH_WORKSPACE_IDLE: the refusal says that, not "SBX_LIFETIME_DAYS changed".
+cp "$GEN/workers/sbx_default/worker.env" "$TMP/worker.env.keep"
+grep -v '^SH_WORKSPACE_IDLE=' "$TMP/worker.env.keep" >"$GEN/workers/sbx_default/worker.env"
+! run_setup export SBX_LIFETIME_DAYS=10 SBX_MAX_INFLIGHT=4 || fail 'a 1a bundle was overwritten without SBX_ACK_HOSTS=1'
+grep -q 'changes from unset to 288h' "$TMP/out" && grep -q 'a bundle from before increment 1b' "$TMP/out" ||
+  fail 'the refusal over a 1a bundle does not say the bundle predates 1b'
+! grep -q 'SBX_LIFETIME_DAYS changed' "$TMP/out" || fail 'the refusal over a 1a bundle blames the lifetime'
+cp "$TMP/worker.env.keep" "$GEN/workers/sbx_default/worker.env"
+pass 'over a 1a bundle (no SH_WORKSPACE_IDLE) the refusal names the bundle, not the lifetime'
+
 # An unchanged lifetime says nothing about hosts, and needs no ack.
 run_setup export SBX_LIFETIME_DAYS=10 SBX_MAX_INFLIGHT=4 || fail 'a re-run with the same lifetime was refused'
 ! grep -q 'SH_WORKSPACE_IDLE' "$TMP/out" || fail 'an unchanged lifetime still warns about SH_WORKSPACE_IDLE'

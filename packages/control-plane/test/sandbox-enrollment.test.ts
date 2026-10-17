@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { HANDLERS } from '../src/handlers.js';
 import { AUDIT_STREAM, OwnershipIndex } from '../src/ownership.js';
 import { codeOf, ctx, makeDeps } from './helpers/deps.js';
@@ -79,6 +79,24 @@ describe('enrollment gates login and refresh on the sandbox profile (SBX0 §4.2)
     // Re-enrolled, the user logs in again; the revoked login stays revoked.
     d.config.sandbox!.allowedSubjects = ['github:1234'];
     expect(await codeOf(() => refresh(later, first.refreshToken))).toBe('invalid_grant');
+  });
+
+  it('still answers not_enrolled when revoking the de-enrolled family fails', async () => {
+    // A 503 here would read as "unreachable" to the client, which would then keep the superseded
+    // token and trip reuse detection on its next refresh: the revoke is best effort.
+    const d = sandboxDeps('github:1234');
+    const first = await login(d);
+    d.config.sandbox!.allowedSubjects = [];
+    d.refresh.revoke = async () => {
+      throw new Error('redis is gone');
+    };
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(await codeOf(() => refresh(d, first.refreshToken))).toBe('not_enrolled');
+      expect(err.mock.calls.join(' ')).toContain('revoking a de-enrolled family failed');
+    } finally {
+      err.mockRestore();
+    }
   });
 
   it('refreshes a subject who is still enrolled, and an admin who never was listed', async () => {

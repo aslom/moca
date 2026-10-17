@@ -87,8 +87,9 @@ every worker bundle, and the control plane hands the exec one to clients.
 **Upgrading from 1a:** unset `SBX_CLIENTS` (the run refuses it), and move `SBX_IMAGE` off the
 team-only 1a image: its relay requires the harness exec token, and its control plane has no sandbox
 profile. The run deletes the static client tokens and their bundles, and removes the relay's harness
-exec token once the new relay is up. Re-run `install-host.sh` with the new worker bundles, which now
-carry the workspace idle time and image size; it refuses a 1a bundle. **1a workspaces are not
+exec token once the new relay is up. Run it with `SBX_ACK_HOSTS=1`, because every 1a host must be
+reinstalled anyway, then re-run `install-host.sh` with the new worker bundles, which now carry the
+workspace idle time and image size; it refuses a 1a bundle. **1a workspaces are not
 migrated:** a 1b sandbox has a workspace key of its own, which no 1a workspace matches, so tell 1a
 users to pull their work out before the upgrade.
 

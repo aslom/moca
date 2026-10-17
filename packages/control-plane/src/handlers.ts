@@ -485,8 +485,16 @@ export const HANDLERS: Record<string, Handler> = {
     // superseded: presented again after the grace window it would read as reuse, revoke the family
     // as theft and audit refresh_reuse_detected. Revoke the family here, under a reason of its own,
     // so that token is a plain `revoked` refusal instead.
+    // The revoke is best effort: a store failure here must not turn the answer into a 503, which a
+    // client reads as "unreachable" and so keeps the superseded token. The refusal is the 403.
     if (!isEnrolled(r.subject, roles, deps.config)) {
-      await deps.refresh.revoke(r.refreshToken, deps.now(), 'not_enrolled');
+      try {
+        await deps.refresh.revoke(r.refreshToken, deps.now(), 'not_enrolled');
+      } catch (err) {
+        console.error(
+          `[control-plane] refreshAuth: revoking a de-enrolled family failed: ${(err as Error)?.message ?? String(err)}`,
+        );
+      }
       throw notEnrolled(r.subject, 'no longer');
     }
     return {
