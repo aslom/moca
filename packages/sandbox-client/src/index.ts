@@ -14,3 +14,17 @@ export {
   type TokenFn,
   type TokenRequest,
 } from './exec-conn.js';
+export {
+  FILE_TOOL_TIMEOUT_S,
+  MAX_BYTES,
+  MAX_LINES,
+  TOOL_NAMES,
+  ToolInputError,
+  WORKSPACE,
+  q,
+  sandboxTools,
+  writeFileCommand,
+  type SandboxTool,
+  type ToolResult,
+} from './tools.js';
+export { PI_SCHEMAS } from './schemas.js';
