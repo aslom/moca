@@ -90,9 +90,10 @@ class TokenSource:
         if self._static:
             return self._static
         if force or self._token is None or self._exp - time.time() < max(MARGIN_S, need):
-            r = subprocess.run(shlex.split(self._command), capture_output=True, text=True)
+            # Only stdout is piped: stderr carries mocactl's reason ("log in first") to the user.
+            r = subprocess.run(shlex.split(self._command), stdout=subprocess.PIPE, text=True)
             if r.returncode != 0:
-                # Never echo the output: on success it IS the token.
+                # Never echo stdout: on success it IS the token.
                 raise RuntimeError(f"token command failed with exit {r.returncode}: {self._command}")
             self._token = r.stdout.strip()
             self._iat, self._exp = _times_of(self._token)
@@ -126,7 +127,11 @@ class Sandbox:
     def __init__(self, addr: str, sandbox_id: str, workspace_key: str, tokens: TokenSource,
                  tls: bool = True, ca_file: str | None = None):
         if tls:
-            roots = open(ca_file, "rb").read() if ca_file else None
+            # root_certificates REPLACES the default roots: SBX_CA_FILE alone when set, else the defaults.
+            roots = None
+            if ca_file:
+                with open(ca_file, "rb") as f:
+                    roots = f.read()
             channel = grpc.secure_channel(addr, grpc.ssl_channel_credentials(root_certificates=roots), options=CHANNEL_OPTIONS)
         else:
             channel = grpc.insecure_channel(addr, options=CHANNEL_OPTIONS)
@@ -179,7 +184,11 @@ class Sandbox:
         except _NotStarted:
             # The token was refused before anything ran: refresh once and retry. A command that had
             # STARTED is never re-run (SBX0 §6.5) -- that path raises SandboxError instead.
-            r = self._exec(req_id, command, stdin, timeout, self._md(force=True))
+            try:
+                r = self._exec(req_id, command, stdin, timeout, self._md(force=True))
+            except _NotStarted:
+                raise SandboxError(
+                    "exec failed: UNAUTHENTICATED: exec authentication failed (after one token refresh)") from None
         r.timeout_s, r.capped = timeout, capped
         return r
 

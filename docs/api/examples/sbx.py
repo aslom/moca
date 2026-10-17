@@ -1,7 +1,8 @@
-"""sbx: a command-line client for one sandbox/v1 workspace, built on sandbox_v1_client.py.
+"""sbx: an EXAMPLE of a thin command-line client for one sandbox, built on sandbox_v1_client.py.
 
-Meant for a coding agent whose shell tool is restricted to `sbx ...`: every command runs in a fresh
-microVM over the workspace, and nothing runs on the local machine. See sandbox-v1-direct-client.md.
+The supported CLI is `mocactl sbx run` and `put` (SBX0 1c); this file shows how little a client
+needs. Every command runs in a fresh microVM over the workspace, and nothing runs on the local
+machine. See sandbox-v1-direct-client.md.
 
     sbx run [COMMAND...]      run COMMAND (or, with no arguments, the script on stdin) in /workspace
     sbx put PATH              write stdin to PATH in the workspace (parent directories created)
@@ -11,8 +12,8 @@ microVM over the workspace, and nothing runs on the local machine. See sandbox-v
 Environment: what `mocactl sbx env <id>` prints (SBX_ADDR, SBX_TLS, SBX_CA_FILE, SBX_SANDBOX_ID,
 SBX_WORKSPACE_KEY, SBX_TOKEN_CMD). Optional: SBX_TIMEOUT (seconds per command, default 600),
 SBX_LOG (append one JSON line per call).
-`sbx run` exits with the command's own exit code; 124 means it timed out, 125 that the sandbox
-failed, was busy, or cancelled a command that outlived its token.
+`sbx run` exits with the command's own exit code (128 + n when killed by signal n); 124 means it
+timed out, 125 that the sandbox failed, was busy, or cancelled a command that outlived its token.
 """
 
 import io
@@ -69,7 +70,7 @@ def run(command: str, stdin: bytes = b"", op: str = "run") -> int:
         print(f"sbx: command timed out after {r.timeout_s} s", file=sys.stderr)
         log(op, started, 124)
         return 124
-    code = r.exit_code if r.exit_code >= 0 else 128 + 9
+    code = r.exit_code if r.exit_code >= 0 else 128 - r.exit_code  # killed by signal n: 128 + n
     log(op, started, code)
     return code
 

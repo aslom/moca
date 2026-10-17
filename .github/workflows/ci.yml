@@ -251,13 +251,26 @@ jobs:
               || echo "::warning file=$mod/go.mod::$mod/go.mod is not tidy -- run 'cd $mod && go mod tidy'"
           done
 
-  # Offline check of relative Markdown links and in-repo anchors (`make check-links`). No
-  # submodules and no install: the script is stdlib Python over `git ls-files`.
+  # Offline check of relative Markdown links and in-repo anchors (`make check-links`), and the
+  # sandbox/v1 Python examples' tests. No submodules; the link check is stdlib Python over
+  # `git ls-files`, and only the examples' step installs anything (grpcio, into a venv).
   docs:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Check Markdown links
         run: python3 scripts/check-doc-links.py
+
+      # The sandbox/v1 direct-client examples' offline tests (docs/api/sandbox-v1-direct-client.md):
+      # no network beyond pip, no relay. The runner's own python3, so no unpinned setup action;
+      # grpcio pinned to the versions the tests were written against.
+      - name: Test the sandbox/v1 Python examples
+        working-directory: docs/api/examples
+        run: |
+          python3 -m venv /tmp/sbxpy
+          /tmp/sbxpy/bin/pip install -q grpcio==1.84.0 grpcio-tools==1.84.0
+          /tmp/sbxpy/bin/python -m grpc_tools.protoc -I ../../../proto \
+            --python_out=. --grpc_python_out=. sandbox/v1/sandbox.proto
+          /tmp/sbxpy/bin/python -m unittest test_sandbox_v1_client

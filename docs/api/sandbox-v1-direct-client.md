@@ -62,7 +62,8 @@ as the example client does.
 
 ## What a client sets
 
-- **TLS** to `SBX_ADDR`, against the system roots plus `SBX_CA_FILE` when it is set.
+- **TLS** to `SBX_ADDR`: against the default roots, or, when `SBX_CA_FILE` is set, against that CA
+  only. In grpcio, `root_certificates` replaces the default roots rather than adding to them.
 - **`authorization: Bearer <sandbox token>`** as metadata on every call, `Abort` included.
 - **`ExecRequest.sandbox_id = SBX_SANDBOX_ID`** and **`Exec.workspace_key = SBX_WORKSPACE_KEY`**,
   exactly. The relay compares both for equality with the token's `wrk` and `wsk`: never a prefix,
@@ -132,16 +133,16 @@ a non-OK status. There is no exit status to report. Two have an SBX0 meaning of 
 
 **gRPC status codes:**
 
-| Code                                                    | Cause                                                                                                                                  |
-| ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `UNAUTHENTICATED`                                       | Missing, expired or invalid token. Refresh once, as above                                                                              |
-| `PERMISSION_DENIED`                                     | `sandbox_id` is not the token's worker; `workspace_key` is not its workspace; or `Abort` of an Exec that is not yours, or has finished |
-| `ALREADY_EXISTS`                                        | The `req_id` is already in flight in this sandbox                                                                                      |
-| `RESOURCE_EXHAUSTED`                                    | The sandbox is busy                                                                                                                    |
-| `DEADLINE_EXCEEDED`                                     | The token expired during the Exec                                                                                                      |
-| `INVALID_ARGUMENT`                                      | No `exec` in the request, or `req_id` out of range                                                                                     |
-| `UNKNOWN` or `UNAVAILABLE` with `no live worker for...` | The template's worker is not attached: the template is unavailable                                                                     |
-| `INTERNAL`                                              | An `error` event, as above, including a timeout                                                                                        |
+| Code                                                                     | Cause                                                                                                                                  |
+| ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `UNAUTHENTICATED`                                                        | Missing, expired or invalid token. Refresh once, as above                                                                              |
+| `PERMISSION_DENIED`                                                      | `sandbox_id` is not the token's worker; `workspace_key` is not its workspace; or `Abort` of an Exec that is not yours, or has finished |
+| `ALREADY_EXISTS`                                                         | The `req_id` is already in flight in this sandbox                                                                                      |
+| `RESOURCE_EXHAUSTED`                                                     | The sandbox is busy                                                                                                                    |
+| `DEADLINE_EXCEEDED`                                                      | The token expired during the Exec                                                                                                      |
+| `INVALID_ARGUMENT`                                                       | No `exec` in the request, or `req_id` out of range                                                                                     |
+| `UNKNOWN` today (`UNAVAILABLE` is reserved) with `no live worker for...` | The template's worker is not attached: the template is unavailable                                                                     |
+| `INTERNAL`                                                               | An `error` event, as above, including a timeout                                                                                        |
 
 ## Limits
 
@@ -169,7 +170,8 @@ timeout cap, the retry-once-if-not-started rule, and the outcome and failure map
 `mocactl sbx env` prints. `SBX_TOKEN`, a one-off static token that is never refreshed, is used
 only when `SBX_TOKEN_CMD` is unset.
 
-[`examples/sbx.py`](examples/sbx.py) is a thin command line on top of it, for one sandbox:
+[`examples/sbx.py`](examples/sbx.py) is an example of a thin command line on top of it, for one
+sandbox. It is an example only: `mocactl sbx run` and `put` (increment 1c) are the supported CLI.
 
 | Command              | Does                                                                                                                                       |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -195,15 +197,17 @@ eval "$(mocactl sbx env <sandbox id>)"
 **From the shell, with `grpcurl`:**
 
 ```bash
-grpcurl -import-path proto -proto sandbox/v1/sandbox.proto \
+SBX_BEARER="$(eval "$SBX_TOKEN_CMD")" grpcurl -import-path proto -proto sandbox/v1/sandbox.proto \
   ${SBX_CA_FILE:+-cacert "$SBX_CA_FILE"} \
-  -H "authorization: Bearer $(eval "$SBX_TOKEN_CMD")" \
+  -expand-headers -H 'authorization: Bearer ${SBX_BEARER}' \
   -d "{\"sandbox_id\":\"$SBX_SANDBOX_ID\",\"exec\":{\"req_id\":\"42\",\"command\":\"ls -la\",
        \"timeout_s\":60,\"streaming\":true,\"workspace_key\":\"$SBX_WORKSPACE_KEY\"}}" \
   "$SBX_ADDR" sandbox.v1.SandboxExec/Exec
 ```
 
-Chunk `data` comes back base64-encoded in grpcurl's JSON.
+The token travels in grpcurl's environment, which `-expand-headers` reads, not on its command
+line: anything in argv is visible to every user of the machine through `ps`. Chunk `data` comes
+back base64-encoded in grpcurl's JSON.
 
 **Other languages:** generate a client from the one proto file with `buf generate` or `protoc`.
 MOCA's own TypeScript client is generated in `packages/k8s-sandbox/src/gen/`.

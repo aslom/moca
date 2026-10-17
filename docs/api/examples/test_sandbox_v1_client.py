@@ -65,6 +65,18 @@ class TokenSourceTest(unittest.TestCase):
             ts.get()
         self.assertNotIn("secretish", str(e.exception))
 
+    def test_the_token_commands_stderr_is_not_captured(self):
+        # mocactl's reason ("log in first") must reach the user: only stdout, the token, is piped.
+        with mock.patch("sandbox_v1_client.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 4, stdout="secretish")
+            with self.assertRaises(RuntimeError) as e:
+                TokenSource(command="mocactl sbx token sbx-0f3a").get()
+        kwargs = run.call_args.kwargs
+        self.assertEqual(kwargs.get("stdout"), subprocess.PIPE)
+        self.assertNotIn("stderr", kwargs)
+        self.assertNotIn("capture_output", kwargs)
+        self.assertNotIn("secretish", str(e.exception))
+
     def test_refreshes_when_the_token_has_less_life_left_than_needed(self):
         now = int(time.time())
         ts = TokenSource(command=cmd(jwt(now + 300, now - 600)))
@@ -275,6 +287,15 @@ class SandboxExecTest(unittest.TestCase):
         self.assertEqual([c[1] for c in stub.calls], [first, second])
         self.assertEqual(stub.calls[0][0].exec.req_id, stub.calls[1][0].exec.req_id)
 
+    def test_a_second_unauthenticated_after_the_refresh_is_a_sandbox_error(self):
+        u = FakeRpcError(grpc.StatusCode.UNAUTHENTICATED, "exec authentication failed")
+        stub = FakeStub([u], [u])
+        with self.assertRaises(SandboxError) as e:
+            sandbox(stub, fresh_tokens()).exec("true", timeout_s=60)
+        self.assertEqual(str(e.exception),
+                         "exec failed: UNAUTHENTICATED: exec authentication failed (after one token refresh)")
+        self.assertEqual(len(stub.calls), 2)
+
     def test_a_started_command_is_never_re_run(self):
         stub = FakeStub([chunk(b"x"), FakeRpcError(grpc.StatusCode.UNAUTHENTICATED, "exec authentication failed")])
         with self.assertRaises(SandboxError):
@@ -294,7 +315,11 @@ class FromEnvTest(unittest.TestCase):
         s = Sandbox.from_env(env)
         self.assertEqual((s._sandbox_id, s._key), ("sbx_py312", "sbx-0f3a"))
         self.assertEqual(s._tokens._command, env["SBX_TOKEN_CMD"])
-
+        with mock.patch("sandbox_v1_client.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, stdout=jwt(int(time.time()) + 900))
+            s._tokens.get()
+        self.assertEqual(run.call_args.args[0], [
+            "mocactl", "sbx", "token", "--control-plane-url", "https://example.invalid", "sbx-0f3a"])
 
     def test_the_token_command_wins_over_a_leftover_static_token(self):
         env = {"SBX_ADDR": "example.invalid:443", "SBX_SANDBOX_ID": "w", "SBX_WORKSPACE_KEY": "k",
@@ -306,6 +331,7 @@ class FromEnvTest(unittest.TestCase):
         env = {"SBX_ADDR": "example.invalid:443", "SBX_SANDBOX_ID": "w", "SBX_WORKSPACE_KEY": "k",
                "SBX_TOKEN": "one-off"}
         self.assertEqual(Sandbox.from_env(env)._tokens.get(), "one-off")
+
 
 class SbxCliTest(unittest.TestCase):
     def run_sbx(self, *scripts):
@@ -335,6 +361,16 @@ class SbxCliTest(unittest.TestCase):
         code, err = self.run_sbx([FakeRpcError(grpc.StatusCode.DEADLINE_EXCEEDED, details)])
         self.assertEqual(code, 125)
         self.assertIn("sandbox token expired during the Exec", err)
+
+    def test_a_second_unauthenticated_exits_125(self):
+        u = FakeRpcError(grpc.StatusCode.UNAUTHENTICATED, "exec authentication failed")
+        code, err = self.run_sbx([u], [u])
+        self.assertEqual(code, 125)
+        self.assertIn("after one token refresh", err)
+
+    def test_a_signal_exits_128_plus_its_number(self):
+        self.assertEqual(self.run_sbx([end(-15)])[0], 128 + 15)
+        self.assertEqual(self.run_sbx([end(-9)])[0], 128 + 9)
 
     def test_a_machinery_failure_exits_125(self):
         code, _ = self.run_sbx([FakeRpcError(grpc.StatusCode.UNKNOWN, "no live worker for sandbox 'sbx_py312'")])
