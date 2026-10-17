@@ -1,8 +1,20 @@
 import { execFile, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   ExecMachineryError,
   ExecRefusedError,
@@ -12,6 +24,7 @@ import {
 import {
   FILE_TOOL_TIMEOUT_S,
   MAX_BYTES,
+  MAX_STDIN_BYTES,
   MAX_LINES,
   sandboxTools,
   TOOL_NAMES,
@@ -53,8 +66,17 @@ function scripted(...answers: (ExecResult | Error)[]) {
 }
 
 /** A REAL shell over a temp dir standing in for /workspace: the tools' commands run for real. */
+const dirs: string[] = [];
+afterEach(() => {
+  for (const d of dirs.splice(0)) {
+    chmodSync(d, 0o755); // a test may have made it read-only
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
 function local() {
   const dir = mkdtempSync(join(tmpdir(), 'sbx-ws-'));
+  dirs.push(dir);
   let count = 0;
   const exec: Exec = (command, o = {}) =>
     new Promise((resolve) => {
@@ -83,7 +105,8 @@ function local() {
 const remote = () => new Map(sandboxTools({ info: async () => '' }).map((x) => [x.name, x]));
 const t = (tools: Map<string, SandboxTool>, n: string) => tools.get(n)!;
 const txt = (r: { content: { text: string }[] }) => r.content.map((c) => c.text).join('');
-const hasRg = !spawnSync('rg', ['--version']).error;
+// The real-rg tests skip only off CI: CI installs ripgrep, so a missing rg there fails loudly.
+const skipRg = !process.env.CI && Boolean(spawnSync('rg', ['--version']).error);
 
 describe('sandbox tools (SBX0 §6.4)', () => {
   it('serves the seven Pi tools plus sandbox_info, in that order', () => {
@@ -267,12 +290,104 @@ describe('sandbox tools (SBX0 §6.4)', () => {
     const s = scripted(res({ exitCode: 1, stderr: Buffer.from('Read-only file system') }));
     const r = await t(remote(), 'write').run({ path: "it's/a", content: 'x' }, s.exec);
     expect(s.sent[0]!.command).toBe(writeFileCommand("/workspace/it's/a"));
-    expect(writeFileCommand("/workspace/it's/a")).toBe(
-      "mkdir -p -- '/workspace/it'\\''s' && cat > '/workspace/it'\\''s/a'",
-    );
+    expect(writeFileCommand("/workspace/it's/a")).toMatch(/^p='\/workspace\/it'\\''s\/a'; /);
     expect(s.sent[0]!.stdin).toBe('x');
     expect(r.isError).toBe(true);
     expect(txt(r)).toBe("Could not write /workspace/it's/a: Read-only file system");
+  });
+
+  describe('writeFileCommand: atomic, through a real shell', () => {
+    const put = (l: ReturnType<typeof local>, path: string, content: string) =>
+      l.exec(writeFileCommand(path), { stdin: Buffer.from(content) });
+
+    it('replaces the file whole, keeps its mode, and leaves no temp file', async () => {
+      const l = local();
+      const f = join(l.dir, 'run.sh');
+      writeFileSync(f, 'old\n');
+      chmodSync(f, 0o751);
+      expect((await put(l, f, 'new\n')).exitCode).toBe(0);
+      expect(readFileSync(f, 'utf8')).toBe('new\n');
+      expect(statSync(f).mode & 0o777).toBe(0o751);
+      expect(readdirSync(l.dir)).toEqual(['run.sh']);
+    });
+
+    it('a new file gets the umask mode, and its parents are created', async () => {
+      const l = local();
+      const f = join(l.dir, 'a', 'b', 'new.txt');
+      expect((await put(l, f, 'x')).exitCode).toBe(0);
+      expect(readFileSync(f, 'utf8')).toBe('x');
+      const umask = process.umask();
+      expect(statSync(f).mode & 0o777).toBe(0o666 & ~umask);
+    });
+
+    it('writes through a symlink to its target, and the link stays a link', async () => {
+      const l = local();
+      mkdirSync(join(l.dir, 'real'));
+      writeFileSync(join(l.dir, 'real', 'conf'), 'old');
+      symlinkSync('real/conf', join(l.dir, 'conf'));
+      expect((await put(l, join(l.dir, 'conf'), 'new')).exitCode).toBe(0);
+      expect(lstatSync(join(l.dir, 'conf')).isSymbolicLink()).toBe(true);
+      expect(readlinkSync(join(l.dir, 'conf'))).toBe('real/conf');
+      expect(readFileSync(join(l.dir, 'real', 'conf'), 'utf8')).toBe('new');
+      expect(readdirSync(join(l.dir, 'real'))).toEqual(['conf']);
+    });
+
+    it('a failed write leaves the original intact and removes its temp file', async () => {
+      const l = local();
+      const f = join(l.dir, 'keep.txt');
+      writeFileSync(f, 'precious\n');
+      // The content write fails part-way: a 1-block file-size limit, and more than a block sent.
+      const r = await l.exec(`ulimit -f 1; ${writeFileCommand(f)}`, {
+        stdin: Buffer.alloc(64 * 1024, 'y'),
+      });
+      expect(r.exitCode).not.toBe(0);
+      expect(readFileSync(f, 'utf8')).toBe('precious\n');
+      expect(readdirSync(l.dir)).toEqual(['keep.txt']);
+    });
+
+    it('a directory it cannot write into fails, and the original is intact', async () => {
+      const l = local();
+      const f = join(l.dir, 'ro.txt');
+      writeFileSync(f, 'precious\n');
+      chmodSync(l.dir, 0o555);
+      const w = await t(l.tools, 'write').run({ path: 'ro.txt', content: 'gone' }, l.exec);
+      chmodSync(l.dir, 0o755);
+      expect(w.isError).toBe(true);
+      expect(txt(w)).toMatch(/^Could not write .*ro\.txt: /);
+      expect(readFileSync(f, 'utf8')).toBe('precious\n');
+      expect(readdirSync(l.dir)).toEqual(['ro.txt']);
+    });
+
+    it('a directory at the path is refused', async () => {
+      const l = local();
+      mkdirSync(join(l.dir, 'd'));
+      const r = await put(l, join(l.dir, 'd'), 'x');
+      expect(r.exitCode).not.toBe(0);
+      expect(r.stderr.toString()).toMatch(/Is a directory/);
+    });
+  });
+
+  it(`write refuses content over ${MAX_STDIN_BYTES} bytes before sending`, async () => {
+    expect(MAX_STDIN_BYTES).toBe(14 * 1024 * 1024);
+    const s = scripted();
+    await expect(
+      t(remote(), 'write').run({ path: 'big', content: 'x'.repeat(MAX_STDIN_BYTES + 1) }, s.exec),
+    ).rejects.toThrow(ToolInputError);
+    await expect(
+      t(remote(), 'write').run({ path: 'big', content: 'x'.repeat(MAX_STDIN_BYTES + 1) }, s.exec),
+    ).rejects.toThrow(/14\.0MB/);
+    expect(s.sent).toEqual([]);
+  });
+
+  it('refuses NUL in a model-supplied string, sending nothing', async () => {
+    const s = scripted();
+    await expect(t(remote(), 'read').run({ path: 'a\0b' }, s.exec)).rejects.toThrow(
+      /path must not contain NUL/,
+    );
+    await expect(t(remote(), 'grep').run({ pattern: 'x', glob: '*\0' }, s.exec)).rejects.toThrow(
+      ToolInputError,
+    );
+    expect(s.sent).toEqual([]);
   });
 
   it('read: offset and limit, the continuation note, and an offset past the end', async () => {
@@ -320,7 +435,7 @@ describe('sandbox tools (SBX0 §6.4)', () => {
     );
     const longLine = await t(tools, 'read').run({ path: 'f', offset: 2 }, s.exec);
     expect(txt(longLine)).toBe(
-      "[Line 2 is 50.0KB, exceeds 50.0KB limit. Use bash: sed -n '2p' /workspace/f | head -c 51200]",
+      "[Line 2 is 50.0KB, exceeds 50.0KB limit. Use bash: sed -n '2p' '/workspace/f' | head -c 51200]",
     );
   });
 
@@ -447,7 +562,7 @@ describe('sandbox tools (SBX0 §6.4)', () => {
       expect(l.count()).toBe(1);
     });
 
-    it("sends the original's read, then the write of the new content", async () => {
+    it("sends the original's read, then the atomic write of the new content", async () => {
       const s = scripted(res({ stdout: Buffer.from('a\nb\n') }), res());
       await t(remote(), 'edit').run(
         { path: 'x/f', edits: [{ oldText: 'b', newText: 'B' }] },
@@ -455,8 +570,47 @@ describe('sandbox tools (SBX0 §6.4)', () => {
       );
       expect(s.sent.map(({ command, stdin }) => ({ command, stdin }))).toEqual([
         { command: "cat -- '/workspace/x/f'", stdin: undefined },
-        { command: "cat > '/workspace/x/f'", stdin: 'a\nB\n' },
+        { command: writeFileCommand('/workspace/x/f'), stdin: 'a\nB\n' },
       ]);
+    });
+
+    it('keeps CRLF line endings: matches LF-normalized, writes CRLF back', async () => {
+      const l = local();
+      writeFileSync(join(l.dir, 'w.bat'), 'echo a\r\necho b\r\necho c\r\n');
+      const r = await t(l.tools, 'edit').run(
+        { path: 'w.bat', edits: [{ oldText: 'echo a\necho b', newText: 'echo A\necho B' }] },
+        l.exec,
+      );
+      expect(txt(r)).toBe(`Successfully replaced 1 block(s) in ${l.dir}/w.bat.`);
+      expect(readFileSync(join(l.dir, 'w.bat'), 'utf8')).toBe('echo A\r\necho B\r\necho c\r\n');
+      // An oldText sent with CRLF matches too.
+      await t(l.tools, 'edit').run(
+        { path: 'w.bat', edits: [{ oldText: 'echo B\r\necho c', newText: 'echo C' }] },
+        l.exec,
+      );
+      expect(readFileSync(join(l.dir, 'w.bat'), 'utf8')).toBe('echo A\r\necho C\r\n');
+    });
+
+    it('keeps a UTF-8 BOM, which oldText never includes', async () => {
+      const l = local();
+      writeFileSync(join(l.dir, 'b.cs'), '\uFEFFusing System;\n');
+      const r = await t(l.tools, 'edit').run(
+        { path: 'b.cs', edits: [{ oldText: 'using System;', newText: 'using System.IO;' }] },
+        l.exec,
+      );
+      expect(r.isError).toBeUndefined();
+      expect(readFileSync(join(l.dir, 'b.cs'), 'utf8')).toBe('\uFEFFusing System.IO;\n');
+    });
+
+    it(`refuses a result over ${MAX_STDIN_BYTES} bytes before writing, pointing to bash`, async () => {
+      const s = scripted(res({ stdout: Buffer.from('seed\n') }));
+      const r = await t(remote(), 'edit').run(
+        { path: 'f', edits: [{ oldText: 'seed', newText: 'z'.repeat(MAX_STDIN_BYTES) }] },
+        s.exec,
+      );
+      expect(r.isError).toBe(true);
+      expect(txt(r)).toMatch(/over the 14\.0MB one call can carry; use bash/);
+      expect(s.sent).toHaveLength(1);
     });
   });
 
@@ -491,7 +645,7 @@ describe('sandbox tools (SBX0 §6.4)', () => {
       );
       expect(txt(hit)).toBe('src/a.ts:3:const x = 1');
       expect(s.sent[0]!.command).toMatch(
-        /rg -n -H --no-heading --color=never --hidden --glob '!\.git' -i -F -C 1 --glob '\*\.ts' -e 'const x' -- '\/workspace'/,
+        /rg -n -H --no-heading --color=never --hidden -i -F -C 1 --glob '\*\.ts' --glob '!\.git' -e 'const x' -- '\/workspace'/,
       );
       expect(txt(await t(tools, 'grep').run({ pattern: 'q' }, s.exec))).toBe('No matches found');
       const bad = await t(tools, 'grep').run({ pattern: '(' }, s.exec);
@@ -526,7 +680,7 @@ describe('sandbox tools (SBX0 §6.4)', () => {
       );
     });
 
-    it.skipIf(!hasRg)('against a real rg: a single file, a directory, and no match', async () => {
+    it.skipIf(skipRg)('against a real rg: a single file, a directory, and no match', async () => {
       const l = local();
       mkdirSync(join(l.dir, 'src'));
       writeFileSync(join(l.dir, 'src', 'a.ts'), 'const x = 1\nconst y = 2\n');
@@ -541,6 +695,14 @@ describe('sandbox tools (SBX0 §6.4)', () => {
         'No matches found',
       );
       expect(l.count()).toBe(3);
+      // A user glob cannot re-admit .git: ripgrep's later --glob wins, and '!.git' is last.
+      mkdirSync(join(l.dir, '.git'));
+      writeFileSync(join(l.dir, '.git', 'config'), 'const z = 3\n');
+      for (const glob of ['*', '**/*']) {
+        const out = txt(await t(l.tools, 'grep').run({ pattern: 'const', glob }, l.exec));
+        expect(out).toContain('src/a.ts:1:');
+        expect(out).not.toContain('.git');
+      }
     });
   });
 
@@ -558,7 +720,7 @@ describe('sandbox tools (SBX0 §6.4)', () => {
       const r = txt(await t(tools, 'find').run({ pattern: '*.ts', limit: 2 }, s.exec));
       expect(r).toBe('a.ts\nb.ts\n\n[2 of 3 results shown. Use limit to see more.]');
       expect(s.sent[0]!.command).toMatch(
-        /^cd -- '\/workspace' \|\| exit 3; .*rg --files --hidden --glob '!\.git' --glob '\*\.ts'/,
+        /^cd -- '\/workspace' \|\| exit 3; .*rg --files --hidden --glob '\*\.ts' --glob '!\.git'/,
       );
       expect(s.sent[0]!.command).toContain('| head -n 2;');
       expect(txt(await t(tools, 'find').run({ pattern: '*.rs' }, s.exec))).toBe(
@@ -569,7 +731,7 @@ describe('sandbox tools (SBX0 §6.4)', () => {
       expect(txt(missing)).toBe('Path not found or not a directory: /workspace/x');
     });
 
-    it.skipIf(!hasRg)(
+    it.skipIf(skipRg)(
       'against a real rg: relative, sorted, .git excluded, hidden included',
       async () => {
         const l = local();
@@ -591,6 +753,13 @@ describe('sandbox tools (SBX0 §6.4)', () => {
         expect((await t(l.tools, 'find').run({ pattern: '*', path: 'nope' }, l.exec)).isError).toBe(
           true,
         );
+        // A user glob cannot re-admit .git: ripgrep's later --glob wins, and '!.git' is last.
+        mkdirSync(join(l.dir, '.git', 'objects'));
+        writeFileSync(join(l.dir, '.git', 'objects', 'ab'), '');
+        for (const pattern of ['*', '**/*']) {
+          const out = txt(await t(l.tools, 'find').run({ pattern }, l.exec));
+          expect(out).toBe('.a.ts\nc.md\nsrc/b.ts');
+        }
       },
     );
   });

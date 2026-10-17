@@ -24,6 +24,11 @@ const GREP_MAX_LINE = 500;
  * timeout defaults to the token's whole lifetime and mints a fresh token on every call (spec §6.5).
  */
 export const FILE_TOOL_TIMEOUT_S = 60;
+/**
+ * The most stdin one Exec may carry: the gRPC message limit is 16 MiB, and the request around the
+ * stdin needs some of it. `write`, `edit` and `mocactl sbx push`/`put` refuse more.
+ */
+export const MAX_STDIN_BYTES = 14 * 1024 * 1024;
 export const TOOL_NAMES = [
   'bash',
   'read',
@@ -66,11 +71,50 @@ const err = (text: string): ToolResult => ({ content: [{ type: 'text', text }], 
 export const q = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
 
 /**
- * The command that writes its stdin to `path`, creating the parent directories: the `write` tool's,
+ * The command that writes its stdin to `path` ATOMICALLY: the `write` tool's, `edit`'s write-back
  * and `mocactl sbx put`'s (one implementation of the write).
+ *
+ * The content goes to a temp file beside the target, which then replaces it with `mv`, so a full
+ * disk or a killed VM leaves either the old file or the new one, never a cut one. It creates the
+ * parent directories, keeps an existing target's mode (a new file gets the umask's), and writes
+ * through a symlink to the file it points to, keeping the link. On any failure it removes the temp
+ * file and exits non-zero. A hard link to the target is not updated (the inode is replaced).
  */
 export function writeFileCommand(path: string): string {
-  return `mkdir -p -- ${q(posix.dirname(path))} && cat > ${q(path)}`;
+  // GNU `chmod --reference` on the sandbox; `stat -f %Lp` is the BSD fallback (local tests).
+  const mode =
+    'if [ -e "$p" ]; then chmod --reference="$p" -- "$t" 2>/dev/null || ' +
+    'chmod "$(stat -c %a -- "$p" 2>/dev/null || stat -f %Lp "$p")" "$t"; ' +
+    `else chmod "$(printf '%o' $(( 0666 & ~$(umask) )))" "$t"; fi`;
+  return (
+    `p=${q(path)}; if [ -L "$p" ]; then p=$(readlink -f -- "$p") || exit 1; fi; ` +
+    'if [ -d "$p" ]; then echo "$p: Is a directory" >&2; exit 1; fi; ' +
+    'd=$(dirname -- "$p"); mkdir -p -- "$d" || exit 1; ' +
+    't=$(mktemp "$d/.sbx-XXXXXX") || exit 1; ' +
+    `if cat > "$t" && { ${mode}; } && mv -f -- "$t" "$p"; then exit 0; fi; ` +
+    'rm -f -- "$t"; exit 1'
+  );
+}
+
+/** Pi's line-ending and BOM handling for `edit` (edit-diff.ts), so CRLF files stay CRLF. */
+function detectLineEnding(content: string): '\r\n' | '\n' {
+  const crlf = content.indexOf('\r\n');
+  const lf = content.indexOf('\n');
+  if (lf === -1 || crlf === -1) return '\n';
+  return crlf < lf ? '\r\n' : '\n';
+}
+const normalizeToLF = (text: string): string => text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+const restoreLineEndings = (text: string, ending: '\r\n' | '\n'): string =>
+  ending === '\r\n' ? text.replace(/\n/g, '\r\n') : text;
+const stripBom = (content: string): { bom: string; text: string } =>
+  content.startsWith('\uFEFF')
+    ? { bom: '\uFEFF', text: content.slice(1) }
+    : { bom: '', text: content };
+
+/** A model-supplied string must not carry NUL: no shell word or path can hold one. */
+function noNul(k: string, v: string): string {
+  if (v.includes('\0')) throw new ToolInputError(`${k} must not contain NUL characters`);
+  return v;
 }
 
 function str(a: Record<string, unknown>, k: string): string {
@@ -78,7 +122,7 @@ function str(a: Record<string, unknown>, k: string): string {
   if (typeof v !== 'string' || v.length === 0) {
     throw new ToolInputError(`${k} is required and must be a non-empty string`);
   }
-  return v;
+  return noNul(k, v);
 }
 function optStr(a: Record<string, unknown>, k: string): string | undefined {
   const v = a[k];
@@ -86,7 +130,7 @@ function optStr(a: Record<string, unknown>, k: string): string | undefined {
   if (typeof v !== 'string' || v.length === 0) {
     throw new ToolInputError(`${k} must be a non-empty string`);
   }
-  return v;
+  return noNul(k, v);
 }
 function optInt(a: Record<string, unknown>, k: string, min: number): number | undefined {
   const v = a[k];
@@ -219,7 +263,7 @@ export function sandboxTools(o: {
       if (r.truncated) {
         return err(
           `${path} is larger than 8 MiB, the sandbox's output cap; read it in parts with bash ` +
-            `(sed -n '1,${MAX_LINES}p' ${path})`,
+            `(sed -n '1,${MAX_LINES}p' ${q(path)})`,
         );
       }
       if (r.stdout.includes(0)) {
@@ -251,7 +295,7 @@ export function sandboxTools(o: {
         // Pi's wording: the first line alone is over the byte limit.
         return ok(
           `[Line ${offset} is ${formatSize(Buffer.byteLength(want[0]!))}, exceeds ` +
-            `${formatSize(MAX_BYTES)} limit. Use bash: sed -n '${offset}p' ${path} | head -c ${MAX_BYTES}]`,
+            `${formatSize(MAX_BYTES)} limit. Use bash: sed -n '${offset}p' ${q(path)} | head -c ${MAX_BYTES}]`,
         );
       }
       const end = start + shown.length;
@@ -276,6 +320,12 @@ export function sandboxTools(o: {
         throw new ToolInputError('content is required and must be a string');
       }
       const data = Buffer.from(a.content);
+      if (data.length > MAX_STDIN_BYTES) {
+        throw new ToolInputError(
+          `content is ${formatSize(data.length)}, over the ${formatSize(MAX_STDIN_BYTES)} one call ` +
+            'can carry; write it in parts (write the first part, then append with bash)',
+        );
+      }
       const r = await exec(writeFileCommand(path), { stdin: data, ...fileOpts(signal) });
       if (r.exitCode !== 0) return err(`Could not write ${path}: ${why(r)}`);
       return ok(`Successfully wrote ${data.length} bytes to ${path}`);
@@ -316,16 +366,27 @@ export function sandboxTools(o: {
             'cannot be edited whole; use bash (sed -i) instead.',
         );
       }
-      const original = r.stdout.toString();
+      const raw = r.stdout.toString();
       // Bytes that are not UTF-8 would come back as U+FFFD: refuse instead of corrupting them.
-      if (!Buffer.from(original).equals(r.stdout)) {
+      if (!Buffer.from(raw).equals(r.stdout)) {
         return err(
           `Could not edit file: ${path}. It is not valid UTF-8 text, and editing it here would ` +
             'corrupt it; use bash instead.',
         );
       }
+      // Pi's matching: on LF-normalized text without the BOM (the model never sends an invisible
+      // BOM or CRs); the endings and the BOM are restored on write. Pi's fuzzy pass (NFKC, smart
+      // quotes, trailing spaces) is left out on purpose: when it matches, Pi writes the WHOLE file
+      // back in normalized form, which rewrites lines the edit never touched.
+      const { bom, text: unbom } = stripBom(raw);
+      const ending = detectLineEnding(unbom);
+      const original = normalizeToLF(unbom);
+      const wanted = parsed.map((e) => ({
+        oldText: normalizeToLF(e.oldText),
+        newText: normalizeToLF(e.newText),
+      }));
       const spans: { i: number; start: number; end: number; newText: string }[] = [];
-      for (const [i, e] of parsed.entries()) {
+      for (const [i, e] of wanted.entries()) {
         const first = original.indexOf(e.oldText);
         if (first < 0) {
           return err(
@@ -366,7 +427,14 @@ export function sandboxTools(o: {
             : `No changes made to ${path}. The replacement produced identical content. This might indicate an issue with special characters or the text not existing as expected.`,
         );
       }
-      const w = await exec(`cat > ${q(path)}`, { stdin: Buffer.from(next), ...fileOpts(signal) });
+      const out = Buffer.from(bom + restoreLineEndings(next, ending));
+      if (out.length > MAX_STDIN_BYTES) {
+        return err(
+          `Could not edit file: ${path}. The result is ${formatSize(out.length)}, over the ` +
+            `${formatSize(MAX_STDIN_BYTES)} one call can carry; use bash (sed -i) instead.`,
+        );
+      }
+      const w = await exec(writeFileCommand(path), { stdin: out, ...fileOpts(signal) });
       if (w.exitCode !== 0) return err(`Could not edit file: ${path}. ${why(w)}.`);
       return ok(`Successfully replaced ${spans.length} block(s) in ${path}.`);
     },
@@ -388,11 +456,13 @@ export function sandboxTools(o: {
       const limit = optInt(a, 'limit', 1) ?? 100;
       const flags = [
         // -H: a single-file search still prints the file name, as Pi's does.
-        "-n -H --no-heading --color=never --hidden --glob '!.git'",
+        '-n -H --no-heading --color=never --hidden',
         optBool(a, 'ignoreCase') ? '-i' : '',
         optBool(a, 'literal') ? '-F' : '',
         context ? `-C ${context}` : '',
         glob ? `--glob ${q(glob)}` : '',
+        // LAST: in ripgrep the later --glob wins, so a user glob such as '*' cannot re-admit .git.
+        "--glob '!.git'",
       ]
         .filter(Boolean)
         .join(' ');
@@ -453,7 +523,8 @@ export function sandboxTools(o: {
       // Exit 3 (which rg never uses) says the directory is missing.
       const r = await exec(
         `cd -- ${q(path)} || exit 3; f=$(mktemp) || exit 2; ` +
-          `rg --files --hidden --glob '!.git' --glob ${q(pattern)} > "$f"; code=$?; ` +
+          // '!.git' LAST: the later --glob wins in ripgrep, so '*' or '**/*' cannot list .git.
+          `rg --files --hidden --glob ${q(pattern)} --glob '!.git' > "$f"; code=$?; ` +
           `echo "__total:$(wc -l < "$f" | tr -d ' ')"; LC_ALL=C sort "$f" | head -n ${limit}; ` +
           `rm -f "$f"; exit $code`,
         fileOpts(signal),

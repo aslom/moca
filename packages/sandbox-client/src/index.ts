@@ -18,6 +18,7 @@ export {
   FILE_TOOL_TIMEOUT_S,
   MAX_BYTES,
   MAX_LINES,
+  MAX_STDIN_BYTES,
   TOOL_NAMES,
   ToolInputError,
   WORKSPACE,
