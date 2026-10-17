@@ -1,7 +1,8 @@
 # The relay as SBX0 runs it (spec §2, §3.1): its exec listener on LOOPBACK, so the exec-tls sidecar
 # is the only way in, and -- in increment 1a only -- the prototype's static client tokens from an
-# optional Secret. A relay built from main ignores the variable; the 1a image (built from the
-# team-only prototype branch) reads it. Increment 1b removes this env entry.
+# optional Secret. A relay built from main ignores the variable; the team-only 1a image (built from
+# sbx/relay-1a: the prototype's client-token commits on the keepalive commit) reads it. Increment 1b
+# removes this env entry.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

@@ -34,6 +34,24 @@ patches:
       - op: replace
         path: /spec/ingress
         value: []
+  # The base's in-cluster relay Services: with the exec listener on loopback and the relay's
+  # NetworkPolicy ingress emptied, neither is usable, so neither should look like a supported path.
+  # The two ghostunnel Services (sandbox-relay-tls, sbx-relay-exec-tls) select the pods directly and
+  # the Routes target those, so nothing else needs these.
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: sandbox-relay-attach
+        namespace: moca
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: sandbox-relay-exec
+        namespace: moca
   - patch: |-
       $patch: delete
       apiVersion: apps/v1
