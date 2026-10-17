@@ -85,13 +85,13 @@ Without
 every worker bundle, and the control plane hands the exec one to clients.
 
 **Upgrading from 1a:** unset `SBX_CLIENTS` (the run refuses it), and move `SBX_IMAGE` off the
-team-only 1a image: its relay requires the harness exec token, and its control plane has no sandbox
-profile. The run deletes the static client tokens and their bundles, and removes the relay's harness
-exec token once the new relay is up. Run it with `SBX_ACK_HOSTS=1`, because every 1a host must be
-reinstalled anyway, then re-run `install-host.sh` with the new worker bundles, which now carry the
-workspace idle time and image size; it refuses a 1a bundle. **1a workspaces are not
-migrated:** a 1b sandbox has a workspace key of its own, which no 1a workspace matches, so tell 1a
-users to pull their work out before the upgrade.
+team-only 1a image (built from `sbx/relay-1a`): its relay requires the harness exec token, and its
+control plane has no sandbox profile. The run deletes the static client tokens and their bundles,
+and removes the relay's harness exec token once the new relay is up. Run it with `SBX_ACK_HOSTS=1`,
+because every 1a host must be reinstalled anyway, then re-run `install-host.sh` with the new worker
+bundles, which now carry the workspace idle time and image size; it refuses a 1a bundle. **1a
+workspaces are not migrated:** a 1b sandbox has a workspace key of its own, which no 1a workspace
+matches, so tell 1a users to pull their work out before the upgrade.
 
 **The API Route's certificate:** without `SBX_API_TLS_CERT/KEY` the API Route uses the router's
 default certificate. If that certificate is not publicly trusted (a self-signed or internal-CA
@@ -115,7 +115,11 @@ The host needs what `deploy/microvm/P4-ON-P6.md` lists for P4 (`/dev/kvm`, Firec
 The script waits up to `SBX_ATTACH_TIMEOUT` (120 s) for the worker's attach to hold. A newly added
 worker's token reaches the relay only when the kubelet syncs the Secret, about a minute, so the first
 attaches may be refused. Re-running it restarts the worker once, with the new env file.
-`install-host.sh --uninstall <id>` removes a worker and keeps its workspace data.
+`install-host.sh --uninstall <id>` is the undo: it removes everything the install recorded in
+`/etc/sbx/manifest` for that worker (its unit instance, slice, env file and CA). The last uninstall on
+a host also removes the shared `sbx-worker@.service` and `sbx.slice`. Workspace data under
+`/srv/sbx/workspaces/<id>` and `/srv/sbx/jail/<id>` is kept; remove it by hand when no sandbox needs
+it.
 
 ## 3. Users
 

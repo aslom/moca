@@ -378,18 +378,24 @@ route_cert() {
     log "installing the $secret certificate from $cert"
     kc create secret tls "$secret" -n "$NS" --cert="$cert" --key="$key" --dry-run=client -o json |
       kc apply --server-side --force-conflicts --field-manager=sbx-setup -f - >/dev/null
-  elif [[ -z "$(secret_json "$secret")" ]]; then
-    dir="$(mktemp -d)"
-    (
-      trap 'rm -rf "$dir"' EXIT
-      chmod 700 "$dir"
-      openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj "/CN=$host" \
-        -addext "subjectAltName=DNS:$host" -keyout "$dir/tls.key" -out "$dir/tls.crt" 2>"$dir/err" ||
-        { cat "$dir/err" >&2; die "openssl could not create the self-signed certificate for $host"; }
-      kc create secret tls "$secret" -n "$NS" --cert="$dir/tls.crt" --key="$dir/tls.key" --dry-run=client -o json |
-        kc apply --server-side --force-conflicts --field-manager=sbx-setup -f - >/dev/null
-    )
-    log "WARNING: no certificate given for $host: using a self-signed one, shipped in every bundle"
+  else
+    # Captured first, so a failing `kubectl get` stops the run (errexit). Tested inside [[ ]], a
+    # transient API or RBAC error would read as "no Secret" and replace the certificate every
+    # bundle already handed out trusts.
+    json="$(secret_json "$secret")"
+    if [[ -z "$json" ]]; then
+      dir="$(mktemp -d)"
+      (
+        trap 'rm -rf "$dir"' EXIT
+        chmod 700 "$dir"
+        openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj "/CN=$host" \
+          -addext "subjectAltName=DNS:$host" -keyout "$dir/tls.key" -out "$dir/tls.crt" 2>"$dir/err" ||
+          { cat "$dir/err" >&2; die "openssl could not create the self-signed certificate for $host"; }
+        kc create secret tls "$secret" -n "$NS" --cert="$dir/tls.crt" --key="$dir/tls.key" --dry-run=client -o json |
+          kc apply --server-side --force-conflicts --field-manager=sbx-setup -f - >/dev/null
+      )
+      log "WARNING: no certificate given for $host: using a self-signed one, shipped in every bundle"
+    fi
   fi
   json="$(secret_json "$secret")"
   crt="$(json_value "$json" tls.crt)"
@@ -404,7 +410,10 @@ route_cert() {
 image_entry() {
   local from="$1" ref="$2" name tag=''
   if [[ "$ref" == *@* ]]; then
-    printf '  - name: %s\n    newName: %s\n    digest: %s\n' "$from" "${ref%@*}" "${ref#*@}"
+    # repo:tag@sha256:... -- the digest pins the image; a tag left in newName renders an invalid ref.
+    name="${ref%@*}"
+    [[ "${name##*/}" != *:* ]] || name="${name%:*}"
+    printf '  - name: %s\n    newName: %s\n    digest: %s\n' "$from" "$name" "${ref#*@}"
     return 0
   fi
   name="$ref"

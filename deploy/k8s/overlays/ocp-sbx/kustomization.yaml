@@ -11,7 +11,8 @@
 #                     caller, the base's harness exec token removed
 #   patch-control-plane.yaml  the sandbox route profile, its settings, only the signing key mounted
 #   api-route.yaml    the control plane's edge Route and the router's NetworkPolicy to it
-#   inline deletes    the workloads SBX0 does not run, and ocp-single's sandbox/supervisor peers
+#   inline deletes    the workloads SBX0 does not run, ocp-single's sandbox/supervisor peers, and
+#                     the base's in-cluster relay Services (sandbox-relay-attach, sandbox-relay-exec)
 #
 # Every patch names the BASE namespace (moca, moca-sandbox, moca-credentials): kustomize matches a
 # resource on its previous namespace too, which is how a patch here reaches an object ocp-single has
@@ -57,6 +58,24 @@ patches:
         value: 6443
       - op: remove
         path: /spec/egress/1/ports/1
+  # The base's in-cluster relay Services: with the exec listener on loopback and the relay's
+  # NetworkPolicy ingress emptied, neither is usable, so neither should look like a supported path.
+  # The two ghostunnel Services (sandbox-relay-tls, sbx-relay-exec-tls) select the pods directly and
+  # the Routes target those, so nothing else needs these.
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: sandbox-relay-attach
+        namespace: moca
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: sandbox-relay-exec
+        namespace: moca
   - patch: |-
       $patch: delete
       apiVersion: apps/v1

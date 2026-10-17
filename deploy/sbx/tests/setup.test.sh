@@ -37,6 +37,8 @@ case "$1 $2" in
 'get secret')
   f="$MOCK_STATE/secret-$3.json"
   # MOCK_BLANK_GET=NAME: that Secret reads back with no data (emptied by someone else mid-run).
+  # MOCK_FAIL_GET=NAME: reading that Secret fails (a transient API or RBAC error).
+  [[ "$3" != "${MOCK_FAIL_GET:-}" ]] || { echo 'Error from server (InternalError): etcdserver: request timed out' >&2; exit 1; }
   if [[ -f "$f" && "$3" == "${MOCK_BLANK_GET:-}" ]]; then jq -c 'del(.data)' "$f"; elif [[ -f "$f" ]]; then cat "$f"; fi
   exit 0 ;;
 'create secret')
@@ -487,3 +489,28 @@ pass 'an issued exec certificate advertises no CA; the API Route takes an operat
 grep -q 'no token for worker sbx_default' "$TMP/out" || fail 'the empty-worker-token refusal does not name the id'
 ! grep -qx 'SANDBOX_TOKEN=' "$GEN/workers/sbx_default/worker.env" || fail 'worker bundle holds SANDBOX_TOKEN='
 pass 'refuses, naming the id and no value, when a worker token reads back empty'
+
+# 9. A failing `kubectl get` of a route certificate stops the run; it never reads as "no Secret",
+# which would mint a new self-signed certificate and break the CA in every bundle already out.
+run_setup true || fail 're-populate run failed'
+before_tls="$(jq -S . "$MOCK_STATE/secret-moca-relay-tls.json")"
+: >"$MOCK_LOG"
+! run_setup export MOCK_FAIL_GET=moca-relay-tls || fail 'carried on past a failing kubectl get of moca-relay-tls'
+! grep -q 'kubectl create secret tls moca-relay-tls' "$MOCK_LOG" || fail 'minted a new certificate after a failing kubectl get'
+! grep -q 'kubectl apply -k' "$MOCK_LOG" || fail 'applied the stack after a failing kubectl get'
+! grep -q 'self-signed one' "$TMP/out" || fail 'claimed to issue a self-signed certificate after a failing kubectl get'
+[[ "$(jq -S . "$MOCK_STATE/secret-moca-relay-tls.json")" == "$before_tls" ]] || fail 'moca-relay-tls changed after a failing kubectl get'
+pass 'a failing kubectl get of a route certificate fails the run and mints nothing'
+
+# 10. An image pinned by digest: newName drops any tag (repo:tag@sha256:... renders invalid otherwise),
+# and a registry port is not mistaken for a tag.
+D="sha256:$(printf '%064d' 1)"
+run_setup export SBX_IMAGE="ghcr.io/example/moca:sbx-1b@$D" || fail 'run with repo:tag@digest failed'
+grep -qx '    newName: ghcr.io/example/moca' "$K" || fail "newName keeps the tag: $(grep newName "$K")"
+grep -qx "    digest: $D" "$K" || fail 'digest not set'
+! grep -q 'newTag' "$K" || fail 'newTag set alongside a digest'
+render
+grep -q "image: ghcr.io/example/moca@$D" "$TMP/render.yaml" || fail 'the digest-pinned image does not render as repo@digest'
+run_setup export SBX_IMAGE="registry.example.invalid:5000/moca@$D" || fail 'run with host:port/repo@digest failed'
+grep -qx '    newName: registry.example.invalid:5000/moca' "$K" || fail "newName lost the registry port: $(grep newName "$K")"
+pass 'a digest-pinned image renders newName without the tag (and keeps a registry port)'
