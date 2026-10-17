@@ -22,8 +22,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${SBX_ATTACH_TIMEOUT:=120}"
 : "${SBX_ATTACH_SETTLE:=5}"
 # A bundle from deploy/sbx/setup.sh carries SH_WORKSPACE_IDLE (the sandbox lifetime plus two days,
-# spec §5.4) and SH_WORKSPACE_IMAGE_MB; these defaults are a 1a bundle's, which carries neither.
-DEFAULT_WORKSPACE_IDLE=216h DEFAULT_IMAGE_MB=2048
+# spec §5.4) and SH_WORKSPACE_IMAGE_MB. A bundle without the idle predates that rule and is refused;
+# the image size defaults to microvm-worker's own.
+DEFAULT_IMAGE_MB=2048
 DEFAULT_BUDGET_MB=8192
 
 log() { printf '==> %s\n' "$*"; }
@@ -69,7 +70,8 @@ install_worker() {
   tok="$(env_value SANDBOX_TOKEN "$env")"
   [[ "$tok" =~ ^[0-9a-f]{64}$ ]] || die "SANDBOX_TOKEN in $env is not 64 hex characters: copy the bundle again"
   idle="$(env_value SH_WORKSPACE_IDLE "$env")"
-  idle="${idle:-$DEFAULT_WORKSPACE_IDLE}"
+  [[ -n "$idle" ]] ||
+    die "$env has no SH_WORKSPACE_IDLE (a bundle from before increment 1b): re-run deploy/sbx/setup.sh and copy the new bundle"
   [[ "$idle" =~ ^[1-9][0-9]*h$ ]] || die "SH_WORKSPACE_IDLE in $env must be whole hours, e.g. 216h"
   image_mb="$(env_value SH_WORKSPACE_IMAGE_MB "$env")"
   image_mb="${image_mb:-$DEFAULT_IMAGE_MB}"

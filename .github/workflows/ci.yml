@@ -73,9 +73,12 @@ jobs:
       # research-smoke.test.sh, likewise, mints real tokens with packages/control-plane's tsx, which
       # deploy-scripts (no workspace install) does not have, so there it runs only its tsx-free
       # checks and skips the rest. Here the skip is a FAILURE (MOCA_REQUIRE_WORKSPACE=1), so the
-      # mint-driven checks cannot stop running unseen.
+      # mint-driven checks cannot stop running unseen. deploy/sbx's setup.test.sh does the same with
+      # its signing-key round-trip (makeSigner, then the relay's sandbox-token verifier).
       - name: Deploy tests that need the workspace
-        run: MOCA_REQUIRE_WORKSPACE=1 bash deploy/vm/tests/research-smoke.test.sh
+        run: |
+          MOCA_REQUIRE_WORKSPACE=1 bash deploy/vm/tests/research-smoke.test.sh
+          MOCA_REQUIRE_WORKSPACE=1 bash deploy/sbx/tests/setup.test.sh
 
   # Runs the same `make lint` (pre-commit over all files) that contributors run locally, so
   # a config that silently executes zero hooks can no longer look identical to a green

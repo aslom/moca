@@ -63,7 +63,11 @@ parse_args() {
 
 WORKER_RE='^[A-Za-z_][A-Za-z0-9_]*$'
 SUBJECTS_RE='^github:[0-9]+(,github:[0-9]+)*$'
-COUNT_RE='^[1-9][0-9]{0,8}$' # a positive whole number small enough for shell arithmetic
+# Positive whole numbers. The disk check multiplies SBX_MAX_TOTAL x SBX_WORKSPACE_IMAGE_MB x 10 and
+# SBX_WORKSPACE_FS_GIB x 1024 x 8 in 64-bit shell arithmetic: six digits for the factors of the first
+# (< 10^13) and nine for the filesystem size (< 10^13) keep both far from wrapping.
+COUNT6_RE='^[1-9][0-9]{0,5}$'
+COUNT9_RE='^[1-9][0-9]{0,8}$'
 HOST_RE='^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'
 NS_RE='^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
 
@@ -106,9 +110,11 @@ validate() {
   [[ "$SBX_LIFETIME_DAYS" =~ ^([1-9]|[12][0-9]|30)$ ]] || die 'SBX_LIFETIME_DAYS must be a whole number of days, 1-30'
   [[ "$SBX_MAX_INFLIGHT" =~ ^[1-8]$ ]] || die 'SBX_MAX_INFLIGHT must be 1-8'
   local v
-  for v in SBX_MAX_PER_SUBJECT SBX_MAX_TOTAL SBX_WORKSPACE_IMAGE_MB SBX_WORKSPACE_FS_GIB; do
-    [[ "${!v:-}" =~ $COUNT_RE ]] || die "$v must be a positive whole number"
+  for v in SBX_MAX_PER_SUBJECT SBX_MAX_TOTAL SBX_WORKSPACE_IMAGE_MB; do
+    [[ "${!v:-}" =~ $COUNT6_RE ]] || die "$v must be a positive whole number of at most six digits"
   done
+  [[ "${SBX_WORKSPACE_FS_GIB:-}" =~ $COUNT9_RE ]] ||
+    die 'SBX_WORKSPACE_FS_GIB must be a positive whole number of at most nine digits'
   # Workspace disk is not admission-controlled on the worker (SBX0 §5.3): the total quota is the
   # disk control, so every live sandbox's image must fit in 80 % of the workspace filesystem.
   ((SBX_MAX_TOTAL * SBX_WORKSPACE_IMAGE_MB * 10 <= SBX_WORKSPACE_FS_GIB * 1024 * 8)) ||
@@ -197,8 +203,8 @@ ensure_redis_secret() {
 
 # The base relay requires SH_RELAY_TOKEN, the attach fallback for an id with no directory token.
 # SBX0 hands it to nobody; it exists so the relay boots, and is random so nobody can use it. From
-# 1b there is no harness exec token (spec §3.1): the overlay drops the env entry, and a namespace
-# set up by 1a loses the key here, by explicit null patch (server-side apply does not prune it).
+# 1b there is no harness exec token (spec §3.1): the overlay drops the env entry, and
+# remove_exec_token drops a 1a namespace's key once the new relay is up.
 ensure_relay_secret() {
   local json relay
   json="$(secret_json moca-relay)"
@@ -208,7 +214,14 @@ ensure_relay_secret() {
     export S_0="$relay"
     apply_secret moca-relay SH_RELAY_TOKEN
   )
-  if printf '%s' "$json" | jq -e '.data // {} | has("MOCA_RELAY_EXEC_TOKEN")' >/dev/null; then
+}
+
+# A namespace set up by 1a holds MOCA_RELAY_EXEC_TOKEN in moca-relay, removed by explicit null patch
+# (server-side apply does not prune it). Only AFTER the new relay has rolled out: the 1a relay's
+# template requires that key, so removing it earlier, in a run that then fails, would leave any
+# restarted 1a relay pod in CreateContainerConfigError.
+remove_exec_token() {
+  if secret_json moca-relay | jq -e '.data // {} | has("MOCA_RELAY_EXEC_TOKEN")' >/dev/null; then
     log "removing MOCA_RELAY_EXEC_TOKEN from moca-relay (SBX0 has no harness caller)"
     kc patch secret moca-relay -n "$NS" --type=merge -p '{"data":{"MOCA_RELAY_EXEC_TOKEN":null}}' >/dev/null
   fi
@@ -400,6 +413,7 @@ apply_stack() {
   kc apply -k "$GEN" >/dev/null
   kc rollout status statefulset/redis -n "$NS" --timeout=300s
   kc rollout status deployment/sandbox-relay -n "$NS" --timeout=300s
+  remove_exec_token
   kc rollout status deployment/moca-control-plane -n "$NS" --timeout=300s
 }
 

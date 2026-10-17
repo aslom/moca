@@ -92,7 +92,10 @@ case "$1 $2" in
 'apply -k')
   cp "$3/kustomization.yaml" "$MOCK_STATE/applied-kustomization.yaml"
   exit 0 ;;
-'rollout status') exit 0 ;;
+'rollout status')
+  # MOCK_ROLLOUT_FAIL=KIND/NAME: that rollout times out.
+  [[ "$3" != "${MOCK_ROLLOUT_FAIL:-}" ]] || { echo "error: timed out waiting for the condition on $3" >&2; exit 1; }
+  exit 0 ;;
 esac
 echo "mock kubectl: unhandled: $*" >&2
 exit 1
@@ -169,6 +172,10 @@ refusals=(
   'export SBX_MAX_INFLIGHT=0 => SBX_MAX_INFLIGHT must be 1-8'
   'export SBX_MAX_INFLIGHT=9 => SBX_MAX_INFLIGHT must be 1-8'
   'export SBX_WORKSPACE_IMAGE_MB=-1 => SBX_WORKSPACE_IMAGE_MB must be a positive whole number'
+  'export SBX_MAX_TOTAL=999999999 SBX_WORKSPACE_IMAGE_MB=999999999 SBX_WORKSPACE_FS_GIB=999999999 => SBX_MAX_TOTAL must be'
+  'export SBX_MAX_TOTAL=1 SBX_WORKSPACE_IMAGE_MB=999999999 SBX_WORKSPACE_FS_GIB=999999999 => SBX_WORKSPACE_IMAGE_MB must be'
+  'export SBX_MAX_PER_SUBJECT=999999999 => SBX_MAX_PER_SUBJECT must be'
+  'export SBX_MAX_TOTAL=1000000 => SBX_MAX_TOTAL must be'
   'unset SBX_TEMPLATES_FILE => SBX_TEMPLATES_FILE is required'
   "export SBX_TEMPLATES_FILE=\$TMP/bad-worker.json => template worker 'sbx_other' is not in SBX_WORKERS"
   'export SBX_TEMPLATES_FILE=$TMP/bad-two.json => serves two templates'
@@ -246,7 +253,9 @@ pass 'generates one Ed25519 signing key and publishes its kid:SPKI keyset'
 
 # The key pair and the issuer through the real code: the control plane's makeSigner mints a sandbox
 # token, and the relay's verifier, built from the keyset and sbx-settings' issuer, accepts it. Needs
-# node and the workspace (pnpm install); without them the openssl checks above still hold.
+# node and the workspace (pnpm install); without them the openssl checks above still hold. CI runs
+# this file from the check job with MOCA_REQUIRE_WORKSPACE=1, where a missing workspace is a FAILURE:
+# skipped silently, the round-trip would stop being enforced.
 if command -v node >/dev/null && [[ -x "$SRC/packages/sandbox-relay/node_modules/.bin/tsx" ]]; then
   (
     cd "$SRC/packages/sandbox-relay"
@@ -266,6 +275,8 @@ if command -v node >/dev/null && [[ -x "$SRC/packages/sandbox-relay/node_modules
       if (!verify(token).claims) throw new Error("the relay refused the token: " + verify(token).reason);'
   ) >"$TMP/node.out" 2>&1 || { cat "$TMP/node.out" >&2; fail 'the generated key pair does not round-trip through makeSigner and the relay verifier'; }
   pass 'a token minted with the generated key verifies at the relay with the published keyset and issuer'
+elif [[ "${MOCA_REQUIRE_WORKSPACE:-}" == 1 ]]; then
+  fail "MOCA_REQUIRE_WORKSPACE=1, but node or packages/sandbox-relay's tsx is missing (pnpm install)"
 else
   echo "SKIP: the makeSigner/relay round-trip needs node and the workspace (pnpm install)"
 fi
@@ -367,12 +378,22 @@ mkdir -p "$GEN/clients/alice" && printf 'SBX_TOKEN=x\n' >"$GEN/clients/alice/cli
 relay_tok="$(secret_val moca-relay SH_RELAY_TOKEN)"
 jq --arg t "$(printf '%064d' 5 | base64 | tr -d '\n')" '.data.MOCA_RELAY_EXEC_TOKEN = $t' \
   "$MOCK_STATE/secret-moca-relay.json" >"$TMP/relay.json" && mv "$TMP/relay.json" "$MOCK_STATE/secret-moca-relay.json"
+# A run that fails before the new relay is rolled out keeps the exec token: the 1a relay's template
+# still requires it, and a pod restarted meanwhile would not start without it. The client-token
+# Secrets may go at once: the 1a relay reads them through an optional reference.
+: >"$MOCK_LOG"
+! run_setup export MOCK_ROLLOUT_FAIL=deployment/sandbox-relay || fail 'a failed relay rollout was reported as success'
+has_key moca-relay MOCA_RELAY_EXEC_TOKEN || fail 'the exec token was removed before the new relay rolled out'
+! grep -q 'kubectl patch secret moca-relay ' "$MOCK_LOG" || fail 'moca-relay was patched although the relay rollout failed'
+cp "$MOCK_LOG" "$TMP/failed-run.log"
 : >"$MOCK_LOG"
 run_setup true || fail 'the run over a 1a namespace failed'
+awk '/^kubectl rollout status deployment\/sandbox-relay /{r = NR} /^kubectl patch secret moca-relay /{p = NR} END {exit !(r && p > r)}' "$MOCK_LOG" ||
+  fail 'the exec token was not removed after the relay rollout succeeded'
 [[ ! -f "$MOCK_STATE/secret-sbx-relay-clients.json" && ! -f "$MOCK_STATE/secret-sbx-relay-client-keys.json" ]] ||
   fail 'the 1a client-token Secrets were kept'
-grep -qx 'kubectl delete secret sbx-relay-clients -n moca-sbx-test' "$MOCK_LOG" || fail 'sbx-relay-clients not deleted by name'
-grep -qx 'kubectl delete secret sbx-relay-client-keys -n moca-sbx-test' "$MOCK_LOG" || fail 'sbx-relay-client-keys not deleted by name'
+grep -qx 'kubectl delete secret sbx-relay-clients -n moca-sbx-test' "$TMP/failed-run.log" || fail 'sbx-relay-clients not deleted by name'
+grep -qx 'kubectl delete secret sbx-relay-client-keys -n moca-sbx-test' "$TMP/failed-run.log" || fail 'sbx-relay-client-keys not deleted by name'
 [[ ! -d "$GEN/clients" ]] || fail 'the 1a client bundles were kept'
 ! has_key moca-relay MOCA_RELAY_EXEC_TOKEN || fail 'the 1a harness exec token is still in moca-relay'
 grep -q 'kubectl patch secret moca-relay -n moca-sbx-test --type=merge' "$MOCK_LOG" || fail 'the exec token was not removed with an explicit null patch'
@@ -381,7 +402,7 @@ grep -q 'kubectl patch secret moca-relay -n moca-sbx-test --type=merge' "$MOCK_L
 : >"$MOCK_LOG"
 run_setup true || fail 'the run after the 1a cleanup failed'
 ! grep -qE 'kubectl (delete|patch) secret' "$MOCK_LOG" || fail 'a clean namespace still deletes or patches something'
-pass 'a 1a namespace loses its client-token Secrets and bundles and the exec token, once'
+pass 'a 1a namespace loses its client-token Secrets and bundles, and the exec token only once the new relay is up'
 
 # 7. Operator certificates: an issued exec certificate stops advertising a CA, and the API Route takes its own.
 openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj '/CN=Example Test CA' -keyout "$TMP/ca.key" -out "$TMP/ca.crt" >/dev/null 2>&1

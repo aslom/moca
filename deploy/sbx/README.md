@@ -60,9 +60,11 @@ setting rolls the control plane and the relay, which read their settings only at
 `SBX_{ATTACH,EXEC}_TLS_CERT/KEY` those Routes use self-signed certificates: the attach one ships in
 every worker bundle, and the control plane hands the exec one to clients.
 
-**Upgrading from 1a:** unset `SBX_CLIENTS` (the run refuses it). The run deletes the static client
-tokens and their bundles, and removes the relay's harness exec token. Re-run `install-host.sh` with
-the new worker bundles, which now carry the workspace idle time and image size.
+**Upgrading from 1a:** unset `SBX_CLIENTS` (the run refuses it), and move `SBX_IMAGE` off the
+team-only 1a image: its relay requires the harness exec token, and its control plane has no sandbox
+profile. The run deletes the static client tokens and their bundles, and removes the relay's harness
+exec token once the new relay is up. Re-run `install-host.sh` with the new worker bundles, which now
+carry the workspace idle time and image size; it refuses a 1a bundle.
 
 ## 2. KVM host side
 
