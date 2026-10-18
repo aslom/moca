@@ -1,0 +1,508 @@
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import {
+  CLAUDE_DENY,
+  ConfigConflict,
+  MARK_BEGIN,
+  MARK_END,
+  OPENCODE_OFF,
+  RULES,
+  checkAgentConfig,
+  removeAgentConfig,
+  writeAgentConfig,
+} from '../src/sbx/agent-config.js';
+
+const made: string[] = [];
+afterEach(() => {
+  for (const d of made.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+const dir = () => {
+  const d = realpathSync(mkdtempSync(join(tmpdir(), 'sbx-cfg-')));
+  made.push(d);
+  mkdirSync(join(d, '.git'));
+  return d;
+};
+const json = (d: string, f: string) => JSON.parse(readFileSync(join(d, f), 'utf8'));
+const text = (d: string, f: string) => readFileSync(join(d, f), 'utf8');
+const FILES = ['.mcp.json', '.claude/settings.json', 'opencode.json', 'CLAUDE.md', 'AGENTS.md'];
+const conflictOf = (fn: () => unknown): ConfigConflict => {
+  try {
+    fn();
+  } catch (e) {
+    if (e instanceof ConfigConflict) return e;
+    throw e;
+  }
+  throw new Error('no ConfigConflict');
+};
+
+describe('agent configuration (SBX0 §6.3)', () => {
+  it('configures both agents in an empty repository', () => {
+    const d = dir();
+    expect(writeAgentConfig(d).changed.sort()).toEqual([...FILES].sort());
+    expect(json(d, '.mcp.json').mcpServers.sandbox).toEqual({
+      command: 'mocactl',
+      args: ['sbx', 'mcp'],
+    });
+    const s = json(d, '.claude/settings.json');
+    expect(s.permissions.allow).toEqual(['mcp__sandbox__*']);
+    expect(s.permissions.deny).toEqual([...CLAUDE_DENY]);
+    // R7: Claude Code loads the project server without asking.
+    expect(s.enabledMcpjsonServers).toEqual(['sandbox']);
+    const o = json(d, 'opencode.json');
+    expect(o.mcp.sandbox).toEqual({
+      type: 'local',
+      command: ['mocactl', 'sbx', 'mcp'],
+      enabled: true,
+    });
+    for (const t of OPENCODE_OFF) expect(o.tools[t]).toBe(false);
+    for (const f of ['CLAUDE.md', 'AGENTS.md']) {
+      const md = text(d, f);
+      expect(md).toBe(`${MARK_BEGIN}\n${RULES}\n${MARK_END}\n`);
+      expect(md).toMatch(/fresh VM/);
+    }
+    expect(checkAgentConfig(d)).toEqual([]);
+  });
+
+  it('holds the spec §6.3 lists verbatim', () => {
+    expect(CLAUDE_DENY).toEqual([
+      'Bash',
+      'Read',
+      'Edit',
+      'Write',
+      'Glob',
+      'Grep',
+      'NotebookEdit',
+      'WebFetch',
+      'WebSearch',
+      'Agent',
+      'Task',
+      'EnterWorktree',
+      'ExitWorktree',
+      'Workflow',
+    ]);
+    expect(OPENCODE_OFF).toEqual([
+      'bash',
+      'read',
+      'edit',
+      'write',
+      'patch',
+      'glob',
+      'grep',
+      'list',
+      'lsp',
+      'webfetch',
+      'websearch',
+      'task',
+    ]);
+    for (const s of [
+      'remote sandbox at `/workspace`',
+      'fresh VM',
+      'no process survives',
+      'persist',
+      'no network',
+      'one at a time',
+      'batch',
+    ]) {
+      expect(RULES).toContain(s);
+    }
+  });
+
+  it('keeps everything the developer had: other servers, allow entries, and their CLAUDE.md byte for byte', () => {
+    const d = dir();
+    writeFileSync(
+      join(d, '.mcp.json'),
+      JSON.stringify({
+        mcpServers: { github: { type: 'http', url: 'https://x.example.invalid' } },
+        other: 1,
+      }),
+    );
+    mkdirSync(join(d, '.claude'));
+    writeFileSync(
+      join(d, '.claude/settings.json'),
+      JSON.stringify({ permissions: { allow: ['mcp__github__*'], deny: ['Bash'] }, model: 'x' }),
+    );
+    const mine = '# My project\n\nRun `make` to build.\n';
+    writeFileSync(join(d, 'CLAUDE.md'), mine);
+    writeAgentConfig(d);
+    expect(json(d, '.mcp.json')).toMatchObject({
+      other: 1,
+      mcpServers: { github: { url: 'https://x.example.invalid' } },
+    });
+    expect(Object.keys(json(d, '.mcp.json'))).toEqual(['mcpServers', 'other']);
+    expect(Object.keys(json(d, '.mcp.json').mcpServers)).toEqual(['github', 'sandbox']);
+    const s = json(d, '.claude/settings.json');
+    expect(s.model).toBe('x');
+    expect(Object.keys(s)).toEqual(['permissions', 'model', 'enabledMcpjsonServers']);
+    expect(s.permissions.allow).toEqual(['mcp__github__*', 'mcp__sandbox__*']);
+    expect(s.permissions.deny.filter((x: string) => x === 'Bash')).toHaveLength(1);
+    expect(s.permissions.deny).toEqual(['Bash', ...CLAUDE_DENY.filter((t) => t !== 'Bash')]);
+    const md = text(d, 'CLAUDE.md');
+    expect(md.startsWith(mine)).toBe(true);
+    expect(md.slice(mine.length)).toMatch(new RegExp(`^\\n${MARK_BEGIN}[\\s\\S]*${MARK_END}\\n$`));
+  });
+
+  it("keeps the file's own formatting: indentation, comments in opencode.json, line endings", () => {
+    const d = dir();
+    const mcp =
+      '{\n\t"mcpServers": {\n\t\t"github": {\n\t\t\t"url": "https://x.example.invalid"\n\t\t}\n\t}\n}\n';
+    writeFileSync(join(d, '.mcp.json'), mcp);
+    // OpenCode reads JSONC: comments and trailing commas are kept.
+    writeFileSync(
+      join(d, 'opencode.json'),
+      '{\n    // my model\n    "model": "anthropic/x",\n    "tools": { "bash": false, },\n}\n',
+    );
+    writeFileSync(join(d, 'AGENTS.md'), '# Agents\r\n\r\nUse care.\r\n');
+    writeAgentConfig(d);
+    const m = text(d, '.mcp.json');
+    expect(m.startsWith('{\n\t"mcpServers": {\n\t\t"github": {\n\t\t\t"url"')).toBe(true);
+    expect(m).toContain('\n\t\t"sandbox": {\n\t\t\t"command": "mocactl",');
+    const o = text(d, 'opencode.json');
+    expect(o).toContain('    // my model\n    "model": "anthropic/x",');
+    expect(o).toMatch(/"read": false/);
+    const a = text(d, 'AGENTS.md');
+    expect(a.startsWith('# Agents\r\n\r\nUse care.\r\n\r\n<!-- sbx:begin -->\r\n')).toBe(true);
+    expect(a.endsWith(`${MARK_END}\r\n`)).toBe(true);
+    expect(a.replace(/\r\n/g, '')).not.toContain('\n');
+    expect(checkAgentConfig(d)).toEqual([]);
+    removeAgentConfig(d);
+    expect(text(d, '.mcp.json')).toBe(mcp);
+    expect(text(d, 'AGENTS.md')).toBe('# Agents\r\n\r\nUse care.\r\n');
+    expect(text(d, 'opencode.json')).toContain('// my model');
+  });
+
+  it('is idempotent: a second run changes nothing', () => {
+    const d = dir();
+    writeAgentConfig(d);
+    const snap = FILES.map((f) => text(d, f));
+    const manifest = text(d, '.sbx/agent-config.json');
+    expect(writeAgentConfig(d).changed).toEqual([]);
+    expect(writeAgentConfig(d, { dryRun: true }).changed).toEqual([]);
+    expect(FILES.map((f) => text(d, f))).toEqual(snap);
+    expect(text(d, '.sbx/agent-config.json')).toBe(manifest);
+  });
+
+  it('a dry run reports what it would change and writes nothing', () => {
+    const d = dir();
+    writeFileSync(join(d, 'CLAUDE.md'), '# Mine\n');
+    expect(writeAgentConfig(d, { dryRun: true }).changed.sort()).toEqual([...FILES].sort());
+    expect(text(d, 'CLAUDE.md')).toBe('# Mine\n');
+    for (const f of [...FILES.filter((f) => f !== 'CLAUDE.md'), '.sbx', '.claude']) {
+      expect(existsSync(join(d, f)), f).toBe(false);
+    }
+  });
+
+  it('replaces only the marked block when the rules change, and rm puts the old block back', () => {
+    const d = dir();
+    const before = `top\n${MARK_BEGIN}\nold rules\n${MARK_END}\nbottom\n`;
+    writeFileSync(join(d, 'AGENTS.md'), before);
+    writeAgentConfig(d);
+    const md = text(d, 'AGENTS.md');
+    expect(md.startsWith('top\n')).toBe(true);
+    expect(md.endsWith(`${MARK_END}\nbottom\n`)).toBe(true);
+    expect(md).not.toContain('old rules');
+    removeAgentConfig(d);
+    expect(text(d, 'AGENTS.md')).toBe(before);
+  });
+
+  it.each([
+    [
+      '.mcp.json',
+      JSON.stringify({ mcpServers: { sandbox: { command: 'other' } } }),
+      'mcpServers.sandbox',
+    ],
+    ['.mcp.json', JSON.stringify({ mcpServers: ['x'] }), 'mcpServers'],
+    ['.mcp.json', '[]', '.mcp.json'],
+    [
+      '.claude/settings.json',
+      JSON.stringify({ permissions: { allow: ['Bash'] } }),
+      'permissions.allow',
+    ],
+    [
+      '.claude/settings.json',
+      JSON.stringify({ permissions: { allow: ['Bash(npm test)'] } }),
+      'permissions.allow',
+    ],
+    [
+      '.claude/settings.json',
+      JSON.stringify({ permissions: { deny: 'Bash' } }),
+      'permissions.deny',
+    ],
+    [
+      '.claude/settings.json',
+      JSON.stringify({ disabledMcpjsonServers: ['sandbox'] }),
+      'disabledMcpjsonServers',
+    ],
+    [
+      '.claude/settings.local.json',
+      JSON.stringify({ disabledMcpjsonServers: ['sandbox'] }),
+      'disabledMcpjsonServers',
+    ],
+    // Claude Code reads plain JSON: a comment is refused, not rewritten.
+    ['.claude/settings.json', '{ // mine\n "model": "x" }', '.claude/settings.json'],
+    ['opencode.json', JSON.stringify({ tools: { bash: true } }), 'tools.bash'],
+    ['opencode.json', JSON.stringify({ tools: { lsp: 'yes' } }), 'tools.lsp'],
+    [
+      'opencode.json',
+      JSON.stringify({ mcp: { sandbox: { type: 'remote', url: 'https://x.example.invalid' } } }),
+      'mcp.sandbox',
+    ],
+    [
+      'opencode.json',
+      JSON.stringify({
+        mcp: { sandbox: { type: 'local', command: ['mocactl', 'sbx', 'mcp'], enabled: false } },
+      }),
+      'mcp.sandbox',
+    ],
+    ['opencode.json', '{ not json', 'opencode.json'],
+    ['CLAUDE.md', `a\n${MARK_BEGIN}\nb\n`, 'markers'],
+    ['AGENTS.md', `${MARK_BEGIN}\n${MARK_END}\n${MARK_BEGIN}\n${MARK_END}\n`, 'markers'],
+  ])('stops on a conflict in %s (%s), naming %s, and writes nothing', (file, body, key) => {
+    const d = dir();
+    mkdirSync(join(d, '.claude'), { recursive: true });
+    writeFileSync(join(d, file), body);
+    for (const dryRun of [true, false]) {
+      const err = conflictOf(() => writeAgentConfig(d, { dryRun }));
+      expect(err.file).toBe(file);
+      expect(err.message).toContain(file);
+      expect(err.message).toContain(key);
+      expect(err.message).toMatch(/--no-agent-config/);
+    }
+    expect(text(d, file)).toBe(body);
+    for (const f of FILES.filter((f) => f !== file)) expect(existsSync(join(d, f)), f).toBe(false);
+    expect(existsSync(join(d, '.sbx'))).toBe(false);
+  });
+
+  it('accepts a sandbox server that is already the same one, and never removes it', () => {
+    const d = dir();
+    const mine = {
+      mcpServers: { sandbox: { type: 'stdio', command: 'mocactl', args: ['sbx', 'mcp'], env: {} } },
+    };
+    writeFileSync(join(d, '.mcp.json'), JSON.stringify(mine, null, 2) + '\n');
+    writeAgentConfig(d);
+    expect(json(d, '.mcp.json')).toEqual(mine);
+    expect(checkAgentConfig(d)).toEqual([]);
+    removeAgentConfig(d);
+    expect(json(d, '.mcp.json')).toEqual(mine);
+  });
+
+  it('removes exactly what it added, and deletes the files it created', () => {
+    const d = dir();
+    mkdirSync(join(d, '.claude'));
+    writeFileSync(
+      join(d, '.claude/settings.json'),
+      JSON.stringify({ permissions: { allow: ['mcp__github__*'], deny: ['Bash'] } }),
+    );
+    writeFileSync(join(d, 'CLAUDE.md'), '# Mine\n');
+    writeAgentConfig(d);
+    expect(removeAgentConfig(d).sort()).toEqual([...FILES].sort());
+    expect(json(d, '.claude/settings.json')).toEqual({
+      permissions: { allow: ['mcp__github__*'], deny: ['Bash'] },
+    });
+    expect(text(d, 'CLAUDE.md')).toBe('# Mine\n');
+    for (const f of ['.mcp.json', 'opencode.json', 'AGENTS.md']) {
+      expect(existsSync(join(d, f)), f).toBe(false);
+    }
+    expect(existsSync(join(d, '.sbx/agent-config.json'))).toBe(false);
+    expect(removeAgentConfig(d)).toEqual([]);
+  });
+
+  it('removes the .claude directory it created, and enabledMcpjsonServers with it', () => {
+    const d = dir();
+    writeAgentConfig(d);
+    removeAgentConfig(d);
+    for (const f of [...FILES, '.claude']) expect(existsSync(join(d, f)), f).toBe(false);
+  });
+
+  it('removal keeps what the developer added after sbx up, and the values they had', () => {
+    const d = dir();
+    writeFileSync(join(d, 'settings.json'), ''); // a decoy at the root: never touched
+    mkdirSync(join(d, '.claude'));
+    writeFileSync(
+      join(d, '.claude/settings.json'),
+      JSON.stringify({ enabledMcpjsonServers: ['github'] }),
+    );
+    writeAgentConfig(d);
+    const s = json(d, '.claude/settings.json');
+    expect(s.enabledMcpjsonServers).toEqual(['github', 'sandbox']);
+    s.permissions.allow.push('mcp__later__*');
+    s.later = true;
+    writeFileSync(join(d, '.claude/settings.json'), JSON.stringify(s, null, 2));
+    const m = json(d, '.mcp.json');
+    m.mcpServers.later = { command: 'later' };
+    writeFileSync(join(d, '.mcp.json'), JSON.stringify(m, null, 2));
+    removeAgentConfig(d);
+    expect(json(d, '.claude/settings.json')).toEqual({
+      enabledMcpjsonServers: ['github'],
+      permissions: { allow: ['mcp__later__*'] },
+      later: true,
+    });
+    expect(json(d, '.mcp.json')).toEqual({ mcpServers: { later: { command: 'later' } } });
+    expect(text(d, 'settings.json')).toBe('');
+  });
+
+  it('writes atomically and keeps the file mode', () => {
+    const d = dir();
+    writeFileSync(join(d, '.mcp.json'), '{}\n');
+    chmodSync(join(d, '.mcp.json'), 0o600);
+    writeFileSync(join(d, 'CLAUDE.md'), '# x\n');
+    chmodSync(join(d, 'CLAUDE.md'), 0o640);
+    writeAgentConfig(d);
+    expect(statSync(join(d, '.mcp.json')).mode & 0o777).toBe(0o600);
+    expect(statSync(join(d, 'CLAUDE.md')).mode & 0o777).toBe(0o640);
+    expect(statSync(join(d, '.sbx/agent-config.json')).mode & 0o777).toBe(0o600);
+    removeAgentConfig(d);
+    expect(statSync(join(d, '.mcp.json')).mode & 0o777).toBe(0o600);
+    expect(statSync(join(d, 'CLAUDE.md')).mode & 0o777).toBe(0o640);
+  });
+
+  it('writes through a CLAUDE.md that links to AGENTS.md, once, and keeps the link', () => {
+    const d = dir();
+    writeFileSync(join(d, 'AGENTS.md'), '# Shared\n');
+    symlinkSync('AGENTS.md', join(d, 'CLAUDE.md'));
+    expect(writeAgentConfig(d).changed.filter((f) => f.endsWith('.md'))).toEqual(['AGENTS.md']);
+    const md = text(d, 'AGENTS.md');
+    expect(md.split(MARK_BEGIN)).toHaveLength(2);
+    expect(md.startsWith('# Shared\n\n')).toBe(true);
+    expect(statSync(join(d, 'CLAUDE.md')).isFile()).toBe(true);
+    expect(readFileSync(join(d, 'CLAUDE.md'), 'utf8')).toBe(md);
+    expect(checkAgentConfig(d)).toEqual([]);
+    removeAgentConfig(d);
+    expect(text(d, 'AGENTS.md')).toBe('# Shared\n');
+    expect(realpathSync(join(d, 'CLAUDE.md'))).toBe(join(d, 'AGENTS.md'));
+  });
+
+  it('refuses a file that links outside the repository', () => {
+    const d = dir();
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), 'sbx-out-')));
+    made.push(outside);
+    writeFileSync(join(outside, 'CLAUDE.md'), '# dotfiles\n');
+    symlinkSync(join(outside, 'CLAUDE.md'), join(d, 'CLAUDE.md'));
+    const err = conflictOf(() => writeAgentConfig(d));
+    expect(err.file).toBe('CLAUDE.md');
+    expect(err.message).toMatch(/outside the repository/);
+    expect(text(outside, 'CLAUDE.md')).toBe('# dotfiles\n');
+  });
+
+  it('uses opencode.jsonc when that is the file the repository has; refuses both', () => {
+    const d = dir();
+    writeFileSync(join(d, 'opencode.jsonc'), '{\n  // mine\n  "model": "x"\n}\n');
+    writeAgentConfig(d);
+    expect(existsSync(join(d, 'opencode.json'))).toBe(false);
+    expect(text(d, 'opencode.jsonc')).toContain('"sandbox"');
+    expect(checkAgentConfig(d)).toEqual([]);
+    removeAgentConfig(d);
+    expect(text(d, 'opencode.jsonc')).toBe('{\n  // mine\n  "model": "x"\n}\n');
+    writeFileSync(join(d, 'opencode.json'), '{}');
+    const err = conflictOf(() => writeAgentConfig(d, { dryRun: true }));
+    expect(err.message).toMatch(/opencode\.json.*opencode\.jsonc|opencode\.jsonc.*opencode\.json/);
+  });
+
+  it('a later run records only what it added: rm still takes back the first run too', () => {
+    const d = dir();
+    writeAgentConfig(d);
+    const s = json(d, '.claude/settings.json');
+    s.permissions.deny = s.permissions.deny.filter((t: string) => t !== 'Grep');
+    writeFileSync(join(d, '.claude/settings.json'), JSON.stringify(s));
+    expect(writeAgentConfig(d).changed).toEqual(['.claude/settings.json']);
+    removeAgentConfig(d);
+    for (const f of [...FILES, '.claude']) expect(existsSync(join(d, f)), f).toBe(false);
+  });
+
+  it('refuses to remove from a file that is no longer valid JSON, changing nothing', () => {
+    const d = dir();
+    writeAgentConfig(d);
+    writeFileSync(join(d, 'opencode.json'), '{ broken');
+    const err = conflictOf(() => removeAgentConfig(d));
+    expect(err.file).toBe('opencode.json');
+    expect(existsSync(join(d, '.mcp.json'))).toBe(true);
+    expect(existsSync(join(d, '.sbx/agent-config.json'))).toBe(true);
+  });
+
+  it('reports a built-in tool that is enabled again, and a missing server', () => {
+    const d = dir();
+    writeAgentConfig(d);
+    const s = json(d, '.claude/settings.json');
+    s.permissions.deny = s.permissions.deny.filter((t: string) => t !== 'Bash');
+    writeFileSync(join(d, '.claude/settings.json'), JSON.stringify(s));
+    const o = json(d, 'opencode.json');
+    delete o.mcp.sandbox;
+    writeFileSync(join(d, 'opencode.json'), JSON.stringify(o));
+    const problems = checkAgentConfig(d);
+    expect(problems.join('\n')).toMatch(/Claude Code.*Bash/);
+    expect(problems.join('\n')).toMatch(/OpenCode.*sandbox MCP server/);
+  });
+
+  it.each([
+    [
+      'an allow entry for a built-in',
+      (d: string) => {
+        const s = json(d, '.claude/settings.json');
+        s.permissions.allow.push('Read');
+        writeFileSync(join(d, '.claude/settings.json'), JSON.stringify(s));
+      },
+      /Claude Code.*allow.*Read/,
+    ],
+    [
+      'an OpenCode tool switched on',
+      (d: string) => {
+        const o = json(d, 'opencode.json');
+        o.tools.webfetch = true;
+        writeFileSync(join(d, 'opencode.json'), JSON.stringify(o));
+      },
+      /OpenCode.*webfetch/,
+    ],
+    [
+      'the server no longer pre-approved',
+      (d: string) => {
+        const s = json(d, '.claude/settings.json');
+        delete s.enabledMcpjsonServers;
+        writeFileSync(join(d, '.claude/settings.json'), JSON.stringify(s));
+      },
+      /Claude Code.*enabledMcpjsonServers/,
+    ],
+    [
+      'the server rejected in settings.local.json',
+      (d: string) =>
+        writeFileSync(
+          join(d, '.claude/settings.local.json'),
+          JSON.stringify({ disabledMcpjsonServers: ['sandbox'] }),
+        ),
+      /Claude Code.*settings\.local\.json.*disabledMcpjsonServers/,
+    ],
+    [
+      'the rules block removed',
+      (d: string) => writeFileSync(join(d, 'AGENTS.md'), '# none\n'),
+      /AGENTS\.md/,
+    ],
+    [
+      'a file broken by hand',
+      (d: string) => writeFileSync(join(d, '.mcp.json'), '{'),
+      /\.mcp\.json.*not valid JSON/,
+    ],
+    [
+      'no configuration at all',
+      (d: string) => {
+        for (const f of FILES) rmSync(join(d, f));
+      },
+      /Claude Code[\s\S]*OpenCode/,
+    ],
+  ])('doctor finds %s', (_what, spoil, re) => {
+    const d = dir();
+    writeAgentConfig(d);
+    spoil(d);
+    expect(checkAgentConfig(d).join('\n')).toMatch(re);
+  });
+});
