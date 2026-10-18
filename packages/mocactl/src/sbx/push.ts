@@ -646,7 +646,7 @@ export async function advanceBaseline(
     `c=$(${G} ${ID} commit-tree "$t" -p "$b" -m sbx-pulled) && ` +
     `${G} update-ref ${BASELINE_REF} "$c" "$b" && ` +
     `if [ "$(${G} rev-parse -q --verify HEAD)" = "$b" ]; then ` +
-    `${G} update-ref HEAD "$c" "$b" && y=$(mktemp -d .git/sbx-tmp.XXXXXX) && ` +
+    `${G} update-ref HEAD "$c" "$b" && y=$(mktemp -d .git/sbx-tmp.XXXXXX) && trap 'rm -rf "$y"' EXIT && ` +
     `${G} diff --name-only -z --no-renames "$b" "$c" > "$y/paths" && ` +
     `{ [ ! -s "$y/paths" ] || ${G} --literal-pathspecs reset -q "$c" --pathspec-from-file="$y/paths" --pathspec-file-nul; } && ` +
     `rm -rf "$y"; fi`;

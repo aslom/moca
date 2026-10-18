@@ -539,6 +539,20 @@ describe('pull (SBX0 §6.2, §10.3)', () => {
     expect(await hasUnpulled(exec)).toBe(true);
   });
 
+  it('leaves no scratch directory behind when the index reset fails', async () => {
+    const r = repo();
+    const { ws, exec } = await pushed(r);
+    writeFileSync(join(ws, 'src/app.py'), 'print(2)\n');
+    const { tree } = await capture(exec);
+    writeFileSync(join(ws, '.git/index.lock'), ''); // the agent's git holds the index
+    await expect(advanceBaseline(exec, undefined, tree)).rejects.toBeInstanceOf(PushError);
+    expect(
+      execFileSync('find', ['.git', '-maxdepth', '1', '-name', 'sbx-tmp.*'], {
+        cwd: ws,
+      }).toString(),
+    ).toBe('');
+  });
+
   it('advances the baseline to what was captured, so a change made meanwhile is pulled next time', async () => {
     const r = repo();
     const { ws, exec } = await pushed(r);
