@@ -95,6 +95,9 @@ const SETTINGS = '.claude/settings.json';
 const SETTINGS_LOCAL = '.claude/settings.local.json';
 const MANIFEST = '.sbx/agent-config.json';
 const WRITE_HINT = 'edit it by hand, or run mocactl sbx up --no-agent-config';
+/** For an edit this module could not make safely: nothing was written. */
+const EDIT_HINT =
+  'nothing was changed; edit it by hand (and please report it), or use --no-agent-config / --keep-config';
 
 export class ConfigConflict extends Error {
   constructor(
@@ -297,10 +300,29 @@ function at(data: unknown, path: (string | number)[]): unknown {
 }
 
 function edit(doc: Doc, f: (text: string) => string): void {
-  doc.text = f(doc.text);
-  const v = parseDoc(doc.text, doc.jsonc);
-  // Every edit is made by this module on a document it parsed: anything else is a bug here.
-  if (!isObj(v)) throw new Error(`editing ${doc.rel} produced a document that does not parse`);
+  let next: string;
+  try {
+    next = f(doc.text);
+  } catch (err) {
+    throw new ConfigConflict(
+      doc.rel,
+      doc.rel,
+      `could not be edited (${(err as Error).message})`,
+      EDIT_HINT,
+    );
+  }
+  // Every edit is made here, on a document parsed here: one that no longer parses is refused
+  // (nothing is written), never written out.
+  const v = parseDoc(next, doc.jsonc);
+  if (!isObj(v)) {
+    throw new ConfigConflict(
+      doc.rel,
+      doc.rel,
+      'could not be edited without breaking it',
+      EDIT_HINT,
+    );
+  }
+  doc.text = next;
   doc.data = v;
 }
 
@@ -708,8 +730,19 @@ export function removeAgentConfig(root: string): string[] {
     touched.push(r.file);
   }
   for (const w of writes) {
-    if (w.body === undefined) rmSync(w.abs, { force: true });
-    else writeAtomic(w.abs, w.body);
+    try {
+      if (w.body === undefined) rmSync(w.abs, { force: true });
+      else writeAtomic(w.abs, w.body);
+    } catch (err) {
+      // Named, with the record kept: the files already done stay done, and a second rm finishes.
+      const e = err as NodeJS.ErrnoException;
+      throw new ConfigConflict(
+        relative(realpathSync(root), w.abs).split(sep).join('/'),
+        'the file',
+        `could not be ${w.body === undefined ? 'deleted' : 'written'} (${e.code ?? e.message})`,
+        'fix that, then run mocactl sbx rm again (its record is kept in .sbx/agent-config.json)',
+      );
+    }
   }
   for (const d of m.dirs) {
     const p = join(root, d);

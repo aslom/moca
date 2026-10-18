@@ -340,8 +340,16 @@ export function unbind(c: SbxCtx, root: string): number {
   try {
     removed = removeAgentConfig(root);
   } catch (err) {
-    if (!(err instanceof ConfigConflict)) throw err;
-    say(c, err.message);
+    // A ConfigConflict names its file; anything else (a file system error) names its path, if any.
+    const e = err as NodeJS.ErrnoException;
+    say(
+      c,
+      err instanceof ConfigConflict
+        ? err.message
+        : `could not take back the agent configuration${e.path ? ` in ${e.path}` : ''}: ` +
+            `${e.code ? `${e.code} ` : ''}${e.message ?? String(err)}; ` +
+            'its record is kept in .sbx/agent-config.json, so mocactl sbx rm can be run again',
+    );
     return SBX_EXIT.failed;
   }
   if (removed.length) {

@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -443,6 +444,37 @@ describe('mocactl sbx up and rm: the agent configuration (SBX0 §6.3, plan Revie
     expect(checkAgentConfig(h.r)).toEqual([]);
     expect(h.err()).not.toMatch(/removed/);
     expect(await h.run(['up', '--keep-config'])).toBe(2);
+  });
+
+  it('rm takes back a JSONC opencode.json with trailing comments byte for byte (review I1)', async () => {
+    const h = harness();
+    const oc =
+      '{\n  "$schema": "https://opencode.ai/config.json",\n  "model": "anthropic/x" // my model\n}\n';
+    writeFileSync(join(h.r, 'opencode.json'), oc);
+    expect(await h.run(['up'])).toBe(0);
+    expect(await h.run(['rm'])).toBe(0);
+    expect(readFileSync(join(h.r, 'opencode.json'), 'utf8')).toBe(oc);
+    expect(await h.run(['rm', NEW])).toBe(0); // again: nothing left to take back, no crash
+  });
+
+  it('rm reports a file system error as a message naming the file, not a stack trace', async () => {
+    const h = harness();
+    expect(await h.run(['up'])).toBe(0);
+    // A read-only .claude/: the settings file there cannot be rewritten or deleted.
+    chmodSync(join(h.r, '.claude'), 0o500);
+    try {
+      expect(await h.run(['rm'])).toBe(1);
+    } finally {
+      chmodSync(join(h.r, '.claude'), 0o700);
+    }
+    expect(h.err()).toMatch(
+      /^sbx: \.claude\/settings\.json: the file could not be (deleted|written) \(EACCES\)/m,
+    );
+    expect(h.err()).toContain('run mocactl sbx rm again');
+    expect(h.err()).not.toMatch(/\n\s+at /); // no stack trace
+    expect(existsSync(join(h.r, '.sbx/agent-config.json'))).toBe(true);
+    expect(await h.run(['rm'])).toBe(0);
+    expect(existsSync(join(h.r, '.claude'))).toBe(false);
   });
 
   it('rm reports a configuration it cannot take back, keeps the record, and a second rm finishes', async () => {

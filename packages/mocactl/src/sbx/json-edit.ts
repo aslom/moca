@@ -126,7 +126,57 @@ export function append(
   return text.slice(0, end) + ',' + text.slice(end, at) + add + text.slice(at);
 }
 
-/** Removes the member at `path` (an object key, or an array index), undoing `append`. */
+/**
+ * What follows a member on its own line: its comma (if there), comments, and where the line ends
+ * (`atBreak`: at a line break; else at the next token, such as a closing bracket on the line).
+ */
+function lineTail(text: string, from: number): { comma?: number; end: number; atBreak: boolean } {
+  const sc = createScanner(text, false);
+  sc.setPosition(from);
+  let comma: number | undefined;
+  let end = from;
+  for (let k = sc.scan(); k !== SyntaxKind.EOF; k = sc.scan()) {
+    const off = sc.getTokenOffset();
+    if (k === SyntaxKind.Trivia) continue;
+    if (k === SyntaxKind.CommaToken && comma === undefined) {
+      comma = off;
+      end = off + 1;
+    } else if (k === SyntaxKind.LineCommentTrivia || k === SyntaxKind.BlockCommentTrivia) {
+      end = off + sc.getTokenLength();
+    } else if (k === SyntaxKind.LineBreakTrivia) {
+      return { ...(comma !== undefined ? { comma } : {}), end: off, atBreak: true };
+    } else break;
+  }
+  return { ...(comma !== undefined ? { comma } : {}), end, atBreak: false };
+}
+
+/** Whether [from, to) holds a line comment (the only text there is commas and comments). */
+function hasLineComment(text: string, from: number, to: number): boolean {
+  const sc = createScanner(text, false);
+  sc.setPosition(from);
+  for (let k = sc.scan(); k !== SyntaxKind.EOF && sc.getTokenOffset() < to; k = sc.scan()) {
+    if (k === SyntaxKind.LineCommentTrivia) return true;
+  }
+  return false;
+}
+
+/** Deletes the ranges (sorted, disjoint) from `text`. */
+function cut(text: string, ranges: [number, number][]): string {
+  let out = '';
+  let at = 0;
+  for (const [a, b] of ranges.sort((x, y) => x[0] - y[0])) {
+    out += text.slice(at, a);
+    at = b;
+  }
+  return out + text.slice(at);
+}
+
+/**
+ * Removes the member at `path` (an object key, or an array index), undoing `append`: a member on
+ * its own line goes with that whole line (its comma and any comment after it); the comma before it
+ * is touched only when it was the last member and had no comma of its own, which is the one
+ * `append` added. A member sharing its line with others is cut with its separating comma.
+ */
 export function remove(text: string, path: (string | number)[]): string {
   const root = tree(text);
   const n = findNodeAtLocation(root, path);
@@ -135,29 +185,61 @@ export function remove(text: string, path: (string | number)[]): string {
   const c = u.parent!;
   const kids = (c.children ?? []).map(unitOf);
   const i = kids.indexOf(u);
+  const prev = i > 0 ? kids[i - 1] : undefined;
+  const next = kids[i + 1];
+  const open = c.offset;
   const close = c.offset + c.length - 1;
-  let start = u.offset;
-  while (start > c.offset + 1 && isWs(text[start - 1]!)) start--;
   const end = u.offset + u.length;
-  if (i > 0) {
-    // The comma that separated it from the one before goes, and the whitespace leading up to it;
-    // a comment between them stays.
-    const prev = kids[i - 1]!;
+  const own = commas(text, end, next ? next.offset : close)[0];
+  const tail = lineTail(text, end);
+  const collapse = (t: string): string => {
+    if (kids.length !== 1) return t;
+    // The container is left empty: `{}` / `[]` when only whitespace is left inside it.
+    const r = tree(t);
+    const e = path.length > 1 ? findNodeAtLocation(r, path.slice(0, -1)) : r;
+    if (!e) return t;
+    const inner = t.slice(e.offset + 1, e.offset + e.length - 1);
+    return inner.trim() === '' ? t.slice(0, e.offset + 1) + t.slice(e.offset + e.length - 1) : t;
+  };
+
+  const ownLine =
+    startsLine(text, u.offset) &&
+    (own === undefined || own === tail.comma) &&
+    (tail.atBreak || next === undefined);
+  if (ownLine) {
+    let ls = u.offset;
+    while (ls > 0 && text[ls - 1] !== '\n') ls--;
+    const eol = text.slice(ls - 2, ls) === '\r\n' ? ls - 2 : ls - 1;
+    const before = prev ? prev.offset + prev.length : open + 1;
+    // The line break before the member's line goes with it, unless the line before ends in a
+    // line comment and nothing on this line ends it: that comment would swallow what follows.
+    const from = tail.atBreak || !hasLineComment(text, before, eol) ? eol : ls;
+    const ranges: [number, number][] = [[from, tail.end]];
+    if (prev && !next && own === undefined) {
+      const comma = commas(text, prev.offset + prev.length, u.offset)[0];
+      if (comma !== undefined) ranges.push([comma, comma + 1]);
+    }
+    return collapse(cut(text, ranges));
+  }
+  let start = u.offset;
+  while (start > open + 1 && isWs(text[start - 1]!)) start--;
+  if (prev) {
+    // The comma that separated it from the one before goes, and the whitespace up to it; a
+    // comment between them stays.
     const comma = commas(text, prev.offset + prev.length, u.offset)[0];
-    const head =
-      comma === undefined
-        ? text.slice(0, start)
-        : text.slice(0, comma) + text.slice(comma + 1, start);
-    return head + text.slice(end);
+    return comma === undefined
+      ? cut(text, [[start, end]])
+      : cut(text, [
+          [comma, comma + 1],
+          [start, end],
+        ]);
   }
-  if (kids.length > 1) {
-    const next = kids[1]!;
-    const comma = commas(text, end, next.offset)[0];
-    return text.slice(0, start) + text.slice(comma !== undefined ? comma + 1 : end);
+  if (next) {
+    // The first of several: it goes with its comma and the spaces after it, so the next member
+    // takes its place on the line.
+    let to = own !== undefined ? own + 1 : end;
+    while (to < next.offset && (text[to] === ' ' || text[to] === '\t')) to++;
+    return cut(text, [[u.offset, to]]);
   }
-  // The only member: the container is left empty (`{}` / `[]` when only whitespace is left).
-  const comma = commas(text, end, close)[0];
-  const inside =
-    text.slice(c.offset + 1, start) + text.slice(comma !== undefined ? comma + 1 : end, close);
-  return text.slice(0, c.offset + 1) + (inside.trim() === '' ? '' : inside) + text.slice(close);
+  return collapse(cut(text, [[start, own !== undefined ? own + 1 : end]]));
 }

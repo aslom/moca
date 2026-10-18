@@ -91,6 +91,52 @@ describe('style-keeping JSON edits', () => {
     expect(remove(o, ['a', 'b'])).toBe('{\n  "a": {}\n}\n');
   });
 
+  // Review I1: a removal mirrors the append, whatever comments sit around the members.
+  it.each([
+    [
+      'two siblings after a commented last member, removed in recorded order',
+      '{\n  "$schema": "https://opencode.ai/config.json",\n  "model": "anthropic/x" // my model\n}\n',
+      [],
+    ],
+    ['a trailing comma and a comment', '{\n  "a": 1, // c\n}\n', []],
+    [
+      'a commented last member, nested',
+      '{\n  "tools": {\n    "skill": true // keep\n  }\n}\n',
+      ['tools'],
+    ],
+    [
+      'an inline object with a comment',
+      '{\n  "mcp": {\n    "gh": {"type": "remote", "url": "https://x"} // gh\n  }\n}\n',
+      ['mcp'],
+    ],
+    ['a block comment before the end', '{\n  "a": 1 /* c */\n}\n', []],
+    ['the closing brace on the line', '{\n  "a": 1 // c\n  }', []],
+  ])('round-trips byte for byte: %s', (_n, text, path) => {
+    const s = styleOf(text);
+    let o = append(text, path as string[], 'x', { k: 1 }, s);
+    o = append(o, path as string[], 'y', false, s);
+    expect(val(o)).toBeDefined();
+    o = remove(o, [...(path as string[]), 'x']);
+    expect(val(o)).toBeDefined();
+    o = remove(o, [...(path as string[]), 'y']);
+    expect(o).toBe(text);
+  });
+
+  it('removes a member with a comment on its own line, comment and all', () => {
+    const t = '{\n  "a": 1,\n  "b": 2, // about b\n  "c": 3\n}\n';
+    expect(remove(t, ['b'])).toBe('{\n  "a": 1,\n  "c": 3\n}\n');
+    const u = '{\n  "a": 1, // about a\n  "b": 2 // about b\n}\n';
+    expect(remove(u, ['b'])).toBe('{\n  "a": 1 // about a\n}\n');
+    const v = '[\n  "A", // a\n  "B", // b\n]';
+    expect(remove(v, [1])).toBe('[\n  "A", // a\n]');
+  });
+
+  it('removes a member that shares its line, leaving the others intact', () => {
+    expect(remove('{\n  "a": 1, "b": 2,\n  "c": 3\n}', ['b'])).toBe('{\n  "a": 1,\n  "c": 3\n}');
+    expect(val(remove('{\n  "a": 1,\n  "b": 2, "c": 3\n}', ['b']))).toEqual({ a: 1, c: 3 });
+    expect(remove('{\n  "a": 1, "b": 2,\n  "c": 3\n}', ['a'])).toBe('{\n  "b": 2,\n  "c": 3\n}');
+  });
+
   it('empties a container to {} or [] when its only member goes', () => {
     expect(remove('{\n  "a": 1\n}', ['a'])).toBe('{}');
     expect(remove('{"a":[1]}', ['a', 0])).toBe('{"a":[]}');
