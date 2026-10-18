@@ -25,6 +25,9 @@ export interface DoctorCheck {
 }
 
 const DAY_MS = 86_400_000;
+/** The `true` Exec's timeout, and its client-side backstop margin: doctor waits about 30 s at most. */
+const EXEC_TIMEOUT_S = 20;
+const EXEC_BACKSTOP_S = 10;
 const UP = 'mocactl sbx up';
 
 /** Nearest-rank percentile of `xs` (0 for none). */
@@ -89,7 +92,15 @@ async function sandboxCheck(c: SbxCtx, id: string): Promise<{ check: DoctorCheck
         live: false,
       };
     }
-    return { check: { name, ok: false, detail: `${id}: ${describeError(err)}` }, live: false };
+    return {
+      check: {
+        name,
+        ok: false,
+        detail: `${id}: ${describeError(err)}`,
+        fix: 'check the control plane is reachable (mocactl sbx ls), then run mocactl sbx doctor again',
+      },
+      live: false,
+    };
   }
   const template = sanitizeRemote(s.template);
   const expires = new Date(s.expiresAt * 1000).toISOString();
@@ -148,9 +159,13 @@ async function execChecks(
   const out: DoctorCheck[] = [];
   let x: OpenedExec | undefined;
   try {
-    x = await openExec(c.api, id, factory);
+    // Short, so a hung relay stalls doctor for about 30 s at most, not the 90 s default backstop.
+    x = await openExec(c.api, id, factory, { backstopMarginS: EXEC_BACKSTOP_S });
     const t0 = c.rt.now();
-    const r = await x.exec('true', { timeoutS: 60, ...(c.signal ? { signal: c.signal } : {}) });
+    const r = await x.exec('true', {
+      timeoutS: EXEC_TIMEOUT_S,
+      ...(c.signal ? { signal: c.signal } : {}),
+    });
     const ms = c.rt.now() - t0;
     if (r.exitCode !== 0) {
       out.push({
@@ -202,7 +217,18 @@ async function execChecks(
 
 function recorderCheck(c: SbxCtx, id: string): DoctorCheck {
   const since = c.rt.now() - DAY_MS;
-  const recs = readRecords(c.rt.paths.stateDir, id).filter((r) => {
+  let all: Record<string, unknown>[];
+  try {
+    all = readRecords(c.rt.paths.stateDir, id);
+  } catch (err) {
+    return {
+      name: 'recent calls',
+      ok: false,
+      detail: `cannot read the flight recorder: ${describeError(err)}`,
+      fix: `check ${c.rt.paths.stateDir}/sbx/${id}.log is a readable file (it may be removed)`,
+    };
+  }
+  const recs = all.filter((r) => {
     const t = typeof r.ts === 'string' ? Date.parse(r.ts) : Number.NaN;
     return Number.isFinite(t) && t >= since;
   });
@@ -227,7 +253,8 @@ function recorderCheck(c: SbxCtx, id: string): DoctorCheck {
  */
 export async function runDoctor(
   c: SbxCtx,
-  root: string,
+  /** The repository root, or undefined outside one: the agent configuration is then not checked. */
+  root: string | undefined,
   id: string | undefined,
   factory?: ExecFactory,
 ): Promise<DoctorCheck[]> {
@@ -247,7 +274,7 @@ export async function runDoctor(
     out.push(s.check);
     live = s.live;
   }
-  out.push(configCheck(root));
+  if (root !== undefined) out.push(configCheck(root));
   if (id && live) out.push(...(await execChecks(c, id, factory)));
   if (id) out.push(recorderCheck(c, id));
   return out;
@@ -256,7 +283,7 @@ export async function runDoctor(
 /** `mocactl sbx doctor`: exit 0 when every check passes, else 1. */
 export async function cmdDoctor(
   c: SbxCtx,
-  root: string,
+  root: string | undefined,
   id: string | undefined,
   factory?: ExecFactory,
 ): Promise<number> {

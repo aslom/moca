@@ -189,7 +189,15 @@ const OWN_LOGIN = new Set(['login', 'logout', 'doctor']);
 /** The commands that act on one sandbox: `[ID]` as an argument (or `--sandbox ID`). */
 const TAKES_ID_ARG = new Set(['rm', 'token', 'env']);
 /** The commands that act on one sandbox through `--sandbox ID` only. */
-const TAKES_SANDBOX_FLAG = new Set(['run', 'put', 'mcp', 'push', 'pull', ...TAKES_ID_ARG]);
+const TAKES_SANDBOX_FLAG = new Set([
+  'run',
+  'put',
+  'mcp',
+  'push',
+  'pull',
+  'doctor',
+  ...TAKES_ID_ARG,
+]);
 /** The commands that work on the git repository around the current directory. */
 const IN_REPO = new Set(['up', 'push', 'pull', 'doctor']);
 /** Flags that belong to some commands only: refused elsewhere rather than silently ignored. */
@@ -295,7 +303,7 @@ export async function sbxMain(
     io.err(`sbx: ${command} has no --json output\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
-  if (values.sandbox !== undefined && !TAKES_SANDBOX_FLAG.has(command) && command !== 'doctor') {
+  if (values.sandbox !== undefined && !TAKES_SANDBOX_FLAG.has(command)) {
     io.err(`sbx: --sandbox does not apply to ${command}\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
@@ -356,8 +364,13 @@ export async function sbxMain(
       root = await repoRoot(deps.cwd ?? process.cwd());
     } catch (err) {
       if (!(err instanceof PushError)) throw err;
-      io.err(`sbx: ${err.message}`);
-      return SBX_EXIT.usage;
+      // doctor with --sandbox has checks that need no repository: it runs them, and says so.
+      if (command === 'doctor' && values.sandbox !== undefined) {
+        io.err('sbx: not in a git repository: the agent configuration is not checked');
+      } else {
+        io.err(`sbx: ${err.message}`);
+        return SBX_EXIT.usage;
+      }
     }
   }
   let id: string | undefined;
@@ -370,16 +383,6 @@ export async function sbxMain(
       io.err(`sbx: ignoring .sbx/sandbox.json: '${sanitizeRemote(bound.id)}' is not a sandbox id`);
     } else upBound = bound?.id;
   }
-  if (command === 'doctor') {
-    // No sandbox is one of doctor's failed checks, not a usage error; a malformed id still is.
-    const bound = values.sandbox === undefined ? readBinding(root!) : undefined;
-    id = values.sandbox ?? bound?.id;
-    boundUrl = bound?.controlPlaneUrl;
-    if (id !== undefined && !SANDBOX_ID_RE.test(id)) {
-      io.err(`sbx: '${sanitizeRemote(id)}' is not a sandbox id (sbx-…)`);
-      return SBX_EXIT.usage;
-    }
-  }
   if (TAKES_SANDBOX_FLAG.has(command)) {
     id = (TAKES_ID_ARG.has(command) ? arg : undefined) ?? values.sandbox;
     if (id === undefined) {
@@ -387,7 +390,8 @@ export async function sbxMain(
       id = bound?.id;
       boundUrl = bound?.controlPlaneUrl;
     }
-    if (!id) {
+    // No sandbox is one of doctor's failed checks (it says how to bind one), not a usage error.
+    if (!id && command !== 'doctor') {
       io.err(
         TAKES_ID_ARG.has(command)
           ? `sbx: ${command} needs a sandbox id (or a .sbx/sandbox.json in this repository)`
@@ -395,7 +399,7 @@ export async function sbxMain(
       );
       return SBX_EXIT.usage;
     }
-    if (!SANDBOX_ID_RE.test(id)) {
+    if (id !== undefined && !SANDBOX_ID_RE.test(id)) {
       io.err(`sbx: '${sanitizeRemote(id)}' is not a sandbox id (sbx-…)`);
       return SBX_EXIT.usage;
     }
@@ -485,7 +489,7 @@ export async function sbxMain(
       return unbind(ctx, bindingRoot!);
     }
     case 'doctor':
-      return cmdDoctor(ctx, root!, id, deps.execFactory);
+      return cmdDoctor(ctx, root, id, deps.execFactory);
     case 'token':
       return cmdToken(ctx, id!);
     case 'run':

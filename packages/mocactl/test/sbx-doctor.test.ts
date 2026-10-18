@@ -1,6 +1,12 @@
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ExecMachineryError, type Exec, type ExecResult } from '@moca/sandbox-client';
+import {
+  ExecMachineryError,
+  type Exec,
+  type ExecConnOptions,
+  type ExecResult,
+} from '@moca/sandbox-client';
 import { afterEach, describe, expect, it } from 'vitest';
 import { saveAuth } from '../src/config.js';
 import { writeAgentConfig } from '../src/sbx/agent-config.js';
@@ -28,15 +34,21 @@ const res = (o: Partial<ExecResult> = {}): ExecResult => ({
  */
 function fakeExec(o: { state?: string; fail?: Error; exitCode?: number } = {}) {
   const sent: string[] = [];
+  const opts: { timeoutS?: number }[] = [];
+  const conns: ExecConnOptions[] = [];
   let closed = 0;
-  const exec: Exec = async (command) => {
+  const exec: Exec = async (command, x = {}) => {
     sent.push(command);
+    opts.push({ ...(x.timeoutS !== undefined ? { timeoutS: x.timeoutS } : {}) });
     if (o.fail) throw o.fail;
     if (command === 'true') return res({ exitCode: o.exitCode ?? 0 });
     return res({ stdout: Buffer.from(`${o.state ?? 'clean'}\n`) });
   };
-  const factory: ExecFactory = () => ({ exec, close: () => void closed++ });
-  return { factory, sent, closed: () => closed };
+  const factory: ExecFactory = (c) => {
+    conns.push(c);
+    return { exec, close: () => void closed++ };
+  };
+  return { factory, sent, opts, conns, closed: () => closed };
 }
 
 function world(
@@ -85,6 +97,9 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
     expect(byName(cs, 'changes').detail).toBe('nothing to pull');
     expect(x.sent[0]).toBe('true');
     expect(x.closed()).toBe(1);
+    // A hung relay stalls doctor for about 30 s at most: 20 s for `true`, a 10 s backstop margin.
+    expect(x.opts[0]).toEqual({ timeoutS: 20 });
+    expect(x.conns[0]!.backstopMarginS).toBe(10);
   });
 
   it('fails the sandbox check with less than 24 h left, naming the expiry and sbx up', async () => {
@@ -221,6 +236,44 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
     expect(w.cp.calls).toEqual([]);
   });
 
+  it('gives a fix when the sandbox lookup fails for another reason', async () => {
+    const w = world();
+    w.cp.boxes.clear();
+    const s = setup();
+    const broken = {
+      ...openSbxRuntime(URL_, s.env, {
+        home: w.home,
+        fetchImpl: (async () =>
+          new Response(JSON.stringify({ error: 'internal', message: 'boom' }), {
+            status: 500,
+          })) as typeof fetch,
+      }),
+      url: URL_,
+      io: w.io,
+      json: false,
+    };
+    const c = byName(await runDoctor(broken, w.r, SBX, fakeExec().factory), 'sandbox');
+    expect(c.ok).toBe(false);
+    expect(c.fix).toBeDefined();
+  });
+
+  it('reports an unreadable flight recorder as a failed check, and goes on', async () => {
+    const w = world();
+    mkdirSync(join(w.paths.stateDir, 'sbx', `${SBX}.log`), { recursive: true }); // a directory
+    const cs = await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory);
+    const c = byName(cs, 'recent calls');
+    expect(c.ok).toBe(false);
+    expect(c.detail).toMatch(/cannot read the flight recorder/);
+    expect(cs.map((k) => k.name)).toContain('exec');
+  });
+
+  it('outside a repository, checks everything but the agent configuration', async () => {
+    const w = world();
+    const cs = await runDoctor(w.ctx(), undefined, SBX, fakeExec().factory);
+    expect(cs.map((k) => k.name)).toEqual(['login', 'sandbox', 'exec', 'changes', 'recent calls']);
+    expect(cs.every((k) => k.ok)).toBe(true);
+  });
+
   it('has a nearest-rank percentile', () => {
     expect(percentile([], 50)).toBe(0);
     expect(percentile([5], 95)).toBe(5);
@@ -298,6 +351,35 @@ describe('mocactl sbx doctor, the command', () => {
     expect(await h.run(['doctor'], fakeExec(), { HOME: h.home })).toBe(0);
     expect(await h.run(['doctor', '--sandbox', SBX])).toBe(0);
     expect(await h.run(['doctor', '--sandbox', '../x'])).toBe(2);
+  });
+
+  it('runs outside a git repository with --sandbox, skipping only the agent configuration', async () => {
+    const h = cli();
+    const plain = realpathSync(mkdtempSync(join(tmpdir(), 'sbx-norepo-')));
+    try {
+      const code = await sbxMain(['doctor', '--sandbox', SBX], h.env, h.io, {
+        home: h.home,
+        fetchImpl: h.cp.fetchImpl,
+        cwd: plain,
+        execFactory: fakeExec().factory,
+      });
+      expect(code).toBe(0);
+      expect(h.out()).toMatch(/^ok - sandbox: /m);
+      expect(h.out()).not.toMatch(/agent config/);
+      expect(h.io.errs.join('')).toMatch(
+        /not in a git repository: the agent configuration is not checked/,
+      );
+      // Without --sandbox, nothing to check against: a usage error, as before.
+      h.io.outs.length = 0;
+      const none = await sbxMain(['doctor'], h.env, h.io, {
+        home: h.home,
+        fetchImpl: h.cp.fetchImpl,
+        cwd: plain,
+      });
+      expect(none).toBe(2);
+    } finally {
+      rmSync(plain, { recursive: true, force: true });
+    }
   });
 
   it('fails the sandbox check, not the command line, when nothing is bound', async () => {

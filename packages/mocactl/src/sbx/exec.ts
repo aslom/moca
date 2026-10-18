@@ -98,6 +98,10 @@ export async function openExec(
   api: SandboxApiClient,
   id: string,
   factory: ExecFactory = realFactory,
+  o: {
+    /** The client-side backstop beyond each Exec's timeout (sandbox-client's default: 90 s). */
+    backstopMarginS?: number;
+  } = {},
 ): Promise<OpenedExec> {
   const t = sandboxTokenFn(api, id);
   const first = await t.first();
@@ -108,6 +112,7 @@ export async function openExec(
     sandboxId: first.wrk,
     workspaceKey: first.wsk,
     token: t.token,
+    ...(o.backstopMarginS !== undefined ? { backstopMarginS: o.backstopMarginS } : {}),
   });
   return { exec: c.exec, close: c.close, token: first, lifetimeS: grantOf(first).lifetimeS };
 }
