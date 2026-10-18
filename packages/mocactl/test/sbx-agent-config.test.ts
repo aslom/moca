@@ -591,6 +591,19 @@ describe('agent configuration (SBX0 §6.3)', () => {
     expect(text(d, 'config/mcp.json')).toBe('{\n  "mcpServers": {}\n}\n');
   });
 
+  it('takes back an opencode.json that links to a commented file (final-review fix)', () => {
+    // The record names the link's target; JSONC is decided by what was written, not that name.
+    const d = dir();
+    mkdirSync(join(d, 'config'));
+    const original = '// shared\n{\n  "model": "x"\n}\n';
+    writeFileSync(join(d, 'config/oc.json'), original);
+    symlinkSync('config/oc.json', join(d, 'opencode.json'));
+    writeAgentConfig(d);
+    const r = takeBackAgentConfig(d);
+    expect(r.recordKept).toBe(false);
+    expect(text(d, 'config/oc.json')).toBe(original);
+  });
+
   it('refuses a file that links outside the repository', () => {
     const d = dir();
     const outside = realpathSync(mkdtempSync(join(tmpdir(), 'sbx-out-')));
@@ -640,6 +653,16 @@ describe('agent configuration (SBX0 §6.3)', () => {
     [
       'with a file that is not a string',
       JSON.stringify({ version: 1, files: [1], dirs: [], json: [], markdown: [] }),
+    ],
+    [
+      'with an inner that is not whitespace',
+      JSON.stringify({
+        version: 1,
+        files: [],
+        dirs: [],
+        json: [{ file: 'opencode.json', op: 'inner', path: ['mcp'], inner: ' /* injected */ ' }],
+        markdown: [],
+      }),
     ],
     [
       'with an inner that is not a string',

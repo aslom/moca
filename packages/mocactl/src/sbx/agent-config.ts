@@ -800,7 +800,8 @@ function manifestProblem(m: Json, ok: { json: string[]; md: string[] }): string 
         return r.path.length > 0;
       // The inside an empty container had: [] is the document's own, `{ }` (review round 2).
       case 'inner':
-        return isStr(r.inner);
+        // Only whitespace was ever inside an emptied container that up recorded (noteInner).
+        return isStr(r.inner) && r.inner.trim() === '';
       default:
         return false;
     }
@@ -1037,9 +1038,19 @@ export function takeBackAgentConfig(root: string): TakeBack {
   const warnings: string[] = [];
   const files = uniq(m.json.map((r) => r.file));
   const docs: Doc[] = [];
+  // A record names a file after following links (target()), so a linked opencode.json is recorded
+  // as its target's path. Only Claude Code's two files are strict JSON: decide by resolving them.
+  const strict = new Set<string>();
+  for (const f of [MCP_JSON, SETTINGS]) {
+    try {
+      strict.add(target(root, f, RM_HINT).rel);
+    } catch {
+      strict.add(f); // a link out of the repository: its record was refused by the allow-list
+    }
+  }
   for (const f of files) {
     if (!existsSync(join(root, f))) continue;
-    docs.push(loadDoc(root, f, f.startsWith('opencode.'), RM_HINT));
+    docs.push(loadDoc(root, f, !strict.has(f), RM_HINT));
   }
   const touched: string[] = [];
   const writes: { abs: string; body?: string }[] = [];
