@@ -323,6 +323,49 @@ describe('agent configuration (SBX0 §6.3)', () => {
     expect(checkAgentConfig(d)).toEqual([]);
   });
 
+  it.each([
+    [
+      '.mcp.json',
+      '{"mcpServers":{"sandbox":{"command":"evil"},"sandbox":{"command":"mocactl","args":["sbx","mcp"]}}}',
+      'mcpServers.sandbox',
+      /duplicate key/,
+    ],
+    [
+      '.mcp.json',
+      '{\n  "mcpServers": {"a": {"command":"a"}},\n  "mcpServers": {}\n}\n',
+      'mcpServers',
+      /duplicate key/,
+    ],
+    [
+      'opencode.json',
+      '{\n  "tools": {"bash": true},\n  // again\n  "tools": {"read": false}\n}\n',
+      'tools',
+      /duplicate key/,
+    ],
+    ['.mcp.json', '\ufeff{"mcpServers":{}}\n', '.mcp.json', /starts with a byte-order mark/],
+    ['opencode.json', '\ufeff{}', 'opencode.json', /starts with a byte-order mark/],
+    ['.mcp.json', '', '.mcp.json', /is empty/],
+    ['.mcp.json', '  \n', '.mcp.json', /is empty/],
+    ['.mcp.json', '{"a":1,}', '.mcp.json', /is not valid JSON/],
+  ])('refuses %s %j, naming %s and saying why', (file, body, key, why) => {
+    const d = dir();
+    writeFileSync(join(d, file), body);
+    const err = conflictOf(() => writeAgentConfig(d, { dryRun: true }));
+    expect(err.file).toBe(file);
+    expect(err.key).toBe(key);
+    expect(err.message).toMatch(why);
+    expect(err.message).not.toMatch(/reads no comments/);
+    expect(checkAgentConfig(d).join('\n')).toMatch(why);
+  });
+
+  it('says a comment is why Claude Code would refuse its file', () => {
+    const d = dir();
+    writeFileSync(join(d, '.mcp.json'), '{ // mine\n}');
+    expect(conflictOf(() => writeAgentConfig(d)).message).toMatch(
+      /comments, which Claude Code does not read/,
+    );
+  });
+
   it('accepts a sandbox server that is already the same one, and never removes it', () => {
     const d = dir();
     const mine = {

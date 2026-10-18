@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join, relative, sep } from 'node:path';
-import { parse, type ParseError } from 'jsonc-parser';
+import { parse, parseTree, ParseErrorCode, type Node, type ParseError } from 'jsonc-parser';
 import { append, remove, styleOf, type Style } from './json-edit.js';
 
 /**
@@ -254,13 +254,72 @@ interface Doc extends Target {
 
 /** Parses JSON (or, for `jsonc`, JSON with comments and trailing commas, as OpenCode reads it). */
 function parseDoc(text: string, jsonc: boolean): unknown {
+  const r = diagnose(text, jsonc);
+  return r.ok ? r.value : undefined;
+}
+
+/** The first key that appears twice in one object, as a dotted path (`mcpServers.sandbox`). */
+function duplicateKey(text: string): string | undefined {
+  const r = parseTree(text, [], { allowTrailingComma: true });
+  const walk = (n: Node | undefined, path: string[]): string | undefined => {
+    if (!n) return undefined;
+    if (n.type === 'object') {
+      const seen = new Set<string>();
+      for (const p of n.children ?? []) {
+        const k = String(p.children?.[0]?.value);
+        if (seen.has(k)) return [...path, k].join('.');
+        seen.add(k);
+      }
+      for (const p of n.children ?? []) {
+        const d = walk(p.children?.[1], [...path, String(p.children?.[0]?.value)]);
+        if (d) return d;
+      }
+    } else if (n.type === 'array') {
+      for (const [i, c] of (n.children ?? []).entries()) {
+        const d = walk(c, [...path, String(i)]);
+        if (d) return d;
+      }
+    }
+    return undefined;
+  };
+  return walk(r, []);
+}
+
+/**
+ * The document's value, or why it cannot be merged into: each agent reads its file with a plain
+ * JSON parser (or OpenCode's JSONC), where a duplicate key silently means the last one, so a
+ * duplicate is refused rather than guessed at.
+ */
+function diagnose(
+  text: string,
+  jsonc: boolean,
+): { ok: true; value: unknown } | { ok: false; key?: string; why: string } {
+  if (text.charCodeAt(0) === 0xfeff) {
+    return { ok: false, why: 'starts with a byte-order mark (save it as UTF-8 without one)' };
+  }
+  if (text.trim() === '') return { ok: false, why: 'is empty (it needs at least {})' };
   const errors: ParseError[] = [];
-  const v = parse(text, errors, {
+  const value = parse(text, errors, {
     disallowComments: !jsonc,
     allowTrailingComma: jsonc,
     allowEmptyContent: false,
   }) as unknown;
-  return errors.length ? undefined : v === undefined ? undefined : v;
+  if (errors.length) {
+    const comments = !jsonc && errors.every((e) => e.error === ParseErrorCode.InvalidCommentToken);
+    return {
+      ok: false,
+      why: comments
+        ? 'has comments, which Claude Code does not read (it needs plain JSON)'
+        : jsonc
+          ? 'is not valid JSON (or JSONC)'
+          : 'is not valid JSON',
+    };
+  }
+  const dup = duplicateKey(text);
+  if (dup !== undefined) {
+    return { ok: false, key: dup, why: 'is a duplicate key (the agents would read only the last)' };
+  }
+  return { ok: true, value };
 }
 
 /** The document at `rel`, an empty one if missing; a file that is not a JSON object is refused. */
@@ -277,15 +336,9 @@ function loadDoc(root: string, rel: string, jsonc: boolean, hint = WRITE_HINT): 
     };
   }
   const text = readFileSync(t.abs, 'utf8');
-  const v = parseDoc(text, jsonc);
-  if (v === undefined) {
-    throw new ConfigConflict(
-      t.rel,
-      t.rel,
-      jsonc ? 'is not valid JSON (or JSONC)' : 'is not valid JSON (Claude Code reads no comments)',
-      hint,
-    );
-  }
+  const r = diagnose(text, jsonc);
+  if (!r.ok) throw new ConfigConflict(t.rel, r.key ?? t.rel, r.why, hint);
+  const v = r.value;
   if (!isObj(v)) throw new ConfigConflict(t.rel, t.rel, 'is not a JSON object', hint);
   return { ...t, text, data: v, style: styleOf(text), jsonc, original: text };
 }
