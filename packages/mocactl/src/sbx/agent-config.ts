@@ -15,7 +15,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, join, relative, sep } from 'node:path';
 import { parse, parseTree, ParseErrorCode, type Node, type ParseError } from 'jsonc-parser';
-import { append, innerOf, remove, styleOf, type Style } from './json-edit.js';
+import { append, commentsOf, innerOf, remove, styleOf, type Style } from './json-edit.js';
 
 /**
  * The agent configuration `sbx up` writes (SBX0 spec §6.3): Claude Code and OpenCode pointed at the
@@ -423,8 +423,47 @@ function dropAt(doc: Doc, path: (string | number)[], recs: JsonRec[] = []): void
   const parent = JSON.stringify(path.slice(0, -1));
   const r = recs.find((x) => x.op === 'inner' && JSON.stringify(x.path) === parent);
   const emptyInner = r?.op === 'inner' ? r.inner : '';
+  const expected = without(doc.data, path);
+  const comments = commentsOf(doc.text);
   edit(doc, (t) => remove(t, path, { emptyInner }));
+  // The guard on the rm side: the document, as an agent parses it, lost exactly that member and
+  // nothing else, and every comment in it is still there (sbx up never adds one).
+  if (!same(doc.data, expected)) {
+    throw new ConfigConflict(
+      doc.rel,
+      path.join('.'),
+      'needs a manual edit: removing it would have changed more than what sbx up added',
+      RM_GUARD_HINT,
+    );
+  }
+  const left = commentsOf(doc.text);
+  const lost = comments.find(
+    (c, i) =>
+      comments.slice(0, i).filter((x) => x === c).length >= left.filter((x) => x === c).length,
+  );
+  if (lost !== undefined) {
+    throw new ConfigConflict(
+      doc.rel,
+      path.join('.'),
+      `needs a manual edit: removing it would have lost the comment ${JSON.stringify(lost.slice(0, 40))}`,
+      RM_GUARD_HINT,
+    );
+  }
 }
+
+/** `data` without the member at `path` (a deep copy; `data` is unchanged). */
+function without(data: Json, path: (string | number)[]): Json {
+  const copy = JSON.parse(JSON.stringify(data)) as Json;
+  const parent = at(copy, path.slice(0, -1));
+  const k = path[path.length - 1]!;
+  if (Array.isArray(parent) && typeof k === 'number') parent.splice(k, 1);
+  else if (isObj(parent) && typeof k === 'string') delete parent[k];
+  return copy;
+}
+
+const RM_GUARD_HINT =
+  'nothing was changed, and its record is kept in .sbx/agent-config.json: take back what sbx up ' +
+  'added to it by hand, or keep it with mocactl sbx rm --keep-config';
 
 /** Refuses a key on `path` whose value is there but not an object (it cannot be merged into). */
 function needObjects(doc: Doc, path: JsonPath): void {

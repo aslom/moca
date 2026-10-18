@@ -169,6 +169,18 @@ function cut(text: string, ranges: [number, number][]): string {
   return out + text.slice(at);
 }
 
+/** Every comment in the document, in order, as written (line and block comments alike). */
+export function commentsOf(text: string): string[] {
+  const sc = createScanner(text, false);
+  const out: string[] = [];
+  for (let k = sc.scan(); k !== SyntaxKind.EOF; k = sc.scan()) {
+    if (k === SyntaxKind.LineCommentTrivia || k === SyntaxKind.BlockCommentTrivia) {
+      out.push(text.slice(sc.getTokenOffset(), sc.getTokenOffset() + sc.getTokenLength()));
+    }
+  }
+  return out;
+}
+
 /** The text inside the container at `path` when it has no members (for `remove`'s `emptyInner`). */
 export function innerOf(text: string, path: (string | number)[]): string | undefined {
   const root = tree(text);
