@@ -407,6 +407,77 @@ function opencodeFile(root: string, hint = WRITE_HINT): string {
   return jsonc ? 'opencode.jsonc' : 'opencode.json';
 }
 
+/** OpenCode's tool names for OPENCODE_OFF; `apply_patch` is `patch`'s newer name. */
+const OPENCODE_TOOLS = [...OPENCODE_OFF, 'apply_patch'];
+/** The `permission` key that gates a tool: `edit` covers every file modification. */
+const permissionOf = (t: string) => (['write', 'patch', 'apply_patch'].includes(t) ? 'edit' : t);
+/** An OpenCode tool or permission key, which may hold `*` and `?` wildcards. */
+const globMatch = (pattern: string, name: string) =>
+  new RegExp(
+    '^' +
+      pattern
+        .split('')
+        .map((ch) =>
+          ch === '*' ? '.*' : ch === '?' ? '.' : ch.replace(/[\\^$.|+()[\]{}]/g, '\\$&'),
+        )
+        .join('') +
+      '$',
+  ).test(name);
+
+/**
+ * Where an OpenCode config switches a local tool back on, as `key`s naming each place (review I2):
+ * - a `tools` wildcard set to anything but `false` (the exact keys are `up`'s own, checked apart);
+ * - `permission`, or an agent's: for each local tool, the last key matching it (OpenCode's last
+ *   matching rule wins) when it is not `deny` (a granular rule set counts as `deny` only if every
+ *   rule in it is); a bare string for the whole of `permission` that is not `deny`;
+ * - `agent.<name>.tools.<pattern>` not `false` for a pattern matching a local tool.
+ * In document order, each key once. Unknown value shapes count as re-enabling: erring wide only
+ * stops `up` and names the key.
+ */
+export function opencodeReenables(data: Json | undefined): string[] {
+  const out: string[] = [];
+  const add = (k: string) => {
+    if (!out.includes(k)) out.push(k);
+  };
+  const denies = (v: unknown) =>
+    v === 'deny' ||
+    (isObj(v) && Object.keys(v).length > 0 && Object.values(v).every((x) => x === 'deny'));
+  const tools = (prefix: string, v: unknown, exactToo: boolean) => {
+    if (!isObj(v)) return;
+    for (const [k, x] of Object.entries(v)) {
+      if (!exactToo && OPENCODE_TOOLS.includes(k)) continue;
+      if (x !== false && OPENCODE_TOOLS.some((t) => globMatch(k, t))) add(`${prefix}.${k}`);
+    }
+  };
+  const permission = (prefix: string, v: unknown) => {
+    if (v === undefined) return;
+    if (!isObj(v)) {
+      if (v !== 'deny') add(prefix);
+      return;
+    }
+    const keys = Object.keys(v);
+    for (const t of OPENCODE_TOOLS) {
+      const names = [t, permissionOf(t)];
+      const last = [...keys].reverse().find((k) => names.some((n) => globMatch(k, n)));
+      if (last !== undefined && !denies(v[last])) add(`${prefix}.${last}`);
+    }
+  };
+  for (const [k, v] of Object.entries(data ?? {})) {
+    if (k === 'tools') tools('tools', v, false);
+    else if (k === 'permission') permission('permission', v);
+    else if (k === 'agent' && isObj(v)) {
+      for (const [name, a] of Object.entries(v)) {
+        if (!isObj(a)) continue;
+        for (const [ak, av] of Object.entries(a)) {
+          if (ak === 'tools') tools(`agent.${name}.tools`, av, true);
+          else if (ak === 'permission') permission(`agent.${name}.permission`, av);
+        }
+      }
+    }
+  }
+  return out;
+}
+
 /** `disabledMcpjsonServers` naming the sandbox in a settings file: Claude Code then rejects it. */
 function rejectsServer(data: Json | undefined): boolean {
   const d = data?.disabledMcpjsonServers;
@@ -578,6 +649,15 @@ export function writeAgentConfig(root: string, o: { dryRun?: boolean } = {}): Ag
         `is ${JSON.stringify(v)}: the local tool would act on this machine`,
       );
     }
+  }
+  const ocBack = opencodeReenables(oc.data)[0];
+  if (ocBack !== undefined) {
+    throw new ConfigConflict(
+      oc.rel,
+      ocBack,
+      "switches a local built-in tool back on (OpenCode's agent and permission settings override " +
+        'tools), which would act on this machine',
+    );
   }
 
   // The Markdown files, once each (CLAUDE.md is often a link to AGENTS.md).
@@ -828,6 +908,10 @@ export function checkAgentConfig(root: string): string[] {
   const on = OPENCODE_OFF.filter((t) => at(oc, ['tools', t]) !== false);
   if (on.length) {
     problems.push(`OpenCode: local built-in tools not disabled in ${ocFile}: ${on.join(', ')}`);
+  }
+  const back = opencodeReenables(oc);
+  if (back.length) {
+    problems.push(`OpenCode: ${ocFile} re-enables local built-in tools: ${back.join(', ')}`);
   }
   const seen = new Set<string>();
   for (const f of ['CLAUDE.md', 'AGENTS.md']) {

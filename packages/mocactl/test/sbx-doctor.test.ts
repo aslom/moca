@@ -126,6 +126,25 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
     expect(c.fix).toContain('mocactl sbx up');
   });
 
+  it('says the denied state is checked in the project config only (review I2)', async () => {
+    const w = world();
+    const cs = await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory);
+    expect(byName(cs, 'agent config').detail).toContain(
+      "in this repository's project config; user-level and managed settings are not checked",
+    );
+  });
+
+  it('fails the agent-config check when an OpenCode agent re-enables a tool', async () => {
+    const w = world();
+    const f = join(w.r, 'opencode.json');
+    const o = JSON.parse(readFileSync(f, 'utf8'));
+    o.agent = { build: { permission: { bash: 'allow' } } };
+    writeFileSync(f, JSON.stringify(o));
+    const c = byName(await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory), 'agent config');
+    expect(c.ok).toBe(false);
+    expect(c.detail).toMatch(/agent\.build\.permission\.bash/);
+  });
+
   it('fails the agent-config check in a repository sbx up never configured', async () => {
     const w = world();
     const cs = await runDoctor(w.ctx(), repo(), SBX, fakeExec().factory);

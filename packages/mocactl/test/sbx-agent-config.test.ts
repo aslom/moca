@@ -285,6 +285,44 @@ describe('agent configuration (SBX0 §6.3)', () => {
     expect(existsSync(join(d, '.sbx'))).toBe(false);
   });
 
+  // Review I2: OpenCode's agent config overrides the global `tools`, and `permission` is the
+  // newer key (tools is deprecated into it); either can switch a local tool back on.
+  it.each([
+    [{ agent: { build: { tools: { bash: true } } } }, 'agent.build.tools.bash'],
+    [{ agent: { plan: { tools: { 'web*': true } } } }, 'agent.plan.tools.web*'],
+    [{ permission: { bash: 'allow' } }, 'permission.bash'],
+    [{ permission: { read: 'ask' } }, 'permission.read'],
+    // `edit` gates write and patch too.
+    [{ permission: { edit: { '*': 'deny', 'docs/*': 'allow' } } }, 'permission.edit'],
+    [{ permission: { '*': 'ask' } }, 'permission.*'],
+    [{ permission: 'allow' }, 'permission'],
+    [
+      { agent: { build: { permission: { webfetch: 'allow' } } } },
+      'agent.build.permission.webfetch',
+    ],
+    [{ agent: { build: { permission: 'ask' } } }, 'agent.build.permission'],
+  ])('refuses an OpenCode override that re-enables a local tool: %j names %s', (body, key) => {
+    const d = dir();
+    writeFileSync(join(d, 'opencode.json'), JSON.stringify(body));
+    const err = conflictOf(() => writeAgentConfig(d, { dryRun: true }));
+    expect(err.file).toBe('opencode.json');
+    expect(err.key).toBe(key);
+    expect(err.message).toContain(`opencode.json: ${key}`);
+  });
+
+  it('accepts OpenCode overrides that keep the local tools off', () => {
+    const d = dir();
+    const body = {
+      permission: { bash: 'deny', edit: { '*': 'deny' }, skill: 'allow', sandbox_bash: 'allow' },
+      agent: {
+        build: { tools: { bash: false, mymcp_x: true }, permission: { question: 'allow' } },
+      },
+    };
+    writeFileSync(join(d, 'opencode.json'), JSON.stringify(body));
+    writeAgentConfig(d);
+    expect(checkAgentConfig(d)).toEqual([]);
+  });
+
   it('accepts a sandbox server that is already the same one, and never removes it', () => {
     const d = dir();
     const mine = {
@@ -491,6 +529,16 @@ describe('agent configuration (SBX0 §6.3)', () => {
       'a file broken by hand',
       (d: string) => writeFileSync(join(d, '.mcp.json'), '{'),
       /\.mcp\.json.*not valid JSON/,
+    ],
+    [
+      'an OpenCode agent that switches a tool back on',
+      (d: string) => {
+        const o = json(d, 'opencode.json');
+        o.agent = { build: { tools: { bash: true } } };
+        o.permission = { edit: 'allow' };
+        writeFileSync(join(d, 'opencode.json'), JSON.stringify(o));
+      },
+      /OpenCode: opencode\.json re-enables local built-in tools: agent\.build\.tools\.bash, permission\.edit/,
     ],
     [
       'no configuration at all',
