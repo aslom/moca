@@ -63,13 +63,20 @@ const BUILD_DIRS = new Set(
 const globLiteral = (p: string) => p.replace(/[\\*?[ !#]/g, '\\$&').replace(/[\r\n]/g, '?');
 
 /**
- * The anchored negations (`!/<dir>/`) for every directory with a BUILD_EXCLUDES name (at any
- * depth) that holds a pushed path, parents included: such a directory is source, not build output
- * (a Java package `build`, a vendored `node_modules`), so a new file the agent writes there must
- * show as a change, be pulled, and stop a push from discarding it. They are passed to git as `-x`,
- * so they beat the repository's own .gitignore too (its `build/` would hide a package `build`).
- * Build-named directories under it that hold nothing pushed stay excluded, and so does one whose
- * only pushed files are placeholders (`dist/.gitkeep`): its contents are output.
+ * The anchored negations (`!/<dir>/`) for a NESTED directory with a BUILD_EXCLUDES name that holds
+ * a pushed path: such a directory is source, not build output (a Java package
+ * `src/main/java/acme/build/`), so a new file the agent writes there must show as a change, be
+ * pulled, and stop a push from discarding it. They are passed to git as `-x`, so they beat the
+ * repository's own .gitignore too (its `build/` matches `acme/build/`).
+ *
+ * Never re-included, so that what a build or an install writes there stays out of the patch:
+ * - a top-level one (`build/`, `dist/`, `target/`): that is where builds write, even when it
+ *   holds a tracked file (`build/keep.txt`);
+ * - `node_modules/`, at any depth, even with a vendored, tracked package in it;
+ * - anything under either (git does not look inside an excluded directory);
+ * - one whose only pushed files are placeholders (`.gitkeep`).
+ * The tracked files in all of these are still in the baseline (forced in by name), so the
+ * agent's edits to them come back; only its NEW files there are treated as output.
  */
 export function reincludes(paths: string[]): string[] {
   const dirs = new Set<string>();
@@ -77,7 +84,10 @@ export function reincludes(paths: string[]): string[] {
     if (PLACEHOLDERS.has(posix.basename(p))) continue;
     const segs = p.split('/');
     for (let i = 1; i < segs.length; i++) {
-      if (BUILD_DIRS.has(segs[i - 1]!)) dirs.add(segs.slice(0, i).join('/'));
+      const seg = segs[i - 1]!;
+      if (!BUILD_DIRS.has(seg)) continue;
+      if (i === 1 || seg === 'node_modules') break; // output, and so is everything under it
+      dirs.add(segs.slice(0, i).join('/'));
     }
   }
   return [...dirs].sort().map((d) => `!/${globLiteral(d)}/`);

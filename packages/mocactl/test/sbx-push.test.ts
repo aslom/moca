@@ -339,8 +339,7 @@ describe('the round trip: up -> sandbox -> pull (plan 1c Review Focus 1)', () =>
         unlinkSync(join(ws, 'notes.md'));
         mkdirSync(join(ws, 'node_modules/x'), { recursive: true });
         writeFileSync(join(ws, 'node_modules/x/i.js'), 'build output');
-        mkdirSync(join(ws, 'dist'));
-        writeFileSync(join(ws, 'dist/new.o'), 'build output');
+        writeFileSync(join(ws, 'build/new.o'), 'build output');
         expect(await hasUnpulled(exec)).toBe(true);
         const patch = await capturePatch(exec);
         await applyPatch(r, patch);
@@ -348,7 +347,7 @@ describe('the round trip: up -> sandbox -> pull (plan 1c Review Focus 1)', () =>
         const local = snapshot(r);
         const remote = snapshot(ws);
         for (const k of ['build/out.o', '.env', 'id_rsa']) delete local[k]; // never pushed
-        for (const k of ['node_modules/x/i.js', 'dist/new.o']) delete remote[k]; // build output
+        for (const k of ['node_modules/x/i.js', 'build/new.o']) delete remote[k]; // build output
         delete remote['lost+found'];
         expect(local).toEqual(remote);
         const hex = (t: string) => Buffer.from(t).toString('hex');
@@ -386,7 +385,13 @@ describe('directories named like build output that hold source (review C1)', () 
     const patch = (await capturePatch(exec)).toString();
     expect(patch).toContain('src/main/java/acme/build/New.java');
     expect(patch).toContain('src/main/java/acme/build/sub/Deep.java');
-    // And so a push (without --force) would be refused rather than discard it.
+    // And so a push without --force is refused rather than discard it.
+    await expect(
+      pushTree(exec, await planPush(r), undefined, { guard: true }),
+    ).rejects.toBeInstanceOf(UnpulledError);
+    expect(readFileSync(join(ws, 'src/main/java/acme/build/New.java'), 'utf8')).toBe(
+      'class New {}\n',
+    );
   });
 
   it("beats the repository's own .gitignore for that directory, as the push did", async () => {
@@ -429,22 +434,59 @@ describe('directories named like build output that hold source (review C1)', () 
         'we ird*/target/x',
         'src/app.py',
       ]),
-    ).toEqual([
-      '!/a/node_modules/',
-      '!/a/node_modules/b/dist/',
-      '!/build/',
-      '!/src/main/java/acme/build/',
-      '!/we\\ ird\\*/target/',
-    ]);
+    ).toEqual(['!/src/main/java/acme/build/', '!/we\\ ird\\*/target/']);
     expect(reincludes(['dist/.gitkeep', 'out/build/.keep'])).toEqual([]);
+    // node_modules at any depth, and everything under a top-level or node_modules one: never.
+    expect(
+      reincludes([
+        'node_modules/patched/index.js',
+        'web/node_modules/p/i.js',
+        'build/x/dist/y',
+        'a/b/target/c',
+      ]),
+    ).toEqual(['!/a/b/target/']);
   });
 
-  it('treats a build-named directory holding a tracked file as source: new files there come back', async () => {
-    const r = repo(); // build/keep.txt is tracked under the ignored build/
+  it('pbroad A: a build in a top-level build/ with a tracked file there brings back only the real work', async () => {
+    const r = repo(); // build/keep.txt is tracked under the ignored build/; build/out.o exists locally
     const { ws, exec } = await pushed(r);
-    writeFileSync(join(ws, 'build/notes.txt'), 'the agent wrote this\n');
-    expect(await hasUnpulled(exec)).toBe(true);
-    expect((await capturePatch(exec)).toString()).toContain('build/notes.txt');
+    writeFileSync(join(ws, 'build/out.o'), 'rebuilt in the sandbox');
+    mkdirSync(join(ws, 'build/classes'));
+    writeFileSync(join(ws, 'build/classes/A.class'), 'cafe');
+    writeFileSync(join(ws, 'src/app.py'), 'print(2)\n');
+    const files = (p: Buffer) =>
+      [...p.toString().matchAll(/^diff --git a\/(\S+)/gm)].map((m) => m[1]);
+    expect(files(await capturePatch(exec))).toEqual(['src/app.py']);
+    writeFileSync(join(ws, 'build/keep.txt'), 'edited\n'); // an edit to the tracked file comes back
+    const { patch, tree } = await capture(exec);
+    expect(files(patch)).toEqual(['build/keep.txt', 'src/app.py']);
+    await applyPatch(r, patch); // build/out.o, ignored here, is not in the way
+    expect(readFileSync(join(r, 'build/out.o'), 'utf8')).toBe('ignored\n');
+    expect(readFileSync(join(r, 'build/keep.txt'), 'utf8')).toBe('edited\n');
+    await advanceBaseline(exec, undefined, tree);
+    expect(await hasUnpulled(exec)).toBe(false); // the output alone is nothing to pull
+  });
+
+  it('pbroad B: npm install beside a vendored, tracked node_modules package is not unpulled work', async () => {
+    const r = repo();
+    mkdirSync(join(r, 'node_modules/patched'), { recursive: true });
+    writeFileSync(join(r, 'node_modules/patched/index.js'), 'patched\n');
+    writeFileSync(join(r, '.gitignore'), 'build/\nnode_modules/\n');
+    git(r, 'add', '-f', 'node_modules/patched/index.js', '.gitignore');
+    git(r, 'commit', '-qm', 'vendor');
+    const plan = await planPush(r);
+    expect(plan.reinclude).toEqual([]);
+    const { ws, exec } = localWorkspace();
+    await pushTree(exec, plan);
+    for (let i = 0; i < 20; i++) {
+      mkdirSync(join(ws, `node_modules/dep${i}`), { recursive: true });
+      writeFileSync(join(ws, `node_modules/dep${i}/index.js`), 'x');
+    }
+    expect(await hasUnpulled(exec)).toBe(false);
+    await pushTree(exec, await planPush(r), undefined, { guard: true }); // not refused
+    // An edit to the vendored, tracked file still comes back.
+    writeFileSync(join(ws, 'node_modules/patched/index.js'), 'patched again\n');
+    expect((await capturePatch(exec)).toString()).toContain('node_modules/patched/index.js');
   });
 });
 
@@ -755,13 +797,11 @@ describe('applyPatch on a dirty local tree (plan 1c R6c)', () => {
   });
 
   it('refuses a patch creating a file that exists locally but is ignored, keeping it (review)', async () => {
-    const r = repo();
-    const { ws, exec } = await pushed(r);
-    writeFileSync(join(ws, 'build/out.o'), 'agent'); // ignored locally, absent in the sandbox
-    git(ws, 'add', '-f', 'build/out.o'); // (the sandbox's exclude would hide it otherwise)
-    writeFileSync(join(ws, '.git/info/exclude'), '');
-    const patch = await capturePatch(exec);
-    expect(patch.toString()).toContain('build/out.o');
+    const r = repo(); // build/out.o exists here, ignored
+    const patch = Buffer.from(
+      'diff --git a/build/out.o b/build/out.o\nnew file mode 100644\nindex 0000000..1111111\n' +
+        '--- /dev/null\n+++ b/build/out.o\n@@ -0,0 +1 @@\n+agent\n',
+    );
     await expect(applyPatch(r, patch)).rejects.toThrow(/not yet committed \(build\/out\.o\)/);
     expect(readFileSync(join(r, 'build/out.o'), 'utf8')).toBe('ignored\n');
   });
