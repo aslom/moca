@@ -100,6 +100,15 @@ const REINCLUDE = '.git/sbx-reinclude';
 
 export class PushError extends Error {}
 
+/**
+ * Whether a path is in the binding's directory, as a case-insensitive (macOS, Windows) or
+ * normalizing (macOS: NFD) filesystem would resolve it: `.SBX/sandbox.json` is `.sbx/` there.
+ */
+export function isBindingPath(p: string): boolean {
+  const first = p.normalize('NFC').split('/')[0]!.toLowerCase();
+  return first === '.sbx';
+}
+
 const run = promisify(execFile);
 async function git(cwd: string, args: string[], input?: Buffer): Promise<Buffer> {
   const p = run('git', args, { cwd, encoding: 'buffer', maxBuffer: 512 << 20 });
@@ -217,7 +226,7 @@ export async function planPush(
     return undefined;
   };
   for (const p of names) {
-    if (p === '.sbx' || p.startsWith('.sbx/')) continue; // the binding is the laptop's
+    if (isBindingPath(p)) continue; // the binding is the laptop's
     if (!o.includeSecrets && SECRET_RE.test(posix.basename(p))) {
       excludedSecrets.push(p);
       continue;
@@ -629,7 +638,7 @@ export async function applyPatch(root: string, patch: Buffer): Promise<string[]>
     const touched = await patchPaths(root, f);
     // The binding is the laptop's: a patch that would write it (an agent that un-excluded .sbx/
     // in the sandbox) could repoint every later command, so it is refused outright.
-    const binding = touched.filter((p) => p === '.sbx' || p.startsWith('.sbx/'));
+    const binding = touched.filter(isBindingPath);
     if (binding.length) {
       throw new PushError(
         `the patch writes ${list(binding)}, this repository's sandbox binding, which a pull never ` +

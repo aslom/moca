@@ -29,6 +29,7 @@ import {
   capture,
   capturePatch,
   hasUnpulled,
+  isBindingPath,
   planPush,
   pushTree,
   repoId,
@@ -489,6 +490,44 @@ describe('pull (SBX0 §6.2, §10.3)', () => {
     );
     expect(readBinding(r)?.id).toBe(SBX);
     expect(readFileSync(join(r, 'src/app.py'), 'utf8')).toBe('print(1)\n');
+  });
+
+  for (const dir of ['.SBX', '.Sbx']) {
+    it(`refuses a patch writing ${dir}/, which a case-insensitive filesystem resolves to .sbx/ (review I3)`, async () => {
+      const r = repo();
+      writeBinding(r, {
+        id: SBX,
+        controlPlaneUrl: 'https://sbx-api.example.invalid',
+        template: 'default',
+      });
+      const before = readFileSync(join(r, '.sbx/sandbox.json'));
+      const patch = Buffer.from(
+        `diff --git a/${dir}/sandbox.json b/${dir}/sandbox.json\n` +
+          'new file mode 100644\nindex 0000000..1111111\n--- /dev/null\n' +
+          `+++ b/${dir}/sandbox.json\n@@ -0,0 +1 @@\n+{"id":"sbx-evil"}\n`,
+      );
+      await expect(applyPatch(r, patch)).rejects.toThrow(/sandbox binding/);
+      expect(readFileSync(join(r, '.sbx/sandbox.json'))).toEqual(before);
+    });
+  }
+
+  it('matches the binding directory in any case or normalization, and nothing else', () => {
+    for (const p of ['.sbx', '.sbx/sandbox.json', '.SBX/x', '.Sbx/x', '.sBX']) {
+      expect(isBindingPath(p), p).toBe(true);
+    }
+    for (const p of ['src/.sbx/x', '.sbxx/x', 'sbx/x', '.sb'])
+      expect(isBindingPath(p), p).toBe(false);
+  });
+
+  it('never pushes .SBX/ either, but does push a lookalike such as .SBX_dir/', async () => {
+    const r = repo();
+    mkdirSync(join(r, '.SBX'));
+    writeFileSync(join(r, '.SBX/sandbox.json'), '{}');
+    mkdirSync(join(r, '.SBX_dir'));
+    writeFileSync(join(r, '.SBX_dir/x'), 'kept');
+    const { paths } = await planPush(r);
+    expect(paths.some((p) => p.toLowerCase().startsWith('.sbx/'))).toBe(false);
+    expect(paths).toContain('.SBX_dir/x');
   });
 
   it('refuses a malformed patch with a readable error, changing nothing', async () => {
