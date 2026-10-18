@@ -395,7 +395,7 @@ describe('mocactl sbx put (SBX0 §6.1)', () => {
       res({
         exitCode: 1,
         stdout: Buffer.alloc(0),
-        stderr: Buffer.from('/workspace/ro: Permission denied\n'),
+        stderr: Buffer.from('/workspace/ro: Permission denied\x1b]52;c;cGF5bG9hZA==\x07\n'),
       }),
     );
     expect(
@@ -408,6 +408,7 @@ describe('mocactl sbx put (SBX0 §6.1)', () => {
       }),
     ).toBe(1);
     expect(io.errs.join('\n')).toContain('put failed: /workspace/ro: Permission denied');
+    expect(io.errs.join('\n')).not.toContain('\x1b'); // remote stderr cannot drive the terminal
   });
 
   it('refuses stdin over what one Exec can carry, before any request (exit 2)', async () => {

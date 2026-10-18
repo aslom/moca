@@ -1,6 +1,7 @@
 import { posix } from 'node:path';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { TOKEN_MARGIN_S, WORKSPACE, writeFileCommand } from '@moca/sandbox-client';
+import { sanitizeRemote } from '../core/sanitize.js';
 import type { Io } from '../headless.js';
 import { SBX_EXIT, type SbxCtx } from './commands.js';
 import { EXIT_KILLED, execFailed, openExec, type ExecFactory } from './exec.js';
@@ -125,7 +126,9 @@ export async function cmdPut(
       signal: c.signal,
     });
     if (r.exitCode !== 0) {
-      c.io.err(`sbx: put failed: ${r.stderr.toString().trim() || `exit ${r.exitCode}`}`);
+      c.io.err(
+        `sbx: put failed: ${sanitizeRemote(r.stderr.toString().trim()) || `exit ${r.exitCode}`}`,
+      );
       return SBX_EXIT.failed;
     }
     return SBX_EXIT.ok;

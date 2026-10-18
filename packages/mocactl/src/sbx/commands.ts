@@ -123,7 +123,8 @@ export async function cmdLogin(c: SbxCtx, remember: boolean): Promise<number> {
 
 /**
  * `mocactl sbx logout`: revoke the login's refresh token at the control plane (best effort), then
- * delete `sbx-auth.json` whatever it holds. MOCA's `auth.json` is never touched.
+ * delete `sbx-auth.json`. A login there for another sandbox control plane is left in place and
+ * named, since it was not revoked. MOCA's `auth.json` is never touched.
  */
 export async function cmdLogout(c: SbxCtx): Promise<number> {
   const auth = c.rt.auth;
@@ -150,7 +151,7 @@ export async function cmdLogout(c: SbxCtx): Promise<number> {
       code = SBX_EXIT.failed;
     }
   }
-  // Deletes sbx-auth.json whatever it holds: a login for another sandbox control plane included.
+  // Reached only for this control plane's login (or none, or an unreadable file): delete it.
   setAuth(c.rt, null);
   if (code === SBX_EXIT.ok) {
     c.io.err(auth ? 'logged out of the sandbox service' : 'not logged in to the sandbox service');
