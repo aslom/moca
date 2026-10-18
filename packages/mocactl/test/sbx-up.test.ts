@@ -9,124 +9,25 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { ExecConnOptions } from '@moca/sandbox-client';
 import { afterEach, describe, expect, it } from 'vitest';
 import { saveAuth } from '../src/config.js';
 import { SBX_USAGE, sbxMain, sbxPaths } from '../src/sbx/cli.js';
+import { checkAgentConfig } from '../src/sbx/agent-config.js';
 import { hasUnpulled, MAX_FILE, repoId } from '../src/sbx/push.js';
 import {
   LOGIN,
+  NEW,
+  OTHER,
   SBX,
-  TOKEN,
   URL_,
   cleanupTmp,
-  fakeCp,
   git,
-  localWorkspace,
+  harness,
   repo,
   sandbox,
-  setup,
-  type Handler,
 } from './helpers/sbx.js';
 
 afterEach(cleanupTmp);
-
-const OTHER = 'sbx-fedcba9876543210fedcba9876';
-const NEW = 'sbx-aaaaaaaaaaaaaaaaaaaaaaaaaa';
-
-/**
- * A control plane holding sandboxes: GET/list/create/token, every call recorded. `create` makes
- * NEW (then NEW2…); `tokens` counts mints per id.
- */
-function controlPlane(initial: ReturnType<typeof sandbox>[] = []) {
-  const boxes = new Map(initial.map((s) => [s.id, s]));
-  let created = 0;
-  const route = (key: string): Handler | undefined => {
-    const [method, path] = key.split(' ') as [string, string];
-    if (method === 'POST' && path === '/v1/sandboxes') {
-      return (req) => {
-        const b = req.body as { template: string; name?: string; labels?: Record<string, string> };
-        const id = created++ === 0 ? NEW : `${NEW.slice(0, -1)}${created}`;
-        const s = sandbox({
-          id,
-          template: b.template,
-          name: b.name ?? null,
-          labels: b.labels ?? {},
-        });
-        boxes.set(id, s);
-        return { status: 201, body: s };
-      };
-    }
-    if (method === 'GET' && path === '/v1/sandboxes') {
-      return () => ({ status: 200, body: { sandboxes: [...boxes.values()] } });
-    }
-    const m = /^\/v1\/sandboxes\/([^/]+)(\/token)?$/.exec(path);
-    if (!m) return undefined;
-    const s = boxes.get(m[1]!);
-    if (!s)
-      return () => ({
-        status: 404,
-        body: { error: 'sandbox_not_found', message: 'no such sandbox' },
-      });
-    if (method === 'GET' && !m[2]) return () => ({ status: 200, body: s });
-    if (method === 'POST' && m[2]) {
-      return () =>
-        s.state === 'ready'
-          ? { status: 200, body: { ...TOKEN, wsk: s.id } }
-          : {
-              status: 409,
-              body: { error: 'sandbox_terminated', message: 'sandbox expired', reason: s.reason },
-            };
-    }
-    return undefined;
-  };
-  const cp = fakeCp(
-    new Proxy({}, { get: (_t, k) => (typeof k === 'string' ? route(k) : undefined) }),
-  );
-  return {
-    ...cp,
-    boxes,
-    posts: () => cp.calls.filter((c) => c.method === 'POST' && c.path === '/v1/sandboxes'),
-  };
-}
-
-/** One workspace per sandbox id, as the worker keeps them: the exec factory picks by `wsk`. */
-function workspaces(o: Parameters<typeof localWorkspace>[0] = {}) {
-  const byId = new Map<string, ReturnType<typeof localWorkspace>>();
-  const get = (id: string) => {
-    if (!byId.has(id)) byId.set(id, localWorkspace(o));
-    return byId.get(id)!;
-  };
-  let opened = 0;
-  let closed = 0;
-  const factory = (c: ExecConnOptions) => {
-    opened++;
-    return { exec: get(c.workspaceKey).exec, close: () => void closed++ };
-  };
-  return { get, factory, counts: () => ({ opened, closed }) };
-}
-
-function harness(
-  o: { boxes?: ReturnType<typeof sandbox>[]; ws?: Parameters<typeof localWorkspace>[0] } = {},
-) {
-  const s = setup();
-  const cp = controlPlane(o.boxes);
-  const ws = workspaces(o.ws);
-  const r = repo();
-  const run = (argv: string[], over: { cwd?: string; env?: Record<string, string> } = {}) => {
-    s.io.outs.length = 0;
-    s.io.errs.length = 0;
-    s.io.outB.length = 0;
-    return sbxMain(argv, over.env ?? s.env, s.io, {
-      home: s.home,
-      fetchImpl: cp.fetchImpl,
-      cwd: over.cwd ?? r,
-      execFactory: ws.factory,
-    });
-  };
-  const err = () => s.io.errs.join('\n');
-  return { ...s, cp, ws, r, run, err };
-}
 
 const binding = (r: string) => JSON.parse(readFileSync(join(r, '.sbx/sandbox.json'), 'utf8'));
 
@@ -307,7 +208,8 @@ describe('mocactl sbx push and pull (SBX0 §6.2, §10.3)', () => {
     expect(readFileSync(join(ws, 'src/app.py'), 'utf8')).toBe('print("agent")\n');
     expect(await h.run(['push', '--force'])).toBe(0);
     expect(readFileSync(join(ws, 'src/app.py'), 'utf8')).toBe('print(1)\n');
-    expect(h.err()).toMatch(new RegExp(`pushed 7 files \\(0\\.0 MiB\\) to ${NEW}`));
+    // The 7 files `up` pushed, and the 5 agent-configuration files it wrote after its push.
+    expect(h.err()).toMatch(new RegExp(`pushed 12 files \\(0\\.0 MiB\\) to ${NEW}`));
   });
 
   it("push is refused over the agent's new file in a source directory named build (review C1)", async () => {
@@ -417,5 +319,143 @@ describe('mocactl sbx push and pull (SBX0 §6.2, §10.3)', () => {
     const h = harness({ boxes: [sandbox({ id: SBX, state: 'terminated', reason: 'deleted' })] });
     expect(await h.run(['push', '--sandbox', SBX])).toBe(1);
     expect(h.err()).toMatch(/sandbox expired/);
+  });
+});
+
+describe('mocactl sbx up and rm: the agent configuration (SBX0 §6.3, plan Review Focus 3)', () => {
+  const CFG = ['.mcp.json', '.claude/settings.json', 'opencode.json', 'CLAUDE.md', 'AGENTS.md'];
+
+  it('up configures Claude Code and OpenCode after the push, and says so once', async () => {
+    const h = harness();
+    expect(await h.run(['up'])).toBe(0);
+    expect(h.err()).toContain(`configured Claude Code and OpenCode: ${CFG.join(', ')}`);
+    expect(checkAgentConfig(h.r)).toEqual([]);
+    // Pushed before it was written: the sandbox's tree is the developer's, not sbx's config.
+    expect(existsSync(join(h.ws.get(NEW).ws, '.mcp.json'))).toBe(false);
+    expect(h.io.outs.join('')).toBe(`${NEW}\n`);
+    expect(await h.run(['up'])).toBe(0);
+    expect(h.err()).not.toContain('configured Claude Code');
+  });
+
+  it("keeps the developer's files: other servers, allow entries, CLAUDE.md byte for byte", async () => {
+    const h = harness();
+    const mcp =
+      '{\n  "mcpServers": {\n    "github": { "type": "http", "url": "https://x.example.invalid" }\n  }\n}\n';
+    writeFileSync(join(h.r, '.mcp.json'), mcp);
+    mkdirSync(join(h.r, '.claude'));
+    writeFileSync(
+      join(h.r, '.claude/settings.json'),
+      JSON.stringify({ permissions: { allow: ['mcp__github__*', 'mcp__x(git status)'] } }),
+    );
+    const mine = '# Mine\n\nHand-written.\n';
+    writeFileSync(join(h.r, 'CLAUDE.md'), mine);
+    expect(await h.run(['up'])).toBe(0);
+    const m = readFileSync(join(h.r, '.mcp.json'), 'utf8');
+    expect(
+      m.startsWith(
+        '{\n  "mcpServers": {\n    "github": { "type": "http", "url": "https://x.example.invalid" },',
+      ),
+    ).toBe(true);
+    const s = JSON.parse(readFileSync(join(h.r, '.claude/settings.json'), 'utf8'));
+    expect(s.permissions.allow).toEqual([
+      'mcp__github__*',
+      'mcp__x(git status)',
+      'mcp__sandbox__*',
+    ]);
+    expect(
+      readFileSync(join(h.r, 'CLAUDE.md'), 'utf8').startsWith(mine + '\n<!-- sbx:begin -->'),
+    ).toBe(true);
+    expect(await h.run(['rm'])).toBe(0);
+    expect(readFileSync(join(h.r, '.mcp.json'), 'utf8')).toBe(mcp);
+    expect(readFileSync(join(h.r, 'CLAUDE.md'), 'utf8')).toBe(mine);
+  });
+
+  it.each([
+    [
+      '.mcp.json',
+      { mcpServers: { sandbox: { command: 'elsewhere' } } },
+      '.mcp.json: mcpServers.sandbox',
+    ],
+    [
+      '.claude/settings.json',
+      { permissions: { allow: ['Bash'] } },
+      '.claude/settings.json: permissions.allow',
+    ],
+    ['opencode.json', { tools: { bash: true } }, 'opencode.json: tools.bash'],
+  ])(
+    'a conflict in %s stops up before anything is created, bound or pushed',
+    async (file, body, named) => {
+      const h = harness();
+      mkdirSync(join(h.r, '.claude'), { recursive: true });
+      writeFileSync(join(h.r, file), JSON.stringify(body));
+      expect(await h.run(['up'])).toBe(1);
+      expect(h.err()).toContain(`sbx: ${named}`);
+      expect(h.err()).toContain('--no-agent-config');
+      expect(h.cp.calls).toEqual([]);
+      expect(h.ws.counts().opened).toBe(0);
+      expect(existsSync(join(h.r, '.sbx'))).toBe(false);
+      expect(JSON.parse(readFileSync(join(h.r, file), 'utf8'))).toEqual(body);
+      for (const f of CFG.filter((f) => f !== file))
+        expect(existsSync(join(h.r, f)), f).toBe(false);
+      // --no-agent-config: up goes ahead, and leaves the files alone.
+      expect(await h.run(['up', '--no-agent-config'])).toBe(0);
+      expect(JSON.parse(readFileSync(join(h.r, file), 'utf8'))).toEqual(body);
+      for (const f of CFG.filter((f) => f !== file))
+        expect(existsSync(join(h.r, f)), f).toBe(false);
+    },
+  );
+
+  it('a file that is not valid JSON stops up, named, and is never rewritten', async () => {
+    const h = harness();
+    writeFileSync(join(h.r, '.mcp.json'), '{ "mcpServers": ');
+    expect(await h.run(['up'])).toBe(1);
+    expect(h.err()).toMatch(/sbx: \.mcp\.json is not valid JSON/);
+    expect(readFileSync(join(h.r, '.mcp.json'), 'utf8')).toBe('{ "mcpServers": ');
+    expect(h.cp.calls).toEqual([]);
+  });
+
+  it('rm of the bound sandbox removes what up added and .sbx/, saying what it removed', async () => {
+    const h = harness();
+    writeFileSync(join(h.r, 'AGENTS.md'), '# Agents\n');
+    const status = git(h.r, 'status', '--porcelain', '--ignored');
+    expect(await h.run(['up'])).toBe(0);
+    expect(await h.run(['rm'], { cwd: join(h.r, 'src') })).toBe(0);
+    expect(h.cp.calls.some((c) => c.method === 'DELETE' && c.path === `/v1/sandboxes/${NEW}`)).toBe(
+      true,
+    );
+    for (const f of [...CFG.filter((f) => f !== 'AGENTS.md'), '.claude', '.sbx']) {
+      expect(existsSync(join(h.r, f)), f).toBe(false);
+    }
+    expect(readFileSync(join(h.r, 'AGENTS.md'), 'utf8')).toBe('# Agents\n');
+    expect(h.err()).toMatch(/removed the agent configuration sbx up added: .*AGENTS\.md/);
+    expect(h.err()).toContain('removed .sbx/');
+    expect(git(h.r, 'status', '--porcelain', '--ignored')).toBe(status);
+  });
+
+  it('rm --keep-config, or of another sandbox, leaves the configuration and the binding', async () => {
+    const h = harness({ boxes: [sandbox({ id: OTHER })] });
+    expect(await h.run(['up'])).toBe(0);
+    expect(await h.run(['rm', OTHER])).toBe(0);
+    expect(existsSync(join(h.r, '.sbx/sandbox.json'))).toBe(true);
+    expect(existsSync(join(h.r, '.mcp.json'))).toBe(true);
+    expect(await h.run(['rm', '--keep-config'])).toBe(0);
+    expect(existsSync(join(h.r, '.sbx/sandbox.json'))).toBe(true);
+    expect(checkAgentConfig(h.r)).toEqual([]);
+    expect(h.err()).not.toMatch(/removed/);
+    expect(await h.run(['up', '--keep-config'])).toBe(2);
+  });
+
+  it('rm reports a configuration it cannot take back, keeps the record, and a second rm finishes', async () => {
+    const h = harness();
+    expect(await h.run(['up'])).toBe(0);
+    writeFileSync(join(h.r, 'opencode.json'), '{ broken');
+    expect(await h.run(['rm'])).toBe(1);
+    expect(h.err()).toMatch(/sbx: opencode\.json is not valid JSON.*run mocactl sbx rm again/);
+    expect(existsSync(join(h.r, '.sbx/agent-config.json'))).toBe(true);
+    expect(existsSync(join(h.r, '.mcp.json'))).toBe(true);
+    writeFileSync(join(h.r, 'opencode.json'), '{}');
+    expect(await h.run(['rm'])).toBe(0);
+    expect(existsSync(join(h.r, '.sbx'))).toBe(false);
+    expect(existsSync(join(h.r, '.mcp.json'))).toBe(false);
   });
 });

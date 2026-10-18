@@ -1,7 +1,8 @@
-import { writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { rmSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { ApiError } from '../api/errors.js';
 import { sanitizeRemote } from '../core/sanitize.js';
+import { ConfigConflict, removeAgentConfig, writeAgentConfig } from './agent-config.js';
 import type { SbxSandbox } from './api.js';
 import { failed, SBX_EXIT, type SbxCtx } from './commands.js';
 import { execFailed, openExec, type ExecFactory, type OpenedExec } from './exec.js';
@@ -254,7 +255,8 @@ async function findOrCreate(
  * `.sbx/sandbox.json`, and push the working tree -- unless a reused sandbox holds changes not yet
  * pulled, which are left untouched with a warning.
  *
- * Task 6 (agent configuration) hooks in at the two marked points.
+ * The agent configuration (spec §6.3, agent-config.ts) is checked before anything is created and
+ * written after the push, unless `--no-agent-config`.
  */
 export async function cmdUp(
   c: SbxCtx,
@@ -271,7 +273,17 @@ export async function cmdUp(
     say(c, err.message);
     return SBX_EXIT.failed;
   }
-  // [Task 6] the agent-configuration dry run goes here: a conflict stops `up` with nothing done.
+  // The agent configuration is checked now, so a conflict stops `up` with nothing created,
+  // bound or pushed; it is written after the push, so the push carries the developer's tree.
+  if (!f.noAgentConfig) {
+    try {
+      writeAgentConfig(root, { dryRun: true });
+    } catch (err) {
+      if (!(err instanceof ConfigConflict)) throw err;
+      say(c, err.message);
+      return SBX_EXIT.failed;
+    }
+  }
   const rid = await repoId(root);
   const found = await findOrCreate(c, rid, f);
   if (typeof found === 'number') return found;
@@ -298,10 +310,44 @@ export async function cmdUp(
     return SBX_EXIT.ok;
   });
   if (code !== SBX_EXIT.ok) return code;
-  // [Task 6] the agent configuration is written here (unless f.noAgentConfig).
+  if (!f.noAgentConfig) {
+    try {
+      const { changed } = writeAgentConfig(root);
+      if (changed.length) c.io.err(`configured Claude Code and OpenCode: ${changed.join(', ')}`);
+    } catch (err) {
+      say(
+        c,
+        `sandbox ${s.id} is up and bound, but the agent configuration was not written: ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
+      return SBX_EXIT.failed;
+    }
+  }
   c.io.out(`${s.id}\n`);
   c.io.err(
     `sandbox ${s.id} (${sanitizeRemote(s.template)}), expires ${when(s.expiresAt)}; bound in .sbx/sandbox.json`,
   );
+  return SBX_EXIT.ok;
+}
+
+/**
+ * After `sbx rm` of the bound sandbox: take back the agent configuration `up` added, then `.sbx/`.
+ * A file it can no longer read stops it with nothing removed (the record stays in `.sbx/`, so a
+ * second `rm` finishes the job once the file is fixed).
+ */
+export function unbind(c: SbxCtx, root: string): number {
+  let removed: string[];
+  try {
+    removed = removeAgentConfig(root);
+  } catch (err) {
+    if (!(err instanceof ConfigConflict)) throw err;
+    say(c, err.message);
+    return SBX_EXIT.failed;
+  }
+  if (removed.length) {
+    c.io.err(`removed the agent configuration sbx up added: ${removed.join(', ')}`);
+  }
+  rmSync(join(root, '.sbx'), { recursive: true, force: true });
+  c.io.err('removed .sbx/ (the binding)');
   return SBX_EXIT.ok;
 }

@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { parseArgs } from 'node:util';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { MAX_STDIN_BYTES, q, WORKSPACE } from '@moca/sandbox-client';
@@ -24,8 +24,8 @@ import {
 import { type ExecFactory } from './exec.js';
 import { cmdMcp, cmdPut, cmdRun, parseTimeout, workspacePath } from './run.js';
 import { PushError, repoRoot } from './push.js';
-import { readBinding, SANDBOX_ID_RE } from './state.js';
-import { cmdPull, cmdPush, cmdUp, DEFAULT_TEMPLATE } from './sync.js';
+import { findSandboxFile, readBinding, readBoundSandbox, SANDBOX_ID_RE } from './state.js';
+import { cmdPull, cmdPush, cmdUp, DEFAULT_TEMPLATE, unbind } from './sync.js';
 
 export const SBX_USAGE = `usage (the sandbox service, SBX0):
   mocactl sbx login [--control-plane-url URL]    log in with the GitHub device flow (the URL is remembered)
@@ -34,7 +34,9 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
   mocactl sbx create [--template ID] [--name N] [--label k=v ...] [--json]
                                                  create a sandbox (template: default); prints its id
   mocactl sbx ls [--all] [--json]                your sandboxes (--all: everyone's; admins only)
-  mocactl sbx rm [ID] [--json]                   delete a sandbox
+  mocactl sbx rm [ID] [--keep-config] [--json]   delete a sandbox; for the bound one, also take
+                                                 back the agent configuration sbx up added, and
+                                                 .sbx/ (unless --keep-config)
   mocactl sbx token [ID] [--json]                print a fresh sandbox token (15 minutes by default)
   mocactl sbx env [ID]                           shell exports for a direct sandbox/v1 client
   mocactl sbx run [--sandbox ID] [--timeout S] [-- CMD ...]   run CMD (or the script on stdin) in /workspace
@@ -47,7 +49,12 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
   mocactl sbx mcp [--sandbox ID]                 the stdio MCP server for Claude Code / OpenCode
   mocactl sbx up [--template T] [--name N] [--include-secrets] [--max-push MiB] [--no-agent-config]
                                                  in a git repository: create or reuse its sandbox,
-                                                 push the working tree, bind it in .sbx/sandbox.json
+                                                 push the working tree, bind it in .sbx/sandbox.json,
+                                                 and point Claude Code and OpenCode at the sandbox's
+                                                 MCP tools with their local tools denied (merged
+                                                 into .mcp.json, .claude/settings.json,
+                                                 opencode.json, CLAUDE.md, AGENTS.md; a value there
+                                                 that conflicts stops up before anything is done)
                                                  (a reused sandbox with changes not yet pulled is
                                                  left unpushed, with a warning, and up exits 0)
   mocactl sbx push [--force] [--include-secrets] [--max-push MiB]   push the working tree again
@@ -174,6 +181,8 @@ export async function openSbx(
 
 /** The commands with no --json output (R5i): refused with exit 2 rather than ignored. */
 const NO_JSON = new Set(['login', 'logout', 'env', 'run', 'put', 'mcp', 'up', 'push', 'pull']);
+/** The commands that open without the login check: they log in, out, or check it themselves (R7). */
+const OWN_LOGIN = new Set(['login', 'logout']);
 /** The commands that act on one sandbox: `[ID]` as an argument (or `--sandbox ID`). */
 const TAKES_ID_ARG = new Set(['rm', 'token', 'env']);
 /** The commands that act on one sandbox through `--sandbox ID` only. */
@@ -182,7 +191,7 @@ const TAKES_SANDBOX_FLAG = new Set(['run', 'put', 'mcp', 'push', 'pull', ...TAKE
 const IN_REPO = new Set(['up', 'push', 'pull']);
 /** Flags that belong to some commands only: refused elsewhere rather than silently ignored. */
 const SYNC_FLAGS: [
-  'force' | 'include-secrets' | 'max-push' | 'apply' | 'out' | 'no-agent-config',
+  'force' | 'include-secrets' | 'max-push' | 'apply' | 'out' | 'no-agent-config' | 'keep-config',
   string[],
 ][] = [
   ['force', ['push']],
@@ -191,6 +200,7 @@ const SYNC_FLAGS: [
   ['apply', ['pull']],
   ['out', ['pull']],
   ['no-agent-config', ['up']],
+  ['keep-config', ['rm']],
 ];
 /** `--max-push` in MiB: up to 4 GiB, far above what a push should ever be. */
 const MAX_PUSH_MIB = 4096;
@@ -237,6 +247,7 @@ export async function sbxMain(
         apply: { type: 'boolean' },
         out: { type: 'string', short: 'o' },
         'no-agent-config': { type: 'boolean' },
+        'keep-config': { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
       },
     });
@@ -433,7 +444,7 @@ export async function sbxMain(
   const flagUrl = values['control-plane-url'] || (env.MOCACTL_SBX_URL ? undefined : boundUrl);
   const fromBinding = !values['control-plane-url'] && flagUrl !== undefined;
   const opened = await openSbx({ controlPlaneUrl: flagUrl }, env, io, deps, {
-    login: command === 'login' || command === 'logout',
+    login: OWN_LOGIN.has(command),
     ...(fromBinding ? { urlFrom: '.sbx/sandbox.json' } : {}),
   });
   if (typeof opened === 'number') return opened;
@@ -450,8 +461,14 @@ export async function sbxMain(
       return cmdCreate(ctx, createBody!);
     case 'ls':
       return cmdLs(ctx, values.all === true);
-    case 'rm':
-      return cmdRm(ctx, id!);
+    case 'rm': {
+      const code = await cmdRm(ctx, id!);
+      // The bound sandbox gone, its configuration goes too: `sbx rm` takes back what `up` added.
+      const f = findSandboxFile(deps.cwd ?? process.cwd());
+      if (code !== SBX_EXIT.ok || values['keep-config'] || !f) return code;
+      const bindingRoot = dirname(dirname(f));
+      return readBoundSandbox(bindingRoot) === id ? unbind(ctx, bindingRoot) : code;
+    }
     case 'token':
       return cmdToken(ctx, id!);
     case 'run':

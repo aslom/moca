@@ -10,9 +10,9 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { Exec } from '@moca/sandbox-client';
+import type { Exec, ExecConnOptions } from '@moca/sandbox-client';
 import { resolvePaths, saveAuth } from '../../src/config.js';
-import { sbxPaths } from '../../src/sbx/cli.js';
+import { sbxMain, sbxPaths } from '../../src/sbx/cli.js';
 
 /** The fakes `mocactl sbx`'s tests share: a scripted control plane, a login, a sandbox, a token. */
 
@@ -86,7 +86,20 @@ export function setup(opts: { loggedIn?: boolean; expired?: boolean } = { logged
   return { home, env, paths, io };
 }
 
-export const sandbox = (over: Record<string, unknown> = {}) => ({
+/** A sandbox as the control plane returns it (`SbxSandbox`, loosely typed for scripted bodies). */
+export type FakeSandbox = {
+  id: string;
+  owner: string;
+  name: string | null;
+  template: string;
+  state: string;
+  reason: string | null;
+  createdAt: number;
+  expiresAt: number;
+  terminatedAt: number | null;
+  labels: Record<string, string>;
+};
+export const sandbox = (over: Record<string, unknown> = {}): FakeSandbox => ({
   id: SBX,
   owner: 'github:1',
   name: 'web',
@@ -219,4 +232,109 @@ export function repo(): string {
   git(r, 'commit', '-qm', 'init');
   writeFileSync(join(r, 'notes.md'), 'untracked, not ignored\n');
   return r;
+}
+
+/** `mocactl sbx up`'s world: a control plane, one workspace per sandbox, a real repository. */
+export const OTHER = 'sbx-fedcba9876543210fedcba9876';
+export const NEW = 'sbx-aaaaaaaaaaaaaaaaaaaaaaaaaa';
+
+/**
+ * A control plane holding sandboxes: GET/list/create/token, every call recorded. `create` makes
+ * NEW (then NEW2…); `tokens` counts mints per id.
+ */
+export function controlPlane(initial: ReturnType<typeof sandbox>[] = []) {
+  const boxes = new Map<string, FakeSandbox>(initial.map((s) => [s.id, s]));
+  let created = 0;
+  const route = (key: string): Handler | undefined => {
+    const [method, path] = key.split(' ') as [string, string];
+    if (method === 'POST' && path === '/v1/sandboxes') {
+      return (req) => {
+        const b = req.body as { template: string; name?: string; labels?: Record<string, string> };
+        const id = created++ === 0 ? NEW : `${NEW.slice(0, -1)}${created}`;
+        const s = sandbox({
+          id,
+          template: b.template,
+          name: b.name ?? null,
+          labels: b.labels ?? {},
+        });
+        boxes.set(id, s);
+        return { status: 201, body: s };
+      };
+    }
+    if (method === 'GET' && path === '/v1/sandboxes') {
+      return () => ({ status: 200, body: { sandboxes: [...boxes.values()] } });
+    }
+    const m = /^\/v1\/sandboxes\/([^/]+)(\/token)?$/.exec(path);
+    if (!m) return undefined;
+    const s = boxes.get(m[1]!);
+    if (!s)
+      return () => ({
+        status: 404,
+        body: { error: 'sandbox_not_found', message: 'no such sandbox' },
+      });
+    if (method === 'GET' && !m[2]) return () => ({ status: 200, body: s });
+    if (method === 'DELETE' && !m[2]) {
+      return () => {
+        const reason: string = s.state === 'terminated' ? (s.reason ?? 'deleted') : 'deleted';
+        boxes.set(s.id, { ...s, state: 'terminated', reason });
+        return { status: 200, body: { id: s.id, state: 'terminated', reason } };
+      };
+    }
+    if (method === 'POST' && m[2]) {
+      return () =>
+        s.state === 'ready'
+          ? { status: 200, body: { ...TOKEN, wsk: s.id } }
+          : {
+              status: 409,
+              body: { error: 'sandbox_terminated', message: 'sandbox expired', reason: s.reason },
+            };
+    }
+    return undefined;
+  };
+  const cp = fakeCp(
+    new Proxy({}, { get: (_t, k) => (typeof k === 'string' ? route(k) : undefined) }),
+  );
+  return {
+    ...cp,
+    boxes,
+    posts: () => cp.calls.filter((c) => c.method === 'POST' && c.path === '/v1/sandboxes'),
+  };
+}
+
+/** One workspace per sandbox id, as the worker keeps them: the exec factory picks by `wsk`. */
+export function workspaces(o: Parameters<typeof localWorkspace>[0] = {}) {
+  const byId = new Map<string, ReturnType<typeof localWorkspace>>();
+  const get = (id: string) => {
+    if (!byId.has(id)) byId.set(id, localWorkspace(o));
+    return byId.get(id)!;
+  };
+  let opened = 0;
+  let closed = 0;
+  const factory = (c: ExecConnOptions) => {
+    opened++;
+    return { exec: get(c.workspaceKey).exec, close: () => void closed++ };
+  };
+  return { get, factory, counts: () => ({ opened, closed }) };
+}
+
+export function harness(
+  o: { boxes?: ReturnType<typeof sandbox>[]; ws?: Parameters<typeof localWorkspace>[0] } = {},
+) {
+  const s = setup();
+  const cp = controlPlane(o.boxes);
+  const ws = workspaces(o.ws);
+  const r = repo();
+  const run = (argv: string[], over: { cwd?: string; env?: Record<string, string> } = {}) => {
+    s.io.outs.length = 0;
+    s.io.errs.length = 0;
+    s.io.outB.length = 0;
+    return sbxMain(argv, over.env ?? s.env, s.io, {
+      home: s.home,
+      fetchImpl: cp.fetchImpl,
+      cwd: over.cwd ?? r,
+      execFactory: ws.factory,
+    });
+  };
+  const err = () => s.io.errs.join('\n');
+  return { ...s, cp, ws, r, run, err };
 }
