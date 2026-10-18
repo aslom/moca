@@ -1,0 +1,622 @@
+import { execFileSync, spawnSync } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readlinkSync,
+  statSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { join } from 'node:path';
+import { MAX_STDIN_BYTES } from '@moca/sandbox-client';
+import { afterEach, describe, expect, it } from 'vitest';
+import {
+  BUILD_EXCLUDES,
+  CHUNK_TARGET,
+  DEFAULT_MAX_PUSH,
+  MAX_FILE,
+  MAX_STDIN,
+  PushError,
+  advanceBaseline,
+  applyPatch,
+  bindingUrl,
+  capture,
+  capturePatch,
+  hasUnpulled,
+  planPush,
+  pushTree,
+  repoId,
+  repoRoot,
+  sandboxState,
+  writeBinding,
+} from '../src/sbx/push.js';
+import { readBinding } from '../src/sbx/state.js';
+import { SBX, cleanupTmp, git, localWorkspace, repo } from './helpers/sbx.js';
+
+afterEach(cleanupTmp);
+
+/** Skipped only off CI when the tool is missing: under CI the real-tool tests must run (R6f). */
+const missing = (cmd: string) => !process.env.CI && Boolean(spawnSync(cmd, ['--version']).error);
+
+/** Every file under `d` (not .git), with its kind, mode and content: a tree's fingerprint. */
+function snapshot(d: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  const files = execFileSync('find', ['.', '-path', './.git', '-prune', '-o', '-print0'], {
+    cwd: d,
+  })
+    .toString()
+    .split('\0')
+    .filter((f) => f && f !== '.' && f !== './.git');
+  for (const f of files) {
+    const p = join(d, f);
+    const st = lstatSync(p);
+    const key = f.slice(2).normalize('NFC');
+    if (st.isSymbolicLink()) out[key] = `link:${readlinkSync(p).normalize('NFC')}`;
+    else if (st.isFile()) out[key] = `${st.mode & 0o111 ? 'x' : '-'}:${readFileSync(p, 'hex')}`;
+  }
+  return out;
+}
+
+const pushed = async (r: string, o: Parameters<typeof localWorkspace>[0] = {}) => {
+  const w = localWorkspace(o);
+  await pushTree(w.exec, await planPush(r));
+  return w;
+};
+
+describe('the push list (SBX0 §6.2)', () => {
+  it('lists tracked files (even under an ignored dir) and untracked ones, never ignored ones or secrets', async () => {
+    const plan = await planPush(repo());
+    expect(plan.excludedSecrets.sort()).toEqual(['.env', 'id_rsa']);
+    // .gitignore, src/app.py, build/keep.txt, bin/run.sh, ünï.txt, latest, notes.md
+    expect(plan.paths.sort()).toEqual(
+      [
+        '.gitignore',
+        'bin/run.sh',
+        'build/keep.txt',
+        'dir with space/ünï.txt',
+        'latest',
+        'notes.md',
+        'src/app.py',
+      ].sort(),
+    );
+    expect(plan.files).toBe(7);
+    expect(plan.skipped).toEqual([]);
+  });
+
+  it('includes the secrets only when asked, and matches each pattern on the basename', async () => {
+    const r = repo();
+    mkdirSync(join(r, 'conf'));
+    for (const f of ['conf/.env.local', 'conf/tls.pem', 'conf/tls.key', 'conf/id_ed25519']) {
+      writeFileSync(join(r, f), 's');
+    }
+    writeFileSync(join(r, 'conf/keys.md'), 'not a secret');
+    const plan = await planPush(r);
+    expect(plan.excludedSecrets.sort()).toEqual(
+      [
+        '.env',
+        'conf/.env.local',
+        'conf/id_ed25519',
+        'conf/tls.key',
+        'conf/tls.pem',
+        'id_rsa',
+      ].sort(),
+    );
+    expect(plan.paths).toContain('conf/keys.md');
+    const all = await planPush(r, { includeSecrets: true });
+    expect(all.excludedSecrets).toEqual([]);
+    expect(all.paths).toEqual(expect.arrayContaining(['.env', 'id_rsa', 'conf/tls.key']));
+  });
+
+  it('skips a deleted tracked file silently, and names a nested repository it does not push', async () => {
+    const r = repo();
+    unlinkSync(join(r, 'src/app.py'));
+    mkdirSync(join(r, 'vendor/lib'), { recursive: true });
+    git(join(r, 'vendor/lib'), 'init', '-q');
+    writeFileSync(join(r, 'vendor/lib/x.c'), 'x');
+    const plan = await planPush(r);
+    expect(plan.paths).not.toContain('src/app.py');
+    expect(plan.skipped).toEqual([expect.stringMatching(/^vendor\/lib .*not pushed/)]);
+  });
+
+  it('never pushes .sbx/, even when it is not excluded', async () => {
+    const r = repo();
+    mkdirSync(join(r, '.sbx'));
+    writeFileSync(join(r, '.sbx/sandbox.json'), '{}');
+    expect((await planPush(r)).paths.some((p) => p.startsWith('.sbx/'))).toBe(false);
+  });
+
+  it('refuses a file over 12 MiB by name, and a tree over --max-push with its largest directories', async () => {
+    const r = repo();
+    writeFileSync(join(r, 'huge.bin'), Buffer.alloc(MAX_FILE + 1));
+    await expect(planPush(r)).rejects.toThrow(/huge\.bin \(12\.0 MiB\)/);
+    const small = repo();
+    const err = await planPush(small, { maxPush: 10 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PushError);
+    expect((err as Error).message).toMatch(/over the .* limit; largest: build|bin|src|\./);
+    expect((err as Error).message).toContain('--max-push');
+  });
+
+  it('is exactly at the limits it names', () => {
+    expect(CHUNK_TARGET).toBe(8 << 20);
+    expect(MAX_FILE).toBe(12 << 20);
+    expect(MAX_STDIN).toBe(MAX_STDIN_BYTES);
+    expect(DEFAULT_MAX_PUSH).toBe(256 << 20);
+    expect(BUILD_EXCLUDES).toEqual([
+      '__pycache__/',
+      '*.pyc',
+      'node_modules/',
+      '.venv/',
+      'venv/',
+      '.pytest_cache/',
+      '.mypy_cache/',
+      'dist/',
+      'build/',
+      'target/',
+    ]);
+  });
+
+  it('splits a large tree into several Execs, each under the stdin ceiling', async () => {
+    const r = repo();
+    for (let i = 0; i < 3; i++) {
+      writeFileSync(
+        join(r, `blob${i}.bin`),
+        Buffer.from(Array.from({ length: 5 << 20 }, () => Math.floor(Math.random() * 256))),
+      );
+    }
+    // One file just under the per-file limit, incompressible: its chunk is the largest possible.
+    writeFileSync(
+      join(r, 'big.bin'),
+      Buffer.from(Array.from({ length: MAX_FILE - 4096 }, () => Math.floor(Math.random() * 256))),
+    );
+    const plan = await planPush(r);
+    expect(plan.chunks.length).toBeGreaterThan(2);
+    for (const c of plan.chunks) expect(c.length).toBeLessThanOrEqual(MAX_STDIN);
+    const { ws, exec, sent } = localWorkspace();
+    await pushTree(exec, plan);
+    expect(sent.filter((s) => s.stdin && s.stdin.length > 0).length).toBeGreaterThan(
+      plan.chunks.length - 1,
+    );
+    for (const s of sent) expect(s.stdin?.length ?? 0).toBeLessThanOrEqual(MAX_STDIN_BYTES);
+    expect(statSync(join(ws, 'blob2.bin')).size).toBe(5 << 20);
+    expect(readFileSync(join(ws, 'big.bin'))).toEqual(readFileSync(join(r, 'big.bin')));
+    expect(await hasUnpulled(exec)).toBe(false);
+  }, 120_000);
+});
+
+describe('push into the sandbox (SBX0 §6.2)', () => {
+  it.skipIf(missing('tar'))(
+    'round-trips the tree with modes and symlinks, and commits a clean baseline (tar)',
+    async () => {
+      const r = repo();
+      const { ws, exec } = await pushed(r);
+      expect(readFileSync(join(ws, 'build/keep.txt'), 'utf8')).toBe(
+        'tracked under an ignored dir\n',
+      );
+      expect(existsSync(join(ws, 'build/out.o'))).toBe(false);
+      expect(existsSync(join(ws, '.env'))).toBe(false);
+      expect(statSync(join(ws, 'bin/run.sh')).mode & 0o111).not.toBe(0);
+      expect(statSync(join(ws, 'src/app.py')).mode & 0o111).toBe(0);
+      expect(readlinkSync(join(ws, 'latest'))).toBe('src/app.py');
+      expect(readFileSync(join(ws, 'dir with space/ünï.txt'), 'utf8')).toBe('u\n');
+      expect(await hasUnpulled(exec)).toBe(false);
+      // The baseline is exactly the pushed list: the tracked file under build/ is in it.
+      expect(git(ws, 'ls-files').split('\n')).toContain('build/keep.txt');
+      expect(readFileSync(join(ws, '.git/info/exclude'), 'utf8')).toContain('node_modules/\n');
+    },
+  );
+
+  it.skipIf(missing('python3'))('extracts with python3 when the sandbox has no tar', async () => {
+    const r = repo();
+    const { ws, exec, sent } = await pushed(r, { without: ['tar'] });
+    expect(sent[0]!.command).toContain('python3');
+    expect(readlinkSync(join(ws, 'latest'))).toBe('src/app.py');
+    expect(statSync(join(ws, 'bin/run.sh')).mode & 0o111).not.toBe(0);
+    expect(readFileSync(join(ws, 'dir with space/ünï.txt'), 'utf8')).toBe('u\n');
+    expect(await hasUnpulled(exec)).toBe(false);
+  });
+
+  it('empties the workspace on a re-push, keeping only lost+found', async () => {
+    const { ws, exec } = localWorkspace();
+    writeFileSync(join(ws, 'stale'), 'old');
+    mkdirSync(join(ws, 'lost+found'));
+    mkdirSync(join(ws, 'old dir/deep'), { recursive: true });
+    await pushTree(exec, await planPush(repo()));
+    expect(existsSync(join(ws, 'stale'))).toBe(false);
+    expect(existsSync(join(ws, 'old dir'))).toBe(false);
+    expect(existsSync(join(ws, 'lost+found'))).toBe(true);
+    expect(await hasUnpulled(exec)).toBe(false);
+  });
+
+  it('quotes every path it sends: a name with shell and pathspec syntax round-trips', async () => {
+    const r = repo();
+    for (const f of ["it's $(x) *.c", ':(exclude)src', '-n', 'tab\there'])
+      writeFileSync(join(r, f), f);
+    const { ws, exec } = await pushed(r);
+    for (const f of ["it's $(x) *.c", ':(exclude)src', '-n', 'tab\there']) {
+      expect(readFileSync(join(ws, f), 'utf8')).toBe(f);
+    }
+    expect(await hasUnpulled(exec)).toBe(false);
+  });
+});
+
+describe('the round trip: up -> sandbox -> pull (plan 1c Review Focus 1)', () => {
+  for (const [reader, without] of [
+    ['tar', []],
+    ['python3', ['tar']],
+  ] as const) {
+    it.skipIf(missing(reader))(
+      `brings back the agent's every kind of change, byte for byte (${reader})`,
+      async () => {
+        const r = repo();
+        const LONG = `${'long dir name/'.repeat(8)}fïle with a long name.txt`; // > 100 bytes
+        mkdirSync(join(r, LONG, '..'), { recursive: true });
+        writeFileSync(join(r, LONG), 'long\n');
+        writeFileSync(join(r, 'tool.sh'), '#!/bin/sh\n');
+        git(r, 'add', '-A');
+        git(r, 'commit', '-qm', 'more');
+        const { ws, exec } = await pushed(r, { without: [...without] });
+        // What the agent does in the sandbox:
+        writeFileSync(join(ws, 'src/app.py'), 'print(2)\n');
+        writeFileSync(join(ws, 'build/keep.txt'), 'edited under an ignored dir\n'); // R6b
+        writeFileSync(join(ws, 'dir with space/ünï.txt'), 'ü2\n');
+        mkdirSync(join(ws, 'nëw dir'));
+        writeFileSync(join(ws, 'nëw dir/文件 2.md'), 'new\n');
+        writeFileSync(join(ws, LONG), 'longer\n');
+        chmodSync(join(ws, 'tool.sh'), 0o755); // a mode-only change
+        chmodSync(join(ws, 'bin/run.sh'), 0o644);
+        unlinkSync(join(ws, 'latest'));
+        symlinkSync('bin/run.sh', join(ws, 'latest')); // a symlink retargeted
+        symlinkSync('src/app.py', join(ws, 'new link'));
+        writeFileSync(join(ws, 'bin.dat'), Buffer.from([0, 1, 2, 255, 0, 10]));
+        unlinkSync(join(ws, 'notes.md'));
+        mkdirSync(join(ws, 'node_modules/x'), { recursive: true });
+        writeFileSync(join(ws, 'node_modules/x/i.js'), 'build output');
+        writeFileSync(join(ws, 'build/new.o'), 'build output');
+        expect(await hasUnpulled(exec)).toBe(true);
+        const patch = await capturePatch(exec);
+        await applyPatch(r, patch);
+        // The local tree is now the sandbox's, apart from what is excluded on either side.
+        const local = snapshot(r);
+        const remote = snapshot(ws);
+        for (const k of ['build/out.o', '.env', 'id_rsa']) delete local[k]; // never pushed
+        for (const k of ['node_modules/x/i.js', 'build/new.o']) delete remote[k]; // build output
+        delete remote['lost+found'];
+        expect(local).toEqual(remote);
+        const hex = (t: string) => Buffer.from(t).toString('hex');
+        expect(local['build/keep.txt']).toBe(`-:${hex('edited under an ignored dir\n')}`);
+        expect(local['tool.sh']).toMatch(/^x:/);
+        expect(local['bin/run.sh']).toMatch(/^-:/);
+        expect(local['latest']).toBe('link:bin/run.sh');
+        expect(local[LONG]).toBe(`-:${hex('longer\n')}`);
+        expect(local['notes.md']).toBeUndefined();
+      },
+      60_000,
+    );
+  }
+});
+
+describe('pull (SBX0 §6.2, §10.3)', () => {
+  it("brings the sandbox's changes back as a patch that applies, then advances the baseline", async () => {
+    const r = repo();
+    const { ws, exec } = await pushed(r);
+    writeFileSync(join(ws, 'src/app.py'), 'print(2)\n');
+    writeFileSync(join(ws, 'src/new.py'), 'new\n');
+    expect(await hasUnpulled(exec)).toBe(true);
+    const { patch, tree } = await capture(exec);
+    await applyPatch(r, patch);
+    expect(readFileSync(join(r, 'src/app.py'), 'utf8')).toBe('print(2)\n');
+    expect(readFileSync(join(r, 'src/new.py'), 'utf8')).toBe('new\n');
+    // The plain path changes no index entry: the user's staging is theirs (R6c).
+    expect(git(r, 'status', '--porcelain', '--', 'src')).toBe(' M src/app.py\n?? src/new.py\n');
+    await advanceBaseline(exec, undefined, tree);
+    expect(await hasUnpulled(exec)).toBe(false);
+    expect((await capturePatch(exec)).length).toBe(0);
+  });
+
+  it('advances the baseline to what was captured, so a change made meanwhile is pulled next time', async () => {
+    const r = repo();
+    const { ws, exec } = await pushed(r);
+    writeFileSync(join(ws, 'src/app.py'), 'print(2)\n');
+    const { patch, tree } = await capture(exec);
+    writeFileSync(join(ws, 'src/late.py'), 'late\n'); // the agent keeps working
+    await applyPatch(r, patch);
+    await advanceBaseline(exec, undefined, tree);
+    expect(await hasUnpulled(exec)).toBe(true);
+    const next = (await capturePatch(exec)).toString();
+    expect(next).toContain('src/late.py');
+    expect(next).not.toContain('src/app.py');
+  });
+
+  it("counts the agent's own commits as not yet pulled, and brings them back", async () => {
+    const r = repo();
+    const { ws, exec } = await pushed(r);
+    writeFileSync(join(ws, 'src/app.py'), 'print(3)\n');
+    git(ws, '-c', 'user.name=a', '-c', 'user.email=a@example.invalid', 'commit', '-qam', 'agent');
+    expect(git(ws, 'status', '--porcelain')).toBe(''); // git status alone would say clean
+    expect(await hasUnpulled(exec)).toBe(true);
+    const { patch, tree } = await capture(exec);
+    expect(patch.toString()).toContain('+print(3)');
+    await applyPatch(r, patch);
+    await advanceBaseline(exec, undefined, tree);
+    expect(await hasUnpulled(exec)).toBe(false);
+    expect(git(ws, 'log', '-1', '--format=%s')).toBe('agent\n'); // its HEAD is left alone
+  });
+
+  it('never brings back a .sbx/ the agent wrote, which would repoint the binding', async () => {
+    const { ws, exec } = await pushed(repo());
+    mkdirSync(join(ws, '.sbx'));
+    writeFileSync(join(ws, '.sbx/sandbox.json'), '{"id":"sbx-evil"}');
+    expect((await capturePatch(exec)).toString()).toBe('');
+  });
+
+  it("refuses a patch that would write the repository's .sbx/ binding", async () => {
+    const r = repo();
+    writeBinding(r, {
+      id: SBX,
+      controlPlaneUrl: 'https://sbx-api.example.invalid',
+      template: 'default',
+    });
+    const { ws, exec } = await pushed(r);
+    // An agent that takes .sbx/ out of the sandbox's exclude and writes a binding of its own.
+    writeFileSync(join(ws, '.git/info/exclude'), '');
+    mkdirSync(join(ws, '.sbx'));
+    writeFileSync(join(ws, '.sbx/sandbox.json'), '{"id":"sbx-evil"}');
+    writeFileSync(join(ws, 'src/app.py'), 'print(2)\n');
+    const patch = await capturePatch(exec);
+    expect(patch.toString()).toContain('.sbx/sandbox.json');
+    await expect(applyPatch(r, patch)).rejects.toThrow(
+      /\.sbx\/sandbox\.json, this repository's sandbox binding/,
+    );
+    expect(readBinding(r)?.id).toBe(SBX);
+    expect(readFileSync(join(r, 'src/app.py'), 'utf8')).toBe('print(1)\n');
+  });
+
+  it('refuses a malformed patch with a readable error, changing nothing', async () => {
+    const r = repo();
+    await expect(
+      applyPatch(r, Buffer.from('diff --git a/x b/x\ngarbage\n')),
+    ).rejects.toBeInstanceOf(PushError);
+    expect(git(r, 'status', '--porcelain', '--', 'src')).toBe('');
+  });
+
+  it('never brings back build output the baseline excludes', async () => {
+    const { ws, exec } = await pushed(repo());
+    mkdirSync(join(ws, 'src/__pycache__'));
+    writeFileSync(join(ws, 'src/__pycache__/app.cpython-312.pyc'), 'x');
+    expect((await capturePatch(exec)).toString()).toBe('');
+  });
+
+  it('refuses a truncated patch (over the 8 MiB output cap), never returning part of it', async () => {
+    const r = repo();
+    const { ws, exec } = await pushed(r, { capBytes: 200 });
+    writeFileSync(join(ws, 'src/app.py'), 'x'.repeat(1000));
+    await expect(capturePatch(exec)).rejects.toThrow(/over 8 MiB/);
+    await expect(capture(exec)).rejects.toBeInstanceOf(PushError);
+  });
+
+  it('says plainly when the sandbox has no baseline (never pushed, or a push cut short)', async () => {
+    const { ws, exec } = localWorkspace();
+    expect(await hasUnpulled(exec)).toBe(false); // empty: nothing to lose
+    mkdirSync(join(ws, 'lost+found'));
+    git(ws, 'init', '-q'); // a bare .git (a push cut short after init) holds no work either
+    expect(await sandboxState(exec)).toBe('empty');
+    writeFileSync(join(ws, 'agent-work.txt'), 'x');
+    expect(await hasUnpulled(exec)).toBe(true); // files, but no baseline: never discarded unasked
+    await expect(capturePatch(exec)).rejects.toThrow(/no baseline/);
+  });
+
+  it('refuses to pull from a push that did not finish, and a later push repairs it', async () => {
+    const r = repo();
+    const { exec, sent } = localWorkspace();
+    const plan = await planPush(r);
+    // The first chunk lands, then the connection drops before the baseline commit.
+    let n = 0;
+    const flaky: typeof exec = async (command, o) => {
+      if (++n === 2) throw new Error('connection dropped');
+      return exec(command, o);
+    };
+    await expect(pushTree(flaky, plan)).rejects.toThrow(/connection dropped/);
+    expect(sent).toHaveLength(1);
+    expect(await sandboxState(exec)).toBe('incomplete');
+    expect(await hasUnpulled(exec)).toBe(false); // it emptied the workspace: nothing to lose
+    await expect(capturePatch(exec)).rejects.toThrow(/did not finish/);
+    await pushTree(exec, plan);
+    expect(await sandboxState(exec)).toBe('clean');
+  });
+
+  it('reports a failing sandbox command with its stderr', async () => {
+    const { exec } = localWorkspace({ without: ['git'] });
+    await expect(pushTree(exec, await planPush(repo()))).rejects.toThrow(
+      /the push \(part 1 of 1\) failed in the sandbox: .*git: command not found/,
+    );
+  });
+});
+
+describe('applyPatch on a dirty local tree (plan 1c R6c)', () => {
+  /** A repo pushed, with the agent's edit of src/app.py and a new file, and the patch for them. */
+  async function agentEdit(o: { untracked?: boolean } = {}) {
+    const r = repo();
+    const { ws, exec } = await pushed(r);
+    writeFileSync(join(ws, 'src/app.py'), 'print(2)\n');
+    if (o.untracked !== false) {
+      writeFileSync(join(ws, 'notes.md'), 'agent edit of an untracked file\n');
+    }
+    return { r, ws, exec, patch: await capturePatch(exec) };
+  }
+
+  it('applies beside an uncommitted local edit in a file the patch does not touch', async () => {
+    const { r, patch } = await agentEdit();
+    writeFileSync(join(r, 'bin/run.sh'), '#!/bin/sh\necho local\n');
+    git(r, 'add', 'bin/run.sh'); // staged, even
+    const index = git(r, 'ls-files', '--stage');
+    await applyPatch(r, patch);
+    expect(readFileSync(join(r, 'src/app.py'), 'utf8')).toBe('print(2)\n');
+    expect(readFileSync(join(r, 'bin/run.sh'), 'utf8')).toBe('#!/bin/sh\necho local\n');
+    expect(git(r, 'ls-files', '--stage')).toBe(index); // the index is untouched
+  });
+
+  it('applies to a file that is untracked locally', async () => {
+    const { r, patch } = await agentEdit();
+    await applyPatch(r, patch);
+    expect(readFileSync(join(r, 'notes.md'), 'utf8')).toBe('agent edit of an untracked file\n');
+    expect(git(r, 'status', '--porcelain', '--', 'notes.md')).toBe('?? notes.md\n');
+  });
+
+  it('refuses a patch over a file with an uncommitted local edit, changing nothing', async () => {
+    const { r, patch } = await agentEdit();
+    writeFileSync(join(r, 'src/app.py'), 'print("local")\n');
+    const before = snapshot(r);
+    const index = git(r, 'ls-files', '--stage');
+    const err = await applyPatch(r, patch).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PushError);
+    expect((err as Error).message).toMatch(/src\/app\.py/);
+    expect((err as Error).message).toMatch(/nothing was changed/);
+    expect(snapshot(r)).toEqual(before); // never half-applied: notes.md is untouched too
+    expect(git(r, 'ls-files', '--stage')).toBe(index);
+  });
+
+  it('falls back to a 3-way merge for a committed local change near the hunk', async () => {
+    const lines = Array.from({ length: 9 }, (_, i) => `line ${i + 1}`);
+    const { r, ws, exec } = await (async () => {
+      const r = repo();
+      writeFileSync(join(r, 'src/m.txt'), lines.join('\n') + '\n');
+      git(r, 'add', 'src/m.txt');
+      git(r, 'commit', '-qm', 'm');
+      return { r, ...(await pushed(r)) };
+    })();
+    writeFileSync(
+      join(ws, 'src/m.txt'),
+      lines.map((l, i) => (i === 2 ? 'AGENT' : l)).join('\n') + '\n',
+    );
+    writeFileSync(join(ws, 'src/added.py'), 'added\n');
+    const patch = await capturePatch(exec);
+    // Locally, line 5 changed and was committed: the plain apply's context no longer matches.
+    writeFileSync(
+      join(r, 'src/m.txt'),
+      lines.map((l, i) => (i === 4 ? 'LOCAL' : l)).join('\n') + '\n',
+    );
+    git(r, 'commit', '-qam', 'local');
+    const index = git(r, 'ls-files', '--stage');
+    await applyPatch(r, patch);
+    expect(readFileSync(join(r, 'src/m.txt'), 'utf8')).toContain('AGENT');
+    expect(readFileSync(join(r, 'src/m.txt'), 'utf8')).toContain('LOCAL');
+    expect(readFileSync(join(r, 'src/added.py'), 'utf8')).toBe('added\n');
+    // The merge staged its paths; they are put back, so the index is as it was.
+    expect(git(r, 'ls-files', '--stage')).toBe(index);
+    expect(git(r, 'status', '--porcelain', '--', 'src')).toBe(' M src/m.txt\n?? src/added.py\n');
+  });
+
+  it('names the files left with conflict markers when the 3-way merge conflicts', async () => {
+    const { r, patch } = await agentEdit({ untracked: false });
+    writeFileSync(join(r, 'src/app.py'), 'print("local")\n');
+    git(r, 'commit', '-qam', 'local');
+    const err = await applyPatch(r, patch).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PushError);
+    expect((err as Error).message).toMatch(/conflict.*src\/app\.py/);
+    expect((err as Error).message).toMatch(/push --force/);
+    expect(readFileSync(join(r, 'src/app.py'), 'utf8')).toMatch(/<<<<<<< ours/);
+  });
+
+  it('tries no 3-way merge while a touched file has uncommitted changes, naming both kinds', async () => {
+    const { r, patch } = await agentEdit(); // touches src/app.py and the untracked notes.md
+    writeFileSync(join(r, 'src/app.py'), 'print("local")\n');
+    git(r, 'commit', '-qam', 'local'); // committed: alone, a 3-way merge would be tried
+    const before = snapshot(r);
+    const err = await applyPatch(r, patch).catch((e: unknown) => e);
+    expect((err as Error).message).toMatch(/not yet committed \(notes\.md\)/);
+    expect((err as Error).message).toMatch(/does not apply to src\/app\.py as committed/);
+    expect(snapshot(r)).toEqual(before);
+    expect(git(r, 'status', '--porcelain', '--', 'src')).toBe('');
+  });
+});
+
+describe('the repository and its binding (SBX0 §6.1)', () => {
+  it('binds the repository, excluding .sbx/ through .git/info/exclude, never .gitignore', async () => {
+    const r = repo();
+    writeBinding(r, {
+      id: SBX,
+      controlPlaneUrl: 'https://sbx-api.example.invalid',
+      template: 'default',
+    });
+    expect(JSON.parse(readFileSync(join(r, '.sbx/sandbox.json'), 'utf8'))).toEqual({
+      id: SBX,
+      controlPlaneUrl: 'https://sbx-api.example.invalid',
+      template: 'default',
+    });
+    // What every later command reads back: the id and the URL (BINDING_URL_RE).
+    expect(readBinding(join(r, 'src'))).toEqual({
+      id: SBX,
+      controlPlaneUrl: 'https://sbx-api.example.invalid',
+    });
+    expect(readFileSync(join(r, '.git/info/exclude'), 'utf8')).toContain('.sbx/');
+    expect(readFileSync(join(r, '.gitignore'), 'utf8')).toBe('build/\n');
+    writeBinding(r, {
+      id: 'sbx-x',
+      controlPlaneUrl: 'https://other.example.invalid',
+      template: 't',
+    });
+    expect(readFileSync(join(r, '.git/info/exclude'), 'utf8').match(/\.sbx\//g)).toHaveLength(1);
+    expect(git(r, 'status', '--porcelain')).not.toContain('.sbx'); // excluded
+  });
+
+  it('binds a linked worktree through the common info/exclude', async () => {
+    const r = repo();
+    const wt = join(r, '..', `${r.split('/').pop()}-wt`);
+    git(r, 'worktree', 'add', '-q', wt);
+    try {
+      writeBinding(wt, {
+        id: SBX,
+        controlPlaneUrl: 'https://sbx-api.example.invalid',
+        template: 'default',
+      });
+      expect(git(wt, 'status', '--porcelain')).not.toContain('.sbx');
+      expect(existsSync(join(wt, '.sbx/sandbox.json'))).toBe(true);
+      expect(readBinding(wt)?.id).toBe(SBX);
+    } finally {
+      git(r, 'worktree', 'remove', '--force', wt);
+    }
+  });
+
+  it('refuses a binding later commands would ignore: a non-ASCII or non-http URL, a bad id', () => {
+    const r = repo();
+    expect(() => writeBinding(r, { id: SBX, controlPlaneUrl: 'u', template: 't' })).toThrow(
+      PushError,
+    );
+    expect(() =>
+      writeBinding(r, { id: '../x', controlPlaneUrl: 'https://a.example.invalid', template: 't' }),
+    ).toThrow(PushError);
+    expect(existsSync(join(r, '.sbx'))).toBe(false);
+    expect(bindingUrl('https://sbx-api.example.invalid/base')).toBe(
+      'https://sbx-api.example.invalid/base',
+    );
+    expect(() => bindingUrl('https://bücher.example.invalid')).toThrow(
+      /xn--bcher-kva\.example\.invalid/,
+    );
+    expect(() => bindingUrl('ftp://a.example.invalid')).toThrow(PushError);
+    expect(() => bindingUrl('https://a.example.invalid/\u001b]52;c;x\u0007')).toThrow(PushError);
+  });
+
+  it('derives a stable repository id from the origin URL, else the root', async () => {
+    const r = repo();
+    const bare = await repoId(r);
+    expect(bare).toMatch(/^[0-9a-f]{16}$/);
+    git(r, 'remote', 'add', 'origin', 'https://example.invalid/team/app.git');
+    const withOrigin = await repoId(r);
+    expect(withOrigin).toMatch(/^[0-9a-f]{16}$/);
+    expect(withOrigin).not.toBe(bare);
+    expect(await repoId(r)).toBe(withOrigin);
+    const other = repo();
+    git(other, 'remote', 'add', 'origin', 'https://example.invalid/team/app.git');
+    expect(await repoId(other)).toBe(withOrigin); // the same project in another clone
+  });
+
+  it('finds the repository root from a subdirectory, and refuses outside a repository', async () => {
+    const r = repo();
+    expect(await repoRoot(join(r, 'src'))).toBe(r);
+    await expect(repoRoot('/')).rejects.toThrow(/not inside a git repository/);
+  });
+});

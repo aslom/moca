@@ -1,6 +1,16 @@
-import { mkdtempSync } from 'node:fs';
+import { execFile, execFileSync, spawnSync } from 'node:child_process';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { Exec } from '@moca/sandbox-client';
 import { resolvePaths, saveAuth } from '../../src/config.js';
 import { sbxPaths } from '../../src/sbx/cli.js';
 
@@ -105,3 +115,108 @@ export const TOKEN = {
   wsk: SBX,
   execCa: null,
 };
+
+/** Temp directories made by `localWorkspace` and `repo`, removed by `cleanupTmp` (afterEach). */
+const made: string[] = [];
+export function cleanupTmp(): void {
+  for (const d of made.splice(0)) rmSync(d, { recursive: true, force: true });
+}
+function tmp(prefix: string): string {
+  const d = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  made.push(d);
+  return d;
+}
+
+/**
+ * The tools a sandbox Exec may need, linked into a bin directory of their own, so a test can take
+ * one away (`without: ['tar']`: the Python fallback). `python3` is resolved to its real binary
+ * (a pyenv shim needs pyenv on PATH).
+ */
+function toolDir(without: string[]): string {
+  const bin = tmp('sbx-bin-');
+  const tools = ['bash', 'sh', 'git', 'tar', 'gzip', 'find', 'rm', 'mkdir', 'mktemp', 'mv', 'head'];
+  for (const t of [...tools, 'cat', 'wc', 'ls', 'env', 'dirname', 'basename', 'sed', 'tr']) {
+    if (without.includes(t)) continue;
+    const r = spawnSync('bash', ['-c', `command -v ${t}`], { encoding: 'utf8' });
+    if (r.status === 0) symlinkSync(r.stdout.trim(), join(bin, t));
+  }
+  if (!without.includes('python3')) {
+    const r = spawnSync('python3', ['-c', 'import sys;print(sys.executable)'], {
+      encoding: 'utf8',
+    });
+    if (r.status === 0) symlinkSync(r.stdout.trim(), join(bin, 'python3'));
+  }
+  return bin;
+}
+
+/**
+ * A temp directory standing in for /workspace: each command runs in a real bash with `/workspace`
+ * rewritten to it, as the worker would run it. `capBytes` cuts stdout as the worker's 8 MiB cap
+ * does (`truncated`); `without` hides tools from PATH; `sent` records every command and stdin.
+ */
+export function localWorkspace(o: { capBytes?: number; without?: string[] } = {}) {
+  const ws = tmp('sbx-ws-');
+  const env = o.without?.length ? { ...process.env, PATH: toolDir(o.without) } : process.env;
+  const sent: { command: string; stdin?: Buffer; timeoutS?: number }[] = [];
+  const exec: Exec = (command, x = {}) =>
+    new Promise((resolve) => {
+      sent.push({
+        command,
+        ...(x.stdin ? { stdin: Buffer.from(x.stdin) } : {}),
+        ...(x.timeoutS !== undefined ? { timeoutS: x.timeoutS } : {}),
+      });
+      const child = execFile(
+        'bash',
+        ['-c', command.replaceAll('/workspace', ws)],
+        { encoding: 'buffer', maxBuffer: 512 << 20, env },
+        (err, stdout, stderr) => {
+          const code = err ? (err as { code?: unknown }).code : 0;
+          const cut = o.capBytes !== undefined && stdout.length > o.capBytes;
+          resolve({
+            stdout: cut ? stdout.subarray(0, o.capBytes) : stdout,
+            stderr,
+            exitCode: typeof code === 'number' ? code : -1,
+            truncated: cut,
+          });
+        },
+      );
+      child.stdin!.end(x.stdin ? Buffer.from(x.stdin) : undefined);
+    });
+  return { ws, exec, sent };
+}
+
+/** Runs git in `cwd`, returning stdout as text. */
+export const git = (cwd: string, ...args: string[]): string =>
+  execFileSync('git', args, { cwd, encoding: 'utf8' });
+
+/**
+ * A real repository with what a push must get right (plan 1c Review Focus 1): a space and unicode
+ * in names, an executable, a symlink, a tracked file under a .gitignore'd directory, an ignored
+ * file, an untracked file, and two untracked would-be secrets.
+ */
+export function repo(): string {
+  const r = tmp('sbx-repo-');
+  git(r, 'init', '-q');
+  git(r, 'config', 'user.email', 't@example.invalid');
+  git(r, 'config', 'user.name', 't');
+  git(r, 'config', 'commit.gpgSign', 'false');
+  mkdirSync(join(r, 'src'));
+  writeFileSync(join(r, 'src/app.py'), 'print(1)\n');
+  writeFileSync(join(r, '.gitignore'), 'build/\n');
+  mkdirSync(join(r, 'build'));
+  writeFileSync(join(r, 'build/keep.txt'), 'tracked under an ignored dir\n');
+  writeFileSync(join(r, 'build/out.o'), 'ignored\n');
+  mkdirSync(join(r, 'bin'));
+  writeFileSync(join(r, 'bin/run.sh'), '#!/bin/sh\necho run\n');
+  chmodSync(join(r, 'bin/run.sh'), 0o755);
+  mkdirSync(join(r, 'dir with space'));
+  writeFileSync(join(r, 'dir with space/ünï.txt'), 'u\n');
+  symlinkSync('src/app.py', join(r, 'latest'));
+  writeFileSync(join(r, '.env'), 'SECRET=1\n');
+  writeFileSync(join(r, 'id_rsa'), 'key\n');
+  git(r, 'add', 'src', '.gitignore', 'bin', 'dir with space', 'latest');
+  git(r, 'add', '-f', 'build/keep.txt');
+  git(r, 'commit', '-qm', 'init');
+  writeFileSync(join(r, 'notes.md'), 'untracked, not ignored\n');
+  return r;
+}
