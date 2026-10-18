@@ -386,6 +386,25 @@ function addKey(doc: Doc, path: JsonPath, value: unknown): void {
   let v = value;
   for (let j = path.length - 1; j > i; j--) v = { [path[j]!]: v };
   edit(doc, (t) => append(t, path.slice(0, i), path[i]!, v, doc.style));
+  holds(doc, path, value);
+}
+
+/**
+ * The guard after every addition: the document, as an agent would parse it, holds `value` at
+ * `path` (as the last item, for a list). An edit that parses but put the member somewhere else (in
+ * a comment, say) is refused here, before anything is written.
+ */
+function holds(doc: Doc, path: JsonPath, value: unknown, item = false): void {
+  const v = at(doc.data, path);
+  const ok = item ? Array.isArray(v) && same(v[v.length - 1], value) : same(v, value);
+  if (!ok) {
+    throw new ConfigConflict(
+      doc.rel,
+      path.join('.'),
+      'could not be edited safely (the new value would not be read where it was written)',
+      EDIT_HINT,
+    );
+  }
 }
 
 function dropAt(doc: Doc, path: (string | number)[]): void {
@@ -431,7 +450,10 @@ function addItems(doc: Doc, path: JsonPath, values: unknown[], recs: JsonRec[]):
     recordMissing(doc, path, recs);
     addKey(doc, path, values);
   } else {
-    for (const v of values) edit(doc, (t) => append(t, path, undefined, v, doc.style));
+    for (const v of values) {
+      edit(doc, (t) => append(t, path, undefined, v, doc.style));
+      holds(doc, path, v, true);
+    }
   }
   for (const v of values) recs.push({ file: doc.rel, op: 'item', path, value: v });
 }

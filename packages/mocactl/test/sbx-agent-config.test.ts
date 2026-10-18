@@ -311,6 +311,17 @@ describe('agent configuration (SBX0 §6.3)', () => {
     expect(err.message).toContain(`opencode.json: ${key}`);
   });
 
+  it('puts new members after a multi-line block comment, not inside it (review round 2)', () => {
+    const d = dir();
+    const oc = '{\n  "model": "x" /* a\n  b */\n}\n';
+    writeFileSync(join(d, 'opencode.json'), oc);
+    writeAgentConfig(d);
+    expect(checkAgentConfig(d)).toEqual([]);
+    expect(text(d, 'opencode.json').startsWith('{\n  "model": "x", /* a\n  b */\n')).toBe(true);
+    removeAgentConfig(d);
+    expect(text(d, 'opencode.json')).toBe(oc);
+  });
+
   it('accepts OpenCode overrides that keep the local tools off', () => {
     const d = dir();
     const body = {

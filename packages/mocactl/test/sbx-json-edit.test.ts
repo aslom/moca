@@ -110,6 +110,15 @@ describe('style-keeping JSON edits', () => {
       ['mcp'],
     ],
     ['a block comment before the end', '{\n  "a": 1 /* c */\n}\n', []],
+    // Review round 2: new members never land inside a comment that spans lines.
+    ['a multi-line block comment after the last member', '{\n  "model": "x" /* a\n  b */\n}\n', []],
+    ['the same, with a trailing comma', '{\n  "model": "x", /* a\n  b */\n}\n', []],
+    [
+      'a multi-line block comment, nested',
+      '{\n  "t": {\n    "s": true /* a\n    b */\n  }\n}\n',
+      ['t'],
+    ],
+    ['a line comment after a block comment', '{\n  "a": 1 /* x */ // y\n}\n', []],
     ['the closing brace on the line', '{\n  "a": 1 // c\n  }', []],
   ])('round-trips byte for byte: %s', (_n, text, path) => {
     const s = styleOf(text);
