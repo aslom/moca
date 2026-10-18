@@ -301,6 +301,22 @@ describe('mocactl sbx push and pull (SBX0 §6.2, §10.3)', () => {
     expect(h.err()).toMatch(new RegExp(`pushed 7 files \\(0\\.0 MiB\\) to ${NEW}`));
   });
 
+  it("push is refused over the agent's new file in a source directory named build (review C1)", async () => {
+    const h = harness();
+    mkdirSync(join(h.r, 'src/main/java/acme/build'), { recursive: true });
+    writeFileSync(join(h.r, 'src/main/java/acme/build/Old.java'), 'class Old {}\n');
+    git(h.r, 'add', '-f', 'src');
+    git(h.r, 'commit', '-qm', 'java');
+    expect(await h.run(['up'])).toBe(0);
+    const ws = h.ws.get(NEW).ws;
+    writeFileSync(join(ws, 'src/main/java/acme/build/New.java'), 'class New {}\n');
+    expect(await h.run(['push'])).toBe(1);
+    expect(h.err()).toContain('changes not yet pulled');
+    expect(readFileSync(join(ws, 'src/main/java/acme/build/New.java'), 'utf8')).toBe(
+      'class New {}\n',
+    );
+  });
+
   it('push --max-push and --include-secrets', async () => {
     const h = harness();
     expect(await h.run(['up'])).toBe(0);

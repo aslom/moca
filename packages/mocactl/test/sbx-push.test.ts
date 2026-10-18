@@ -30,6 +30,7 @@ import {
   planPush,
   pushTree,
   repoId,
+  reincludes,
   repoRoot,
   sandboxState,
   writeBinding,
@@ -275,7 +276,8 @@ describe('the round trip: up -> sandbox -> pull (plan 1c Review Focus 1)', () =>
         unlinkSync(join(ws, 'notes.md'));
         mkdirSync(join(ws, 'node_modules/x'), { recursive: true });
         writeFileSync(join(ws, 'node_modules/x/i.js'), 'build output');
-        writeFileSync(join(ws, 'build/new.o'), 'build output');
+        mkdirSync(join(ws, 'dist'));
+        writeFileSync(join(ws, 'dist/new.o'), 'build output');
         expect(await hasUnpulled(exec)).toBe(true);
         const patch = await capturePatch(exec);
         await applyPatch(r, patch);
@@ -283,7 +285,7 @@ describe('the round trip: up -> sandbox -> pull (plan 1c Review Focus 1)', () =>
         const local = snapshot(r);
         const remote = snapshot(ws);
         for (const k of ['build/out.o', '.env', 'id_rsa']) delete local[k]; // never pushed
-        for (const k of ['node_modules/x/i.js', 'build/new.o']) delete remote[k]; // build output
+        for (const k of ['node_modules/x/i.js', 'dist/new.o']) delete remote[k]; // build output
         delete remote['lost+found'];
         expect(local).toEqual(remote);
         const hex = (t: string) => Buffer.from(t).toString('hex');
@@ -297,6 +299,90 @@ describe('the round trip: up -> sandbox -> pull (plan 1c Review Focus 1)', () =>
       60_000,
     );
   }
+});
+
+describe('directories named like build output that hold source (review C1)', () => {
+  /** A Java package named `build` (tracked), and a top-level build/ that really is output. */
+  function javaRepo() {
+    const r = repo();
+    mkdirSync(join(r, 'src/main/java/acme/build'), { recursive: true });
+    writeFileSync(join(r, 'src/main/java/acme/build/Old.java'), 'class Old {}\n');
+    git(r, 'add', '-f', 'src');
+    git(r, 'commit', '-qm', 'java');
+    return r;
+  }
+
+  it("counts the agent's new file there as not yet pulled, pulls it, and a push is refused", async () => {
+    const r = javaRepo();
+    const { ws, exec } = await pushed(r);
+    expect(await hasUnpulled(exec)).toBe(false);
+    writeFileSync(join(ws, 'src/main/java/acme/build/New.java'), 'class New {}\n');
+    mkdirSync(join(ws, 'src/main/java/acme/build/sub'));
+    writeFileSync(join(ws, 'src/main/java/acme/build/sub/Deep.java'), 'class Deep {}\n');
+    expect(await hasUnpulled(exec)).toBe(true);
+    const patch = (await capturePatch(exec)).toString();
+    expect(patch).toContain('src/main/java/acme/build/New.java');
+    expect(patch).toContain('src/main/java/acme/build/sub/Deep.java');
+    // And so a push (without --force) would be refused rather than discard it.
+  });
+
+  it("beats the repository's own .gitignore for that directory, as the push did", async () => {
+    const r = javaRepo(); // .gitignore has build/, which matches acme/build/ too
+    const { ws, exec } = await pushed(r);
+    writeFileSync(join(ws, 'src/main/java/acme/build/New.java'), 'class New {}\n');
+    expect(await hasUnpulled(exec)).toBe(true);
+    const { patch, tree } = await capture(exec);
+    expect(patch.toString()).toContain('New.java');
+    await applyPatch(r, patch);
+    await advanceBaseline(exec, undefined, tree);
+    expect(await hasUnpulled(exec)).toBe(false);
+    expect(readFileSync(join(r, 'src/main/java/acme/build/New.java'), 'utf8')).toBe(
+      'class New {}\n',
+    );
+  });
+
+  it('keeps real build output excluded: node_modules/ inside the package, an untracked build/, dist/ with a .gitkeep', async () => {
+    const r = javaRepo();
+    mkdirSync(join(r, 'dist'));
+    writeFileSync(join(r, 'dist/.gitkeep'), '');
+    git(r, 'add', '-f', 'dist/.gitkeep');
+    git(r, 'commit', '-qm', 'keep');
+    const { ws, exec } = await pushed(r);
+    writeFileSync(join(ws, 'dist/bundle.js'), 'output');
+    mkdirSync(join(ws, 'src/main/java/acme/build/node_modules'));
+    writeFileSync(join(ws, 'src/main/java/acme/build/node_modules/x.js'), 'output');
+    mkdirSync(join(ws, 'other/build'), { recursive: true });
+    writeFileSync(join(ws, 'other/build/y.o'), 'output');
+    expect(await hasUnpulled(exec)).toBe(false);
+    expect((await capturePatch(exec)).toString()).toBe('');
+  });
+
+  it('re-includes exactly the build-named directories that hold pushed paths, literally', () => {
+    expect(
+      reincludes([
+        'src/main/java/acme/build/Old.java',
+        'build/keep.txt',
+        'a/node_modules/b/dist/c.js',
+        'we ird*/target/x',
+        'src/app.py',
+      ]),
+    ).toEqual([
+      '!/a/node_modules/',
+      '!/a/node_modules/b/dist/',
+      '!/build/',
+      '!/src/main/java/acme/build/',
+      '!/we\\ ird\\*/target/',
+    ]);
+    expect(reincludes(['dist/.gitkeep', 'out/build/.keep'])).toEqual([]);
+  });
+
+  it('treats a build-named directory holding a tracked file as source: new files there come back', async () => {
+    const r = repo(); // build/keep.txt is tracked under the ignored build/
+    const { ws, exec } = await pushed(r);
+    writeFileSync(join(ws, 'build/notes.txt'), 'the agent wrote this\n');
+    expect(await hasUnpulled(exec)).toBe(true);
+    expect((await capturePatch(exec)).toString()).toContain('build/notes.txt');
+  });
 });
 
 describe('pull (SBX0 §6.2, §10.3)', () => {

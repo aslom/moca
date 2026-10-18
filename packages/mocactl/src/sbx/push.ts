@@ -49,6 +49,39 @@ export const BUILD_EXCLUDES = [
  * agent's `.sbx/sandbox.json` must never come back in a patch and repoint it.
  */
 const SANDBOX_EXCLUDES = [...BUILD_EXCLUDES, '.sbx/', '/lost+found/'];
+/** Files kept only so git keeps a directory: they do not make it source. */
+const PLACEHOLDERS = new Set(['.gitkeep', '.keep', '.gitignore']);
+/** The directory names BUILD_EXCLUDES leaves out, at any depth. */
+const BUILD_DIRS = new Set(
+  BUILD_EXCLUDES.filter((e) => e.endsWith('/')).map((e) => e.slice(0, -1)),
+);
+
+/**
+ * A path as a literal gitignore pattern: glob characters and spaces escaped (git strips a trailing
+ * unescaped space), and a line break, which a pattern line cannot hold, matched by `?`.
+ */
+const globLiteral = (p: string) => p.replace(/[\\*?[ !#]/g, '\\$&').replace(/[\r\n]/g, '?');
+
+/**
+ * The anchored negations (`!/<dir>/`) for every directory with a BUILD_EXCLUDES name (at any
+ * depth) that holds a pushed path, parents included: such a directory is source, not build output
+ * (a Java package `build`, a vendored `node_modules`), so a new file the agent writes there must
+ * show as a change, be pulled, and stop a push from discarding it. They are passed to git as `-x`,
+ * so they beat the repository's own .gitignore too (its `build/` would hide a package `build`).
+ * Build-named directories under it that hold nothing pushed stay excluded, and so does one whose
+ * only pushed files are placeholders (`dist/.gitkeep`): its contents are output.
+ */
+export function reincludes(paths: string[]): string[] {
+  const dirs = new Set<string>();
+  for (const p of paths) {
+    if (PLACEHOLDERS.has(posix.basename(p))) continue;
+    const segs = p.split('/');
+    for (let i = 1; i < segs.length; i++) {
+      if (BUILD_DIRS.has(segs[i - 1]!)) dirs.add(segs.slice(0, i).join('/'));
+    }
+  }
+  return [...dirs].sort().map((d) => `!/${globLiteral(d)}/`);
+}
 const SECRET_RE = /^(\.env.*|.*\.pem|.*\.key|id_.*)$/;
 /** Each push or pull Exec: a fresh VM extracting at most 14 MiB, or one git command. */
 export const SYNC_TIMEOUT_S = 300;
@@ -59,8 +92,11 @@ const INCOMPLETE = '.git/sbx-push-incomplete';
  * cannot hide its work from `pull` or have it discarded by `push`.
  */
 export const BASELINE_REF = 'refs/sbx/baseline';
-/** A scratch index: the sandbox's own index (the agent's) is never changed by push or pull. */
-const SCRATCH = '.git/sbx-index';
+/**
+ * The re-include patterns (`PushPlan.reinclude`), NUL-separated: passed as `-x` (the highest
+ * precedence, above an in-tree .gitignore) wherever the sandbox lists the workspace's files.
+ */
+const REINCLUDE = '.git/sbx-reinclude';
 
 export class PushError extends Error {}
 
@@ -100,6 +136,8 @@ export interface PushPlan {
   chunks: Buffer[];
   /** What the baseline must contain: every pushed path. */
   paths: string[];
+  /** The sandbox's `info/exclude` negations for build-named directories that hold pushed paths. */
+  reinclude: string[];
   files: number;
   /** Uncompressed bytes of file content. */
   bytes: number;
@@ -235,9 +273,11 @@ export async function planPush(
   }
   flush();
   if (!chunks.length) chunks.push(gzipSync(tarEntries([])));
+  const paths = kept.map((k) => k.path);
   return {
     chunks,
-    paths: kept.map((k) => k.path),
+    paths,
+    reinclude: reincludes(paths),
     files: kept.length,
     bytes,
     excludedSecrets,
@@ -249,8 +289,18 @@ export async function planPush(
  * git with nothing of the environment's configuration that would change what is recorded: no
  * hooks, no signing, no line-ending conversion, and any owner (the workspace may be another uid's).
  */
-const G = `git -c core.hooksPath=/dev/null -c commit.gpgSign=false -c core.autocrlf=false -c ${q('safe.directory=*')}`;
+const G = `git -c core.hooksPath=/dev/null -c commit.gpgSign=false -c core.autocrlf=false -c advice.addEmptyPathspec=false -c ${q('safe.directory=*')}`;
 const ID = '-c user.name=sbx -c user.email=sbx@localhost';
+/** git on the scratch index in `$x` (STATE's). */
+const SG = `GIT_INDEX_FILE="$x/index" ${G}`;
+/**
+ * Adds, to the scratch index, the untracked files under the re-included directories that an
+ * ignore rule (BUILD_EXCLUDES, or the repository's own .gitignore) would hide: `-x` patterns beat
+ * every ignore file. A no-op when nothing is re-included.
+ */
+const ADD_REINCLUDED =
+  `{ [ ! -s ${REINCLUDE} ] || { set --; while IFS= read -r -d '' p; do set -- "$@" -x "$p"; done < ${REINCLUDE}; ` +
+  `${SG} ls-files -z --others --exclude-standard "$@" | ${SG} --literal-pathspecs add -f --pathspec-from-file=- --pathspec-file-nul; }; }`;
 
 const EXTRACT =
   // GNU tar's -z runs gzip: without it, Python's tarfile (which has its own).
@@ -276,12 +326,13 @@ const EMPTY =
  * - `incomplete`: a push emptied the workspace and did not finish.
  */
 const STATE =
+  'set -o pipefail; ' +
   `if [ -e ${INCOMPLETE} ]; then s=incomplete; ` +
   `elif [ ! -d .git ] || ! b=$(${G} rev-parse -q --verify ${q(`${BASELINE_REF}^{commit}`)} 2>/dev/null); then ` +
   'if [ -n "$(find . -mindepth 1 -maxdepth 1 ! -name lost+found ! -name .git | head -n 1)" ]; then s=no_baseline; else s=empty; fi; ' +
-  `else rm -f ${SCRATCH} && GIT_INDEX_FILE=${SCRATCH} ${G} read-tree "$b" && ` +
-  `GIT_INDEX_FILE=${SCRATCH} ${G} add -A && t=$(GIT_INDEX_FILE=${SCRATCH} ${G} write-tree) || exit 1; ` +
-  `rm -f ${SCRATCH}; ` +
+  // A scratch index of its own (mktemp), removed on exit: the agent's index is never touched.
+  `else x=$(mktemp -d .git/sbx-tmp.XXXXXX) && trap 'rm -rf "$x"' EXIT && ` +
+  `${SG} read-tree "$b" && ${SG} add -A && ${ADD_REINCLUDED} && t=$(${SG} write-tree) || exit 1; ` +
   `if [ "$t" = "$(${G} rev-parse "$b^{tree}")" ]; then s=clean; else s=dirty; fi; fi`;
 
 export type SandboxState = 'clean' | 'dirty' | 'empty' | 'no_baseline' | 'incomplete';
@@ -352,7 +403,10 @@ export async function pushTree(
     const start =
       i === 0
         ? `${EMPTY} && ${G} init -q && mkdir -p .git/info && : > ${INCOMPLETE} && ` +
-          `printf '%s\\n' ${SANDBOX_EXCLUDES.map(q).join(' ')} > .git/info/exclude && `
+          `printf '%s\\n' ${[...SANDBOX_EXCLUDES, ...plan.reinclude].map(q).join(' ')} > .git/info/exclude && ` +
+          (plan.reinclude.length
+            ? `printf '%s\\0' ${plan.reinclude.map(q).join(' ')} > ${REINCLUDE} && `
+            : `: > ${REINCLUDE} && `)
         : `{ [ -e ${INCOMPLETE} ] || { echo 'the push was interrupted (another push to this sandbox?)' >&2; exit 1; }; } && `;
     await must(exec, `${cd} && ${start}${EXTRACT}`, `the push (part ${i + 1} of ${n})`, {
       ...o,
