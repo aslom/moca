@@ -1,4 +1,4 @@
-import { homedir, hostname } from 'node:os';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { loadConfig, normalizeUrl, resolvePaths, type Paths, type TuiConfig } from '../config.js';
@@ -9,19 +9,20 @@ import {
   cmdCreate,
   cmdEnv,
   cmdLogin,
+  cmdLogout,
   cmdLs,
   cmdRm,
   cmdTemplates,
   cmdToken,
   failRefresh,
   SBX_EXIT,
-  type RefreshFailure,
   type SbxCtx,
 } from './commands.js';
 import { readBoundSandbox, SANDBOX_ID_RE } from './state.js';
 
 export const SBX_USAGE = `usage (the sandbox service, SBX0):
   mocactl sbx login [--control-plane-url URL]    log in with the GitHub device flow (the URL is remembered)
+  mocactl sbx logout                             end the sandbox-service login (deletes sbx-auth.json)
   mocactl sbx templates [--json]                 the templates a sandbox can be created from
   mocactl sbx create --template ID [--name N] [--label k=v ...] [--json]
                                                  create a sandbox; prints its id and expiry
@@ -69,37 +70,24 @@ export function sbxPaths(paths: Paths): Paths {
   return { ...paths, authFile: join(paths.configDir, 'sbx-auth.json') };
 }
 
-/** A runtime on the SANDBOX control plane: its own URL and its own login file. */
-function open(
+/**
+ * A runtime on the SANDBOX control plane: its own URL, its own login file, and no harness (neither
+ * SH_HARNESS_URL nor config.harnessUrl is read). Its control-plane client IS the SandboxApiClient,
+ * so the runtime's refresh-and-retry wiring (and `rt.lastRefreshFailure`) covers every sbx call.
+ */
+export function openSbxRuntime(
   url: string,
   env: NodeJS.ProcessEnv,
   deps: SbxDeps,
-): { rt: Runtime; api: SandboxApiClient; refreshFailure: () => RefreshFailure | undefined } {
-  const rt = buildRuntime(
-    { controlPlaneUrl: url, harnessUrl: undefined },
-    env,
-    deps.home,
-    deps.fetchImpl,
-    { paths: sbxPaths },
-  );
-  // The client turns a failed retry into the original 401; what the refresh actually hit is kept
-  // here so the command reports that instead of "log in again" (a network failure, not_enrolled).
-  let lastFailure: RefreshFailure | undefined;
-  const api = new SandboxApiClient(url, () => rt.auth?.apiToken, rt.fetchImpl, {
-    label: hostname(),
-    onTokenRejected: async () => {
-      lastFailure = undefined;
-      try {
-        const r = await ensureRuntimeAuth(rt, { force: true });
-        if (r.kind === 'unreachable') lastFailure = { error: r.error };
-        return r.kind === 'ok';
-      } catch (error) {
-        lastFailure = { error };
-        return false;
-      }
-    },
+): { rt: Runtime; api: SandboxApiClient } {
+  let api: SandboxApiClient | undefined;
+  const rt = buildRuntime({ controlPlaneUrl: url }, env, deps.home, deps.fetchImpl, {
+    paths: sbxPaths,
+    harness: false,
+    client: (...a) => (api = new SandboxApiClient(...a)),
   });
-  return { rt, api, refreshFailure: () => lastFailure };
+  // `url` is never empty here, so the runtime always built its client through the factory.
+  return { rt, api: api! };
 }
 
 /**
@@ -113,16 +101,7 @@ export async function openSbx(
   io: Io,
   deps: SbxDeps,
   opts: { login?: boolean } = {},
-): Promise<
-  | {
-      rt: Runtime;
-      api: SandboxApiClient;
-      url: string;
-      explicitUrl?: string;
-      refreshFailure: () => RefreshFailure | undefined;
-    }
-  | number
-> {
+): Promise<{ rt: Runtime; api: SandboxApiClient; url: string; explicitUrl?: string } | number> {
   const remembered = loadConfig(resolvePaths(env, deps.home ?? homedir())).config;
   const url = resolveSbxUrl(flags.controlPlaneUrl, env, remembered);
   if (!url) {
@@ -131,7 +110,11 @@ export async function openSbx(
   }
   const explicitUrl =
     sbxUrlSource(flags.controlPlaneUrl, env, remembered) === 'config' ? undefined : url;
-  const opened = { ...open(url, env, deps), url, ...(explicitUrl ? { explicitUrl } : {}) };
+  const opened = {
+    ...openSbxRuntime(url, env, deps),
+    url,
+    ...(explicitUrl ? { explicitUrl } : {}),
+  };
   const { rt } = opened;
   if (opts.login) return opened;
   const auth = await ensureRuntimeAuth(rt);
@@ -142,6 +125,9 @@ export async function openSbx(
   if (auth.kind === 'unreachable') return failRefresh(io, auth.error);
   return opened;
 }
+
+/** The commands with no --json output (R5i): refused with exit 2 rather than ignored. */
+const NO_JSON = new Set(['login', 'logout', 'env']);
 
 function parseLabels(io: Io, raw: string[]): Record<string, string> | undefined {
   const labels: Record<string, string> = {};
@@ -192,9 +178,15 @@ export async function sbxMain(
     io.err(SBX_USAGE);
     return SBX_EXIT.usage;
   }
-  const known = ['login', 'templates', 'create', 'ls', 'rm', 'token', 'env'];
+  const known = ['login', 'logout', 'templates', 'create', 'ls', 'rm', 'token', 'env'];
   if (!known.includes(command)) {
     io.err(`sbx: unknown command '${command}'\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  // These print no JSON (login and logout report on stderr, env prints shell exports), so a
+  // --json would be silently ignored: refuse it rather than hand a script something it cannot parse.
+  if (values.json && NO_JSON.has(command)) {
+    io.err(`sbx: ${command} has no --json output\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
   const takesId = command === 'rm' || command === 'token' || command === 'env';
@@ -232,7 +224,7 @@ export async function sbxMain(
   }
 
   const opened = await openSbx({ controlPlaneUrl: values['control-plane-url'] }, env, io, deps, {
-    login: command === 'login',
+    login: command === 'login' || command === 'logout',
   });
   if (typeof opened === 'number') return opened;
   const ctx: SbxCtx = { ...opened, io, json: values.json === true, signal: deps.signal };
@@ -240,6 +232,8 @@ export async function sbxMain(
   switch (command) {
     case 'login':
       return cmdLogin(ctx, values['control-plane-url'] !== undefined);
+    case 'logout':
+      return cmdLogout(ctx);
     case 'templates':
       return cmdTemplates(ctx);
     case 'create':

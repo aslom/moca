@@ -1,5 +1,5 @@
 import { ApiError } from './api/errors.js';
-import type { CredentialConsumer, SessionSummary } from './api/types.js';
+import type { CredentialConsumer, DeviceStart, SessionSummary } from './api/types.js';
 import {
   LoginCancelledError,
   LoginExpiredError,
@@ -44,28 +44,50 @@ function missing(rt: Runtime, io: Io, need: Array<keyof typeof MISSING>): boolea
   return absent.length > 0;
 }
 
+/**
+ * The device flow's prompt, on stderr: where to go and the code to enter, sanitized (both come from
+ * the server). Shared by `mocactl login` and `mocactl sbx login`.
+ */
+export function devicePrompt(io: Io): (s: DeviceStart, attempt: number) => void {
+  return (s, attempt) =>
+    io.err(
+      `${attempt > 1 ? 'That code expired. ' : ''}Open ${sanitizeRemote(s.verificationUri)} ` +
+        `and enter the code ${sanitizeRemote(s.userCode)} (valid for ${codeValidity(s.expiresIn)})`,
+    );
+}
+
+/**
+ * The exit for a device login that ended without a login: 130 when cancelled (quietly), 1 when the
+ * re-issued code lapsed too (nobody is at the browser, so a third code would only wait), naming
+ * the command to run again. Undefined for any other error, which the caller reports its own way.
+ */
+export function deviceLoginEnd(
+  io: Io,
+  err: unknown,
+  o: { prefix: string; again: string },
+): number | undefined {
+  if (err instanceof LoginCancelledError) return 130;
+  if (err instanceof LoginExpiredError) {
+    io.err(`${o.prefix}: the code expired before it was approved — run \`${o.again}\` again`);
+    return 1;
+  }
+  return undefined;
+}
+
 export async function cmdLogin(rt: Runtime, io: Io, signal?: AbortSignal): Promise<number> {
   if (missing(rt, io, ['controlPlaneUrl']) || !rt.cp) return 2;
   try {
     const login = await deviceLogin(
       { cp: rt.cp, sleep: rt.sleep, now: rt.now },
-      (s, attempt) =>
-        io.err(
-          `${attempt > 1 ? 'That code expired. ' : ''}Open ${sanitizeRemote(s.verificationUri)} ` +
-            `and enter the code ${sanitizeRemote(s.userCode)} (valid for ${codeValidity(s.expiresIn)})`,
-        ),
+      devicePrompt(io),
       signal,
     );
     setAuth(rt, toCachedAuth(login, rt.endpoints.controlPlaneUrl!));
     io.err(`logged in as ${login.displayName ?? login.subject}`);
     return 0;
   } catch (err) {
-    if (err instanceof LoginCancelledError) return 130;
-    if (err instanceof LoginExpiredError) {
-      // The re-issued code lapsed too: nobody is at the browser, so a third code would only wait.
-      io.err('login failed: the code expired before it was approved — run `mocactl login` again');
-      return 1;
-    }
+    const end = deviceLoginEnd(io, err, { prefix: 'login failed', again: 'mocactl login' });
+    if (end !== undefined) return end;
     io.err(`login failed: ${describeError(err)}`);
     return 1;
   }

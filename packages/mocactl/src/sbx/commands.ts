@@ -1,18 +1,12 @@
 import { chmodSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ApiError, TOKEN_CODES } from '../api/errors.js';
-import {
-  codeValidity,
-  deviceLogin,
-  LoginCancelledError,
-  LoginExpiredError,
-  toCachedAuth,
-} from '../core/auth.js';
+import { deviceLogin, toCachedAuth } from '../core/auth.js';
 import { describeError } from '../core/messages.js';
 import { sanitizeRemote } from '../core/sanitize.js';
 import { saveConfig } from '../config.js';
-import type { Io } from '../headless.js';
-import { setAuth, type Runtime } from '../runtime.js';
+import { deviceLoginEnd, devicePrompt, type Io } from '../headless.js';
+import { setAuth, type RefreshFailure, type Runtime } from '../runtime.js';
 import type { SandboxApiClient, SbxDiscovery, SbxSandbox } from './api.js';
 
 /** `mocactl sbx`'s exit codes (SBX0 §6.1), as `mocactl auth token`'s beyond 0 and 2. */
@@ -30,17 +24,9 @@ export interface SbxCtx {
    * config.json: `SBX_TOKEN_CMD` then names it, since another shell may have neither.
    */
   explicitUrl?: string;
-  /**
-   * Why the forced refresh behind the client's one 401 retry failed, if it failed for a reason
-   * other than the login itself (a network failure, `not_enrolled`): `fail` reports that cause.
-   */
-  refreshFailure?: () => RefreshFailure | undefined;
 }
 
-/** A refresh that failed for a reason other than the login being refused. */
-export interface RefreshFailure {
-  error: unknown;
-}
+export type { RefreshFailure };
 
 /**
  * The not-enrolled refusal: the control plane's own message, which names the caller's subject
@@ -95,8 +81,11 @@ export function fail(io: Io, err: unknown, refreshFailure?: RefreshFailure): num
   return SBX_EXIT.failed;
 }
 
-/** `fail` with what this command's client saw of its refresh. */
-const failed = (c: SbxCtx, err: unknown): number => fail(c.io, err, c.refreshFailure?.());
+/**
+ * `fail` with what this command's client saw of its refresh (`rt.lastRefreshFailure`): every sbx
+ * command reports through this, so a 401 whose retry refresh failed names the real cause.
+ */
+export const failed = (c: SbxCtx, err: unknown): number => fail(c.io, err, c.rt.lastRefreshFailure);
 
 export async function cmdLogin(c: SbxCtx, remember: boolean): Promise<number> {
   if (!c.rt.cp) return SBX_EXIT.usage;
@@ -114,11 +103,7 @@ export async function cmdLogin(c: SbxCtx, remember: boolean): Promise<number> {
     }
     const login = await deviceLogin(
       { cp: c.rt.cp, sleep: c.rt.sleep, now: c.rt.now },
-      (s, attempt) =>
-        c.io.err(
-          `${attempt > 1 ? 'That code expired. ' : ''}Open ${sanitizeRemote(s.verificationUri)} and enter the code ` +
-            `${sanitizeRemote(s.userCode)} (valid for ${codeValidity(s.expiresIn)})`,
-        ),
+      devicePrompt(c.io),
       c.signal,
     );
     setAuth(c.rt, toCachedAuth(login, c.url));
@@ -128,13 +113,36 @@ export async function cmdLogin(c: SbxCtx, remember: boolean): Promise<number> {
     );
     return SBX_EXIT.ok;
   } catch (err) {
-    if (err instanceof LoginCancelledError) return 130;
-    if (err instanceof LoginExpiredError) {
-      c.io.err('sbx: the login code expired twice; run `mocactl sbx login` again');
-      return SBX_EXIT.failed;
-    }
+    const end = deviceLoginEnd(c.io, err, { prefix: 'sbx', again: 'mocactl sbx login' });
+    if (end !== undefined) return end;
     return failed(c, err);
   }
+}
+
+/**
+ * `mocactl sbx logout`: revoke the login's refresh token at the control plane (best effort), then
+ * delete `sbx-auth.json` whatever it holds. MOCA's `auth.json` is never touched.
+ */
+export async function cmdLogout(c: SbxCtx): Promise<number> {
+  const auth = c.rt.auth;
+  let code: number = SBX_EXIT.ok;
+  if (auth?.refreshToken && c.rt.cp) {
+    try {
+      await c.rt.cp.revokeAuth(auth.refreshToken);
+    } catch (err) {
+      c.io.err(
+        `sbx: logged out of this machine, but the control plane did not confirm: ${describeError(err)} ` +
+          '(the login stays valid there until it expires)',
+      );
+      code = SBX_EXIT.failed;
+    }
+  }
+  // Deletes sbx-auth.json whatever it holds: a login for another sandbox control plane included.
+  setAuth(c.rt, null);
+  if (code === SBX_EXIT.ok) {
+    c.io.err(auth ? 'logged out of the sandbox service' : 'not logged in to the sandbox service');
+  }
+  return code;
 }
 
 const when = (epochS: number) => new Date(epochS * 1000).toISOString();
