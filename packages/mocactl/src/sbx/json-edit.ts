@@ -115,11 +115,10 @@ export function append(
   const ind = startsLine(text, last.offset)
     ? lineIndent(text, last.offset)
     : lineIndent(text, open) + s.unit;
-  // After the last member's line, with its comments (a block comment spanning lines included, so
-  // the member never lands inside one), or before the closing bracket when that is on the line.
-  const after = trailing !== undefined ? trailing + 1 : end;
-  const t = lineTail(text, end);
-  const at = t.atBreak ? t.end : after;
+  // After the last member and everything that follows it up to its line's end or the closing
+  // bracket: its comma and its comments, a block comment spanning lines included. The member
+  // never lands inside a comment, and never between the last member and the comment after it.
+  const at = lineTail(text, end).end;
   const add = s.eol + ind + member(ind) + (trailing !== undefined ? ',' : '');
   if (trailing !== undefined) return text.slice(0, at) + add + text.slice(at);
   return text.slice(0, end) + ',' + text.slice(end, at) + add + text.slice(at);

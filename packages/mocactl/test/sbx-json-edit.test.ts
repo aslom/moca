@@ -60,6 +60,7 @@ describe('style-keeping JSON edits', () => {
     ['empty', '{\n  "d": []\n}\n', 'Read'],
     ['a trailing comma', '{\n  "d": [\n    "Bash",\n  ]\n}\n', 'Read'],
     ['a comment', '{\n  "d": [\n    "Bash" // why\n  ]\n}\n', 'Read'],
+    ['a block comment spanning lines, then the bracket', '{"d": [\n "x" /* a\n b */ ]}', 'Read'],
   ])('array: %s', (_n, text, item) => {
     roundTrip(text, ['d'], undefined, item);
   });
@@ -134,6 +135,11 @@ describe('style-keeping JSON edits', () => {
       ['t'],
     ],
     ['a line comment after a block comment', '{\n  "a": 1 /* x */ // y\n}\n', []],
+    // Review round 3: a comment between the last member and a closing bracket on its line.
+    ['a multi-line block comment, then the brace', '{"model": "x" /* a\n  b */}', []],
+    ['a block comment, then the brace on the line', '{\n  "model": "x" /* c */ }\n', []],
+    ['the same, nested', '{"tools":{"skill":true /* a\n b */ }}', ['tools']],
+    ['an inline object, a comment spanning lines', '{ "skill": true /* a\n */ }', []],
     ['the closing brace on the line', '{\n  "a": 1 // c\n  }', []],
   ])('round-trips byte for byte: %s', (_n, text, path) => {
     const s = styleOf(text);

@@ -328,6 +328,21 @@ describe('agent configuration (SBX0 §6.3)', () => {
     },
   );
 
+  it.each([
+    '{"model": "x" /* a\n  b */}',
+    '{\n  "model": "x" /* c */ }\n',
+    '{"tools":{"skill":true /* a\n b */ }}',
+    '{ "skill": true /* a\n */ }',
+    '{\n  "tools": {\n    "skill": true /* a\n    b */ }\n}\n',
+  ])('keeps a comment before a closing bracket, through up and rm (review round 3): %j', (oc) => {
+    const d = dir();
+    writeFileSync(join(d, 'opencode.json'), oc);
+    writeAgentConfig(d);
+    expect(checkAgentConfig(d)).toEqual([]);
+    removeAgentConfig(d);
+    expect(text(d, 'opencode.json')).toBe(oc);
+  });
+
   it('puts new members after a multi-line block comment, not inside it (review round 2)', () => {
     const d = dir();
     const oc = '{\n  "model": "x" /* a\n  b */\n}\n';
