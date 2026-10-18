@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -57,6 +58,14 @@ describe('the bundle', () => {
     const r = run(['--version']);
     expect(r.status, r.stderr).toBe(0);
     expect(r.stdout).toBe(`${VERSION}\n`);
+  });
+
+  // A generous ceiling, so a dependency that drags in far more than it should is caught; Task 9
+  // sets the real CI budget. The size is printed so a reviewer sees it move.
+  it('stays under 8 MiB', () => {
+    const size = statSync(bundle).size;
+    console.log(`mocactl bundle: ${size} bytes (${(size / 2 ** 20).toFixed(2)} MiB)`);
+    expect(size).toBeLessThan(8 * 2 ** 20);
   });
 
   // ADR-0036/0042: Pi stays out of mocactl. sandbox-client's contract test links Pi as a dev
