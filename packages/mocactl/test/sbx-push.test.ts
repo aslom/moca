@@ -6,12 +6,14 @@ import {
   mkdirSync,
   readFileSync,
   readlinkSync,
+  rmSync,
   statSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
+import { gunzipSync } from 'node:zlib';
 import { MAX_STDIN_BYTES } from '@moca/sandbox-client';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -121,6 +123,34 @@ describe('the push list (SBX0 §6.2)', () => {
     const plan = await planPush(r);
     expect(plan.paths).not.toContain('src/app.py');
     expect(plan.skipped).toEqual([expect.stringMatching(/^vendor\/lib .*not pushed/)]);
+  });
+
+  it('never reads through a symlinked parent: a tracked dir replaced by a link to outside (review I2)', async () => {
+    const r = repo();
+    const outside = join(r, '..', `${r.split('/').pop()}-outside`);
+    mkdirSync(outside);
+    try {
+      writeFileSync(join(outside, 'settings.py'), 'OUTSIDE SECRET\n');
+      mkdirSync(join(r, 'conf'));
+      writeFileSync(join(r, 'conf/settings.py'), 'inrepo\n');
+      git(r, 'add', 'conf');
+      git(r, 'commit', '-qm', 'conf');
+      rmSync(join(r, 'conf'), { recursive: true });
+      symlinkSync(outside, join(r, 'conf'));
+      const plan = await planPush(r);
+      expect(plan.paths).not.toContain('conf/settings.py');
+      expect(plan.skipped).toEqual([
+        expect.stringMatching(/^conf\/settings\.py \(under the symlink conf: not pushed/),
+      ]);
+      expect(plan.chunks.some((c) => gunzipSync(c).includes('OUTSIDE SECRET'))).toBe(false);
+      expect(plan.paths).toContain('conf'); // the link itself goes, as a link
+      const { ws, exec } = localWorkspace();
+      await pushTree(exec, plan);
+      expect(lstatSync(join(ws, 'conf')).isSymbolicLink()).toBe(true);
+      expect(await hasUnpulled(exec)).toBe(false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 
   it('never pushes .sbx/, even when it is not excluded', async () => {

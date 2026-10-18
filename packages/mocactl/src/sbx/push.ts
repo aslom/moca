@@ -201,10 +201,30 @@ export async function planPush(
   const byTop = new Map<string, number>();
   const kept: { path: string; st: Stats }[] = [];
   let bytes = 0;
+  // Whether each parent directory is a symlink, so no path is read through one (review I2): a
+  // tracked conf/x.py, with conf/ replaced locally by a link to ../outside, would read outside.
+  const linked = new Map<string, string | undefined>();
+  const linkAncestor = (p: string): string | undefined => {
+    const segs = p.split('/');
+    for (let i = 1; i < segs.length; i++) {
+      const d = segs.slice(0, i).join('/');
+      if (!linked.has(d)) {
+        const st = lstatOrGone(join(root, d));
+        linked.set(d, st?.isSymbolicLink() ? d : undefined);
+      }
+      if (linked.get(d)) return linked.get(d);
+    }
+    return undefined;
+  };
   for (const p of names) {
     if (p === '.sbx' || p.startsWith('.sbx/')) continue; // the binding is the laptop's
     if (!o.includeSecrets && SECRET_RE.test(posix.basename(p))) {
       excludedSecrets.push(p);
+      continue;
+    }
+    const via = linkAncestor(p);
+    if (via) {
+      skipped.push(`${p} (under the symlink ${via}: not pushed; the symlink itself is)`);
       continue;
     }
     const st = lstatOrGone(join(root, p));
