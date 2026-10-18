@@ -74,7 +74,8 @@ case "${1:-}" in
   kind delete cluster --name "$CLUSTER"
   # Only a directory this script made: a mis-set MOCA_DEMO_STATE must never be removed.
   if [ -e "$STATE_DIR" ]; then
-    [ -f "$STATE_DIR/$STATE_MARKER" ] || die "refusing to delete $STATE_DIR: it has no $STATE_MARKER marker"
+    [ -f "$STATE_DIR/$STATE_MARKER" ] ||
+      die "cluster deleted, but refusing to delete $STATE_DIR: it has no $STATE_MARKER marker; if it is the demo's (from before this marker existed), remove it yourself: rm -rf $STATE_DIR"
     rm -rf "$STATE_DIR"
   fi
   exit 0

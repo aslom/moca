@@ -1,6 +1,7 @@
 {
   "permissions": {
     "allow": [
+      "Bash(mktemp -d)",
       "Bash(mocactl spawn *)",
       "Bash(mocactl subagents *)",
       "Bash(mocactl get *)",

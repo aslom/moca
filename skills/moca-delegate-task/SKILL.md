@@ -134,7 +134,8 @@ directory holding the packed file. Tell the user about any delete that failed so
 
 ## Claude Code permissions
 
-Delegation needs only these commands. Allowing them keeps the skill working when Claude Code's
+Delegation needs only these commands, plus the cleanup `rm -r TMP_DIR`. Allowing them keeps the
+skill working when Claude Code's
 auto-mode classifier is unavailable
 ([#530](https://github.com/rossoctl/moca/issues/530), Claude Code's classifier vs MOCA's local and
 remote split); the remote commands run in MOCA sandboxes, not under Claude Code's classifier.
@@ -146,10 +147,12 @@ agent, not a control. Choose one of two sets and add it to `.claude/settings.jso
 `~/.claude/settings.json`:
 
 - [`settings.example.json`](settings.example.json): every delegation command, including the upload.
-  Nothing prompts.
+  Only the cleanup `rm -r TMP_DIR` still asks: a wildcard `rm -r` rule would be far broader than this
+  skill needs.
 - [`settings.restricted.example.json`](settings.restricted.example.json): only the commands that
   run, watch and clean up tasks. Claude Code still asks before `ctx pack` and `workloads create`,
-  and those two steps then also need the classifier, or a person, to approve them.
+  and those two steps then also need the classifier, or a person, to approve them. The cleanup
+  `rm -r TMP_DIR` asks too.
 
 The full set:
 
@@ -157,6 +160,7 @@ The full set:
 {
   "permissions": {
     "allow": [
+      "Bash(mktemp -d)",
       "Bash(contextctl ctx pack *)",
       "Bash(mocactl workloads *)",
       "Bash(mocactl spawn *)",
