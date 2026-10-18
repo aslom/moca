@@ -553,6 +553,20 @@ describe('pull (SBX0 §6.2, §10.3)', () => {
     ).toBe('');
   });
 
+  it('leaves no scratch directory behind when it hashes the tree itself', async () => {
+    // No captured tree: the advance hashes the workspace first, then resets; neither leaves a dir.
+    const r = repo();
+    const { ws, exec } = await pushed(r);
+    writeFileSync(join(ws, 'src/app.py'), 'print(3)\n');
+    await advanceBaseline(exec);
+    expect(await hasUnpulled(exec)).toBe(false);
+    expect(
+      execFileSync('find', ['.git', '-maxdepth', '1', '-name', 'sbx-tmp.*'], {
+        cwd: ws,
+      }).toString(),
+    ).toBe('');
+  });
+
   it('advances the baseline to what was captured, so a change made meanwhile is pulled next time', async () => {
     const r = repo();
     const { ws, exec } = await pushed(r);
