@@ -1,6 +1,5 @@
-import { createHash, generateKeyPairSync } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { makeSigner } from '@moca/control-plane';
 import { armDeadline, makeExecAuth } from '../src/main.js';
 import {
   DEFAULT_SANDBOX_MAX_INFLIGHT,
@@ -8,15 +7,7 @@ import {
   sandboxMaxInflight,
   workerReqId,
 } from '../src/sandbox-auth.js';
-
-const ISS = 'sbx-control-plane';
-
-function keypair() {
-  const { privateKey } = generateKeyPairSync('ed25519');
-  const signer = makeSigner(privateKey.export({ format: 'pem', type: 'pkcs8' }).toString());
-  return { signer, keyset: `${signer.kid}:${signer.publicKeyBase64}` };
-}
-const K = keypair();
+import { ISS, K } from './helpers/sandbox-relay.js';
 
 function thrown(fn: () => unknown): Error {
   try {

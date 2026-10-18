@@ -95,6 +95,22 @@ export function keyIdFor(publicKey: KeyObject): string {
 }
 
 /**
+ * A keyset entry that does not parse. `kind` is what is wrong with it, so a caller that reports the
+ * error under its own variable name (the sandbox relay's SH_SANDBOX_TOKEN_PUBLIC_KEYS) classifies on
+ * it rather than on the message, which names SH_SESSION_TOKEN_PUBLIC_KEYS and quotes the entry.
+ */
+export class KeysetError extends Error {
+  constructor(
+    /** `format`: not `<kid>:<base64 SPKI>`; `key`: not a base64 Ed25519 SPKI; `kid`: kid ≠ key. */
+    readonly kind: 'format' | 'key' | 'kid',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'KeysetError';
+  }
+}
+
+/**
  * Parse `SH_SESSION_TOKEN_PUBLIC_KEYS`: `<kid>:<base64 SPKI>[,<kid>:<base64 SPKI>...]`.
  * Accepting a LIST is what makes rotation possible without a flag day (spec §5.2). A malformed or
  * mislabelled entry THROWS rather than being skipped: a silently dropped key is a deployment that
@@ -107,7 +123,8 @@ export function parseKeyset(raw: string | undefined): Map<string, KeyObject> {
     if (!trimmed) continue;
     const idx = trimmed.indexOf(':');
     if (idx <= 0) {
-      throw new Error(
+      throw new KeysetError(
+        'format',
         `SH_SESSION_TOKEN_PUBLIC_KEYS entry '${trimmed}' is not '<kid>:<base64 SPKI>'`,
       );
     }
@@ -116,14 +133,16 @@ export function parseKeyset(raw: string | undefined): Map<string, KeyObject> {
     try {
       key = publicKeyFromBase64(trimmed.slice(idx + 1).trim());
     } catch (err) {
-      throw new Error(
+      throw new KeysetError(
+        'key',
         `SH_SESSION_TOKEN_PUBLIC_KEYS entry '${kid}' is not a base64 Ed25519 SPKI ` +
           `(a wrong curve is rejected here, not per request): ${String(err)}`,
       );
     }
     const derived = keyIdFor(key);
     if (derived !== kid) {
-      throw new Error(
+      throw new KeysetError(
+        'kid',
         `SH_SESSION_TOKEN_PUBLIC_KEYS entry kid '${kid}' does not match its key (expected '${derived}')`,
       );
     }

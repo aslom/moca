@@ -3,6 +3,7 @@ export { ROUTES, matchRoute, type RouteProfile, type RouteSpec } from './routes.
 export {
   TOKEN_AUDIENCE,
   DEFAULT_ISSUER,
+  KeysetError,
   keyIdFor,
   makeSigner,
   parseKeyset,
