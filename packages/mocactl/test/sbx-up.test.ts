@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import type { ExecConnOptions } from '@moca/sandbox-client';
 import { afterEach, describe, expect, it } from 'vitest';
 import { saveAuth } from '../src/config.js';
-import { sbxMain, sbxPaths } from '../src/sbx/cli.js';
+import { SBX_USAGE, sbxMain, sbxPaths } from '../src/sbx/cli.js';
 import { hasUnpulled, MAX_FILE, repoId } from '../src/sbx/push.js';
 import {
   LOGIN,
@@ -156,6 +156,12 @@ describe('mocactl sbx up (SBX0 §6.1)', () => {
     expect(h.ws.counts()).toEqual({ opened: 1, closed: 1 });
   });
 
+  it('says in its usage that a reused sandbox with unpulled work is left unpushed', () => {
+    expect(SBX_USAGE.replace(/\s+/g, ' ')).toContain(
+      'a reused sandbox with changes not yet pulled is left unpushed, with a warning, and up exits 0',
+    );
+  });
+
   it('uses the default template when none is given (spec §6.1)', async () => {
     const h = harness();
     expect(await h.run(['up'])).toBe(0);
@@ -252,7 +258,7 @@ describe('mocactl sbx up (SBX0 §6.1)', () => {
     }
     writeFileSync(join(h.r, 'huge.bin'), Buffer.alloc(MAX_FILE + 1));
     expect(await h.run(['up'])).toBe(1);
-    expect(h.err()).toMatch(/huge\.bin \(12\.0 MiB\)/);
+    expect(h.err()).toContain(`huge.bin (12.0 MiB, ${MAX_FILE + 1} bytes)`);
     rmSync(join(h.r, 'huge.bin'));
     const idn = 'https://bücher.example.invalid';
     saveAuth(sbxPaths(h.paths), { ...LOGIN, controlPlaneUrl: idn });
@@ -278,6 +284,9 @@ describe('mocactl sbx up (SBX0 §6.1)', () => {
       ['ls', '--max-push', '1'],
       ['push', '--max-push', '0'],
       ['push', '--max-push', '1.5'],
+      ['up', '--template', ''],
+      ['up', '--template', '  '],
+      ['create', '--template', ''],
     ]) {
       expect(await h.run(argv), argv.join(' ')).toBe(2);
     }

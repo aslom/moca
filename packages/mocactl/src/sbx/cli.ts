@@ -48,6 +48,8 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
   mocactl sbx up [--template T] [--name N] [--include-secrets] [--max-push MiB] [--no-agent-config]
                                                  in a git repository: create or reuse its sandbox,
                                                  push the working tree, bind it in .sbx/sandbox.json
+                                                 (a reused sandbox with changes not yet pulled is
+                                                 left unpushed, with a warning, and up exits 0)
   mocactl sbx push [--force] [--include-secrets] [--max-push MiB]   push the working tree again
                                                  (refused while the sandbox has changes not yet
                                                  pulled, unless --force; .env*, *.pem, *.key and
@@ -293,6 +295,10 @@ export async function sbxMain(
     io.err(`sbx: --${flagMisuse[0]} only applies to ${flagMisuse[1].join(' and ')}\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
+  if (values.template !== undefined && !values.template.trim()) {
+    io.err(`sbx: --template needs a template id (see mocactl sbx templates)\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
   if (
     (values.template !== undefined || values.name !== undefined) &&
     !['create', 'up'].includes(command)
@@ -415,7 +421,7 @@ export async function sbxMain(
     const labels = parseLabels(io, values.label ?? []);
     if (!labels) return SBX_EXIT.usage;
     createBody = {
-      template: values.template || DEFAULT_TEMPLATE,
+      template: values.template ?? DEFAULT_TEMPLATE,
       ...(values.name ? { name: values.name } : {}),
       ...(Object.keys(labels).length ? { labels } : {}),
     };

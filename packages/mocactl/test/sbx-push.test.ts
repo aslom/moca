@@ -31,6 +31,7 @@ import {
   capturePatch,
   hasUnpulled,
   isBindingPath,
+  normalizeOrigin,
   planPush,
   pushTree,
   repoId,
@@ -165,12 +166,17 @@ describe('the push list (SBX0 §6.2)', () => {
   it('refuses a file over 12 MiB by name, and a tree over --max-push with its largest directories', async () => {
     const r = repo();
     writeFileSync(join(r, 'huge.bin'), Buffer.alloc(MAX_FILE + 1));
-    await expect(planPush(r)).rejects.toThrow(/huge\.bin \(12\.0 MiB\)/);
+    // Just over: 12.0 MiB alone would read as the limit, so the exact bytes are given.
+    await expect(planPush(r)).rejects.toThrow(`huge.bin (12.0 MiB, ${MAX_FILE + 1} bytes)`);
     const small = repo();
-    const err = await planPush(small, { maxPush: 10 }).catch((e: unknown) => e);
+    writeFileSync(join(small, 'src/data.bin'), Buffer.alloc(3 << 20));
+    writeFileSync(join(small, 'bin/tool.bin'), Buffer.alloc(2 << 20));
+    const err = await planPush(small, { maxPush: 4 << 20 }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(PushError);
-    expect((err as Error).message).toMatch(/over the .* limit; largest: build|bin|src|\./);
-    expect((err as Error).message).toContain('--max-push');
+    // The largest first, by name and size: src/ (3 MiB), then bin/ (2 MiB).
+    expect((err as Error).message).toMatch(
+      /^the tree is 5\.0 MiB, over the 4\.0 MiB limit \(--max-push\); largest: src\/ 3\.0 MiB, bin\/ 2\.0 MiB, /,
+    );
   });
 
   it('is exactly at the limits it names', () => {
@@ -802,6 +808,21 @@ describe('the repository and its binding (SBX0 §6.1)', () => {
     expect(git(r, 'status', '--porcelain')).not.toContain('.sbx'); // excluded
   });
 
+  it('writes the binding 0600, whatever the umask (review minor)', () => {
+    const r = repo();
+    const old = process.umask(0o022);
+    try {
+      writeBinding(r, {
+        id: SBX,
+        controlPlaneUrl: 'https://sbx-api.example.invalid',
+        template: 'default',
+      });
+    } finally {
+      process.umask(old);
+    }
+    expect(statSync(join(r, '.sbx/sandbox.json')).mode & 0o777).toBe(0o600);
+  });
+
   it('binds a linked worktree through the common info/exclude', async () => {
     const r = repo();
     const wt = join(r, '..', `${r.split('/').pop()}-wt`);
@@ -837,6 +858,35 @@ describe('the repository and its binding (SBX0 §6.1)', () => {
     );
     expect(() => bindingUrl('ftp://a.example.invalid')).toThrow(PushError);
     expect(() => bindingUrl('https://a.example.invalid/\u001b]52;c;x\u0007')).toThrow(PushError);
+  });
+
+  it('normalizes the origin: https and ssh alike, no credentials, no .git (review minor)', async () => {
+    const same = [
+      'https://example.invalid/team/app.git',
+      'https://example.invalid/team/app',
+      'https://example.invalid/team/app/',
+      'https://user:ghp_secrettoken@example.invalid/team/app.git',
+      'https://EXAMPLE.invalid/team/app.git',
+      'git@example.invalid:team/app.git',
+      'ssh://git@example.invalid/team/app.git',
+      'ssh://git@example.invalid:22/team/app',
+      'git://example.invalid/team/app.git',
+    ];
+    for (const u of same) expect(normalizeOrigin(u), u).toBe('example.invalid/team/app');
+    expect(normalizeOrigin('https://example.invalid/team/other.git')).toBe(
+      'example.invalid/team/other',
+    );
+    expect(normalizeOrigin('/srv/git/app.git')).toBe('/srv/git/app.git');
+    const ids = new Set<string>();
+    for (const u of [
+      'https://u:tok@example.invalid/team/app.git',
+      'git@example.invalid:team/app.git',
+    ]) {
+      const r = repo();
+      git(r, 'remote', 'add', 'origin', u);
+      ids.add(await repoId(r));
+    }
+    expect(ids.size).toBe(1);
   });
 
   it('derives a stable repository id from the origin URL, else the root', async () => {

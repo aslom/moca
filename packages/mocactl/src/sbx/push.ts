@@ -143,7 +143,30 @@ export async function repoRoot(cwd: string): Promise<string> {
   }
 }
 
-/** sha256(origin URL, else the root path)[:16]: the `project` label `sbx up` finds sandboxes by. */
+/**
+ * An origin URL as `host/path`, the same for every way of writing it: https or ssh
+ * (`git@host:team/app.git`, `ssh://git@host:22/team/app`), with or without `.git` or a trailing
+ * slash, and never with credentials (`https://user:token@host/...`), which must not reach the
+ * hash. The host is lowercased; the path is kept as written. A local path is left as it is.
+ */
+export function normalizeOrigin(url: string): string {
+  const u = url.trim();
+  const tidy = (host: string, path: string) =>
+    `${host.toLowerCase()}/${path
+      .replace(/^\/+/, '')
+      .replace(/\/+$/, '')
+      .replace(/\.git$/, '')}`;
+  const scheme = /^[a-z][a-z0-9+.-]*:\/\/(?:[^@/]*@)?([^/:]+)(?::\d+)?(\/.*)?$/i.exec(u);
+  if (scheme) return tidy(scheme[1]!, scheme[2] ?? '');
+  const scp = /^(?:[^@/:]+@)?([^/:]+):(?!\/\/)(.*)$/.exec(u); // git@host:team/app.git
+  if (scp && !/^[a-z]:[\\/]/i.test(u)) return tidy(scp[1]!, scp[2]!);
+  return u.replace(/\/+$/, '');
+}
+
+/**
+ * sha256(the normalized origin URL, else the root path)[:16]: the `project` label `sbx up` finds
+ * sandboxes by, the same for every clone of one repository.
+ */
 export async function repoId(root: string): Promise<string> {
   let origin = '';
   try {
@@ -152,7 +175,7 @@ export async function repoId(root: string): Promise<string> {
     origin = '';
   }
   return createHash('sha256')
-    .update(origin || root)
+    .update(origin ? normalizeOrigin(origin) : root)
     .digest('hex')
     .slice(0, 16);
 }
@@ -264,7 +287,10 @@ export async function planPush(
       continue;
     }
     if (st.isFile()) {
-      if (st.size > MAX_FILE) tooBig.push(`${p} (${mib(st.size)})`);
+      if (st.size > MAX_FILE) {
+        // Just over the limit, MiB to one decimal reads as the limit itself: give the bytes.
+        tooBig.push(`${p} (${mib(st.size)}, ${st.size} bytes)`);
+      }
       bytes += st.size;
       const top = p.includes('/') ? p.slice(0, p.indexOf('/')) : '.';
       byTop.set(top, (byTop.get(top) ?? 0) + st.size);
@@ -273,7 +299,8 @@ export async function planPush(
   }
   if (tooBig.length) {
     throw new PushError(
-      `files over ${MAX_FILE >> 20} MiB are not pushed; remove them, or .gitignore them: ${tooBig.join(', ')}`,
+      `files over ${MAX_FILE >> 20} MiB (${MAX_FILE} bytes) are not pushed; remove them, or ` +
+        `.gitignore them: ${tooBig.join(', ')}`,
     );
   }
   const max = o.maxPush ?? DEFAULT_MAX_PUSH;
@@ -829,9 +856,12 @@ export function writeBinding(
   mkdirSync(join(root, '.sbx'), { recursive: true });
   const f = join(root, '.sbx', 'sandbox.json');
   const tmp = `${f}.${process.pid}.tmp`;
+  rmSync(tmp, { force: true }); // created fresh, so its mode is the one given
+  // 0600: the binding names the user's sandbox and control plane, for no one else on the machine.
   writeFileSync(
     tmp,
     JSON.stringify({ id: b.id, controlPlaneUrl, template: b.template }, null, 2) + '\n',
+    { mode: 0o600 },
   );
   renameSync(tmp, f);
 }
