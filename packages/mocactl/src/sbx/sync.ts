@@ -11,10 +11,10 @@ import {
   applyPatch,
   bindingUrl,
   capture,
-  hasUnpulled,
   planPush,
   pushTree,
   repoId,
+  UnpulledError,
   writeBinding,
   type PushPlan,
 } from './push.js';
@@ -84,8 +84,15 @@ async function plan(
   return p;
 }
 
-async function doPush(c: SbxCtx, x: OpenedExec, id: string, p: PushPlan): Promise<void> {
+async function doPush(
+  c: SbxCtx,
+  x: OpenedExec,
+  id: string,
+  p: PushPlan,
+  guard: boolean,
+): Promise<void> {
   await pushTree(x.exec, p, undefined, {
+    guard,
     ...(c.signal ? { signal: c.signal } : {}),
     onChunk: (i, n) => {
       if (n > 1) c.io.err(`pushing part ${i} of ${n}`);
@@ -111,11 +118,14 @@ export async function cmdPush(
   const p = await plan(c, root, f);
   if (typeof p === 'number') return p;
   return withExec(c, id, factory, async (x) => {
-    if (!f.force && (await hasUnpulled(x.exec, undefined, { signal: c.signal }))) {
+    try {
+      // Without --force, the unpulled check runs in the Exec that empties the workspace.
+      await doPush(c, x, id, p, !f.force);
+    } catch (err) {
+      if (!(err instanceof UnpulledError)) throw err;
       say(c, `${UNPULLED_TEXT}: run mocactl sbx pull, or push --force to discard them`);
       return SBX_EXIT.failed;
     }
-    await doPush(c, x, id, p);
     return SBX_EXIT.ok;
   });
 }
@@ -274,15 +284,17 @@ export async function cmdUp(
     return SBX_EXIT.failed;
   }
   const code = await withExec(c, s.id, factory, async (x) => {
-    if (reused && (await hasUnpulled(x.exec, undefined, { signal: c.signal }))) {
+    try {
+      // A reused sandbox is checked in the Exec that empties it; a new one has nothing to lose.
+      await doPush(c, x, s.id, p, reused);
+    } catch (err) {
+      if (!(err instanceof UnpulledError)) throw err;
       say(
         c,
         `${UNPULLED_TEXT}, so it was left as it is (not pushed): run mocactl sbx pull --apply, ` +
           'or mocactl sbx push --force to discard them',
       );
-      return SBX_EXIT.ok;
     }
-    await doPush(c, x, s.id, p);
     return SBX_EXIT.ok;
   });
   if (code !== SBX_EXIT.ok) return code;

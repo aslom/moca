@@ -23,6 +23,7 @@ import {
   MAX_FILE,
   MAX_STDIN,
   PushError,
+  UnpulledError,
   advanceBaseline,
   applyPatch,
   bindingUrl,
@@ -249,6 +250,31 @@ describe('push into the sandbox (SBX0 §6.2)', () => {
     expect(statSync(join(ws, 'bin/run.sh')).mode & 0o111).not.toBe(0);
     expect(readFileSync(join(ws, 'dir with space/ünï.txt'), 'utf8')).toBe('u\n');
     expect(await hasUnpulled(exec)).toBe(false);
+  });
+
+  it('a guarded push checks for unpulled work in the same Exec that empties the workspace (review)', async () => {
+    const r = repo();
+    const { ws, exec, sent } = await pushed(r);
+    writeFileSync(join(ws, 'src/app.py'), 'print("agent")\n');
+    sent.length = 0;
+    await expect(
+      pushTree(exec, await planPush(r), undefined, { guard: true }),
+    ).rejects.toBeInstanceOf(UnpulledError);
+    expect(sent).toHaveLength(1); // one Exec: the check and the emptying are not two steps
+    expect(sent[0]!.command).toContain('sbx-state:unpulled');
+    expect(readFileSync(join(ws, 'src/app.py'), 'utf8')).toBe('print("agent")\n');
+    expect(await hasUnpulled(exec)).toBe(true);
+    // Files with no baseline are guarded too; an empty workspace is pushed.
+    const fresh = localWorkspace();
+    writeFileSync(join(fresh.ws, 'hand-made.txt'), 'x');
+    await expect(
+      pushTree(fresh.exec, await planPush(r), undefined, { guard: true }),
+    ).rejects.toBeInstanceOf(UnpulledError);
+    const empty = localWorkspace();
+    await pushTree(empty.exec, await planPush(r), undefined, { guard: true });
+    expect(await sandboxState(empty.exec)).toBe('clean');
+    // And a clean sandbox is pushed over.
+    await pushTree(empty.exec, await planPush(r), undefined, { guard: true });
   });
 
   it('empties the workspace on a re-push, keeping only lost+found', async () => {

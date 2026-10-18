@@ -100,6 +100,13 @@ const REINCLUDE = '.git/sbx-reinclude';
 
 export class PushError extends Error {}
 
+/** A guarded push found changes not yet pulled, and changed nothing. */
+export class UnpulledError extends PushError {
+  constructor() {
+    super('the sandbox has changes not yet pulled');
+  }
+}
+
 /**
  * Whether a path is in the binding's directory, as a case-insensitive (macOS, Windows) or
  * normalizing (macOS: NFD) filesystem would resolve it: `.SBX/sandbox.json` is `.sbx/` there.
@@ -433,24 +440,40 @@ export async function pushTree(
   exec: Exec,
   plan: PushPlan,
   ws = WORKSPACE,
-  o: SyncOpts & { onChunk?: (i: number, n: number) => void } = {},
+  o: SyncOpts & {
+    onChunk?: (i: number, n: number) => void;
+    /**
+     * Refuse (UnpulledError, nothing changed) when the sandbox holds changes not yet pulled. The
+     * check runs in the same Exec that empties the workspace, so no change can slip in between.
+     */
+    guard?: boolean;
+  } = {},
 ): Promise<void> {
   const cd = `cd ${q(ws)}`;
   const n = plan.chunks.length;
+  const guard = o.guard
+    ? `${STATE}; case "$s" in dirty|no_baseline) echo sbx-state:unpulled >&2; exit ${NO_BASELINE};; esac; `
+    : '';
+  const first =
+    `${guard}${EMPTY} && ${G} init -q && mkdir -p .git/info && : > ${INCOMPLETE} && ` +
+    `printf '%s\\n' ${[...SANDBOX_EXCLUDES, ...plan.reinclude].map(q).join(' ')} > .git/info/exclude && ` +
+    (plan.reinclude.length
+      ? `printf '%s\\0' ${plan.reinclude.map(q).join(' ')} > ${REINCLUDE} && `
+      : `: > ${REINCLUDE} && `);
+  const later = `{ [ -e ${INCOMPLETE} ] || { echo 'the push was interrupted (another push to this sandbox?)' >&2; exit 1; }; } && `;
   for (const [i, c] of plan.chunks.entries()) {
     o.onChunk?.(i + 1, n);
-    const start =
-      i === 0
-        ? `${EMPTY} && ${G} init -q && mkdir -p .git/info && : > ${INCOMPLETE} && ` +
-          `printf '%s\\n' ${[...SANDBOX_EXCLUDES, ...plan.reinclude].map(q).join(' ')} > .git/info/exclude && ` +
-          (plan.reinclude.length
-            ? `printf '%s\\0' ${plan.reinclude.map(q).join(' ')} > ${REINCLUDE} && `
-            : `: > ${REINCLUDE} && `)
-        : `{ [ -e ${INCOMPLETE} ] || { echo 'the push was interrupted (another push to this sandbox?)' >&2; exit 1; }; } && `;
-    await must(exec, `${cd} && ${start}${EXTRACT}`, `the push (part ${i + 1} of ${n})`, {
-      ...o,
+    const r = await exec(`${cd} && ${i === 0 ? first : later}${EXTRACT}`, {
       stdin: c,
+      timeoutS: SYNC_TIMEOUT_S,
+      ...(o.signal ? { signal: o.signal } : {}),
     });
+    if (i === 0 && guard && r.exitCode === NO_BASELINE && r.stderr.includes('sbx-state:unpulled')) {
+      throw new UnpulledError();
+    }
+    if (r.exitCode !== 0) {
+      throw new PushError(`the push (part ${i + 1} of ${n}) failed in the sandbox: ${outcome(r)}`);
+    }
   }
   const lists = pathSlices(plan.paths, MAX_STDIN);
   for (const l of lists.slice(0, -1)) {
