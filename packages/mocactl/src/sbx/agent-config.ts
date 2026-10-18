@@ -65,6 +65,8 @@ export const OPENCODE_OFF: readonly string[] = Object.freeze([
   'webfetch',
   'websearch',
   'task',
+  // `patch`'s newer name in current OpenCode: switching off a tool an older one lacks is harmless.
+  'apply_patch',
 ]);
 export const MARK_BEGIN = '<!-- sbx:begin -->';
 export const MARK_END = '<!-- sbx:end -->';
@@ -482,8 +484,8 @@ function opencodeFile(root: string, hint = WRITE_HINT): string {
   return jsonc ? 'opencode.jsonc' : 'opencode.json';
 }
 
-/** OpenCode's tool names for OPENCODE_OFF; `apply_patch` is `patch`'s newer name. */
-const OPENCODE_TOOLS = [...OPENCODE_OFF, 'apply_patch'];
+/** The OpenCode tools every check covers: the exact `tools` keys and the overrides alike. */
+const OPENCODE_TOOLS: readonly string[] = OPENCODE_OFF;
 /** The `permission` key that gates a tool: `edit` covers every file modification. */
 const permissionOf = (t: string) => (['write', 'patch', 'apply_patch'].includes(t) ? 'edit' : t);
 /** An OpenCode tool or permission key, which may hold `*` and `?` wildcards. */

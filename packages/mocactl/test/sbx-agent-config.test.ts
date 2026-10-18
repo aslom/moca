@@ -107,6 +107,8 @@ describe('agent configuration (SBX0 §6.3)', () => {
       'webfetch',
       'websearch',
       'task',
+      // The newer name for patch in current OpenCode (review round 2).
+      'apply_patch',
     ]);
     for (const s of [
       'remote sandbox at `/workspace`',
@@ -320,6 +322,24 @@ describe('agent configuration (SBX0 §6.3)', () => {
     expect(text(d, 'opencode.json').startsWith('{\n  "model": "x", /* a\n  b */\n')).toBe(true);
     removeAgentConfig(d);
     expect(text(d, 'opencode.json')).toBe(oc);
+  });
+
+  it.each([
+    [{ tools: { apply_patch: true } }, 'tools.apply_patch'],
+    [{ agent: { build: { tools: { apply_patch: true } } } }, 'agent.build.tools.apply_patch'],
+    [{ permission: { apply_patch: 'allow' } }, 'permission.apply_patch'],
+  ])('refuses apply_patch switched on: %j names %s', (body, key) => {
+    const d = dir();
+    writeFileSync(join(d, 'opencode.json'), JSON.stringify(body));
+    expect(conflictOf(() => writeAgentConfig(d, { dryRun: true })).key).toBe(key);
+    // And doctor finds it in a configured repository.
+    const e = dir();
+    writeAgentConfig(e);
+    const o = json(e, 'opencode.json');
+    Object.assign(o, body);
+    if ('tools' in body) o.tools = { ...o.tools, ...body.tools };
+    writeFileSync(join(e, 'opencode.json'), JSON.stringify(o));
+    expect(checkAgentConfig(e).join('\n')).toMatch(/OpenCode.*apply_patch/);
   });
 
   it('accepts OpenCode overrides that keep the local tools off', () => {
