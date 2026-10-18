@@ -546,10 +546,13 @@ export async function capturePatch(exec: Exec, ws = WORKSPACE, o: SyncOpts = {})
 
 /**
  * Makes what was pulled the sandbox's baseline, so the next pull holds only newer changes (spec
- * §6.2). With `tree` (from `capture`), exactly that tree, so a change the agent made after the
- * capture is still pulled next time; without, the workspace as it is now. HEAD follows when the
- * agent has not moved it (so its own `git diff` shows only unpulled work); the agent's own commits
- * and the files in the workspace are never touched.
+ * §6.2). With `tree` (from `capture`), exactly that tree, with no second hash of the workspace,
+ * so a change the agent made after the capture is still pulled next time; without, the workspace
+ * as it is now (one full hash). HEAD follows when the agent has not moved it, so its own
+ * `git diff` shows only unpulled work. The agent's index is kept, except the entries of the pulled
+ * paths, which are set to the new HEAD's (their content was pulled); without that, its
+ * `git status` would show every pulled change as staged in reverse. The agent's own commits and
+ * the workspace's files are never touched.
  */
 export async function advanceBaseline(
   exec: Exec,
@@ -558,12 +561,21 @@ export async function advanceBaseline(
   o: SyncOpts = {},
 ): Promise<void> {
   if (tree !== undefined && !TREE_RE.test(tree)) throw new PushError(`not a tree id: ${tree}`);
+  const head =
+    tree === undefined
+      ? `${STATE} && ${NEED_BASELINE} && `
+      : `{ [ ! -e ${INCOMPLETE} ] || { echo sbx-state:incomplete >&2; exit ${NO_BASELINE}; }; } && ` +
+        `{ b=$(${G} rev-parse -q --verify ${q(`${BASELINE_REF}^{commit}`)}) || ` +
+        `{ echo sbx-state:no_baseline >&2; exit ${NO_BASELINE}; }; } && t=${tree} && `;
   const command =
-    `cd ${q(ws)} && ${STATE} && ${NEED_BASELINE} && ` +
-    (tree ? `t=${tree} && ` : '') +
+    `cd ${q(ws)} && ${head}` +
     `c=$(${G} ${ID} commit-tree "$t" -p "$b" -m sbx-pulled) && ` +
     `${G} update-ref ${BASELINE_REF} "$c" "$b" && ` +
-    `if [ "$(${G} rev-parse -q --verify HEAD)" = "$b" ]; then ${G} update-ref HEAD "$c" "$b" && ${G} reset -q; fi`;
+    `if [ "$(${G} rev-parse -q --verify HEAD)" = "$b" ]; then ` +
+    `${G} update-ref HEAD "$c" "$b" && y=$(mktemp -d .git/sbx-tmp.XXXXXX) && ` +
+    `${G} diff --name-only -z --no-renames "$b" "$c" > "$y/paths" && ` +
+    `{ [ ! -s "$y/paths" ] || ${G} --literal-pathspecs reset -q "$c" --pathspec-from-file="$y/paths" --pathspec-file-nul; } && ` +
+    `rm -rf "$y"; fi`;
   const r = await exec(command, {
     timeoutS: SYNC_TIMEOUT_S,
     ...(o.signal ? { signal: o.signal } : {}),

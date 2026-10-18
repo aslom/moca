@@ -434,6 +434,36 @@ describe('pull (SBX0 §6.2, §10.3)', () => {
     expect((await capturePatch(exec)).length).toBe(0);
   });
 
+  it("advancing to a captured tree hashes nothing again, and keeps the agent's own staging", async () => {
+    const r = repo();
+    const { ws, exec, sent } = await pushed(r);
+    writeFileSync(join(ws, 'src/app.py'), 'print(2)\n');
+    writeFileSync(join(ws, 'notes.md'), 'staged by the agent\n');
+    const { patch, tree } = await capture(exec);
+    git(ws, 'add', 'notes.md'); // the agent's own staging, after the capture
+    await applyPatch(r, patch);
+    sent.length = 0;
+    await advanceBaseline(exec, undefined, tree);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.command).not.toContain('add -A'); // no second hash of the workspace
+    // The pulled path is clean for the agent's git; its own staged notes.md is still staged.
+    expect(git(ws, 'status', '--porcelain', '--', 'src/app.py')).toBe('');
+    expect(git(ws, 'diff', '--cached', '--name-only')).toBe('');
+    expect(git(ws, 'ls-files', '-s', 'notes.md')).not.toBe('');
+    expect(await hasUnpulled(exec)).toBe(false);
+  });
+
+  it("keeps the agent's staging of a file it changed after the capture", async () => {
+    const { ws, exec } = await pushed(repo());
+    writeFileSync(join(ws, 'src/app.py'), 'print(2)\n');
+    const { tree } = await capture(exec);
+    writeFileSync(join(ws, 'bin/run.sh'), '#!/bin/sh\necho later\n');
+    git(ws, 'add', 'bin/run.sh');
+    await advanceBaseline(exec, undefined, tree);
+    expect(git(ws, 'diff', '--cached', '--name-only')).toBe('bin/run.sh\n');
+    expect(await hasUnpulled(exec)).toBe(true);
+  });
+
   it('advances the baseline to what was captured, so a change made meanwhile is pulled next time', async () => {
     const r = repo();
     const { ws, exec } = await pushed(r);
