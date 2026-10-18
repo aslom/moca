@@ -235,7 +235,12 @@ export async function cmdLs(c: SbxCtx, all: boolean): Promise<number> {
   }
 }
 
-export async function cmdRm(c: SbxCtx, id: string): Promise<number> {
+/**
+ * `sbx rm`. `goneOk`: the id is the repository's bound sandbox, so one the control plane no longer
+ * knows (purged after its retention) is "already gone" (exit 0), and `rm` can still take back
+ * the configuration `up` wrote. Any other id's 404 is the failure it was.
+ */
+export async function cmdRm(c: SbxCtx, id: string, o: { goneOk?: boolean } = {}): Promise<number> {
   try {
     const r = await c.api.deleteSandbox(id);
     if (c.json) c.io.out(JSON.stringify(r) + '\n');
@@ -249,6 +254,11 @@ export async function cmdRm(c: SbxCtx, id: string): Promise<number> {
     );
     return SBX_EXIT.ok;
   } catch (err) {
+    if (o.goneOk && err instanceof ApiError && err.code === 'sandbox_not_found') {
+      if (c.json) c.io.out(JSON.stringify({ id, state: 'terminated', reason: 'gone' }) + '\n');
+      c.io.err(`${id} is already gone (the control plane no longer has it)`);
+      return SBX_EXIT.ok;
+    }
     return failed(c, err);
   }
 }

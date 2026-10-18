@@ -476,12 +476,13 @@ export async function sbxMain(
     case 'ls':
       return cmdLs(ctx, values.all === true);
     case 'rm': {
-      const code = await cmdRm(ctx, id!);
       // The bound sandbox gone, its configuration goes too: `sbx rm` takes back what `up` added.
       const f = findSandboxFile(deps.cwd ?? process.cwd());
-      if (code !== SBX_EXIT.ok || values['keep-config'] || !f) return code;
-      const bindingRoot = dirname(dirname(f));
-      return readBoundSandbox(bindingRoot) === id ? unbind(ctx, bindingRoot) : code;
+      const bindingRoot = f ? dirname(dirname(f)) : undefined;
+      const bound = bindingRoot !== undefined && readBoundSandbox(bindingRoot) === id;
+      const code = await cmdRm(ctx, id!, { goneOk: bound });
+      if (code !== SBX_EXIT.ok || values['keep-config'] || !bound) return code;
+      return unbind(ctx, bindingRoot!);
     }
     case 'doctor':
       return cmdDoctor(ctx, root!, id, deps.execFactory);

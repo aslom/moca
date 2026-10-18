@@ -433,6 +433,18 @@ describe('mocactl sbx up and rm: the agent configuration (SBX0 §6.3, plan Revie
     expect(git(h.r, 'status', '--porcelain', '--ignored')).toBe(status);
   });
 
+  it('rm of a bound sandbox the control plane has purged still takes the config back (review I3)', async () => {
+    const h = harness();
+    expect(await h.run(['up'])).toBe(0);
+    h.cp.boxes.delete(NEW); // past retention: the record is gone, so DELETE answers 404
+    expect(await h.run(['rm'])).toBe(0);
+    expect(h.err()).toContain(`${NEW} is already gone`);
+    for (const f of [...CFG, '.claude', '.sbx']) expect(existsSync(join(h.r, f)), f).toBe(false);
+    // Not the bound sandbox: a 404 is still the failure it was.
+    expect(await h.run(['rm', OTHER])).toBe(1);
+    expect(h.err()).toMatch(/no such sandbox/);
+  });
+
   it('rm --keep-config, or of another sandbox, leaves the configuration and the binding', async () => {
     const h = harness({ boxes: [sandbox({ id: OTHER })] });
     expect(await h.run(['up'])).toBe(0);
