@@ -10,6 +10,7 @@ import {
 import {
   MCP_INSTRUCTIONS,
   createSandboxMcpServer,
+  execFailureText,
   type CallRecord,
   type SandboxMcpOptions,
   line,
@@ -492,5 +493,23 @@ describe('the sandbox MCP server (SBX0 §6.4)', () => {
       { tool: 'bash', execs: 1, ok: false, error: 'cancelled by the client' },
     ]);
     expect(text(await call(client, 'sandbox_info', {}))).toBe('template default');
+  });
+});
+
+describe('execFailureText: one mapping for the MCP server and mocactl', () => {
+  it('drops the model-facing "not your command\'s output" for the CLI, and nothing else', () => {
+    const boot = new ExecMachineryError('sandbox failure: vm boot failed', 13);
+    expect(execFailureText(boot)).toBe(
+      "sandbox failure, not your command's output: vm boot failed",
+    );
+    expect(execFailureText(boot, { audience: 'cli' })).toBe('sandbox failure: vm boot failed');
+    const busy = new ExecMachineryError('sandbox busy: 4 in flight', 8, 'busy');
+    expect(execFailureText(busy, { audience: 'cli' })).toBe(execFailureText(busy));
+    const refused = new ExecRefusedError('workspace not owned by this sandbox', 7);
+    expect(execFailureText(refused, { audience: 'cli' })).toBe(execFailureText(refused));
+  });
+
+  it('is undefined for an error that is not an Exec failure', () => {
+    expect(execFailureText(new Error('x'))).toBeUndefined();
   });
 });

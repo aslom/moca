@@ -1,10 +1,6 @@
 import {
-  ExecMachineryError,
-  ExecRefusedError,
-  SANDBOX_BUSY_TEXT,
+  execFailureText,
   SandboxExecConn,
-  TEMPLATE_BUSY_TEXT,
-  TOKEN_EXPIRED_TEXT,
   type Exec,
   type ExecConnOptions,
   type SandboxTokenGrant,
@@ -12,6 +8,7 @@ import {
 } from '@moca/sandbox-client';
 import { ApiError } from '../api/errors.js';
 import { describeError } from '../core/messages.js';
+import { sanitizeRemote } from '../core/sanitize.js';
 import type { SandboxApiClient, SbxToken } from './api.js';
 import { failed, type SbxCtx } from './commands.js';
 
@@ -135,25 +132,9 @@ export function execFailed(c: SbxCtx, err: unknown): number {
   return EXIT_SANDBOX_FAILED;
 }
 
-/** One line for a failure that was not the command's outcome (SBX0 §6.4's texts). */
+/** One line for a failure that was not the command's outcome: sandbox-client's text, for a person. */
 export function sandboxFailureText(err: unknown): string {
-  if (err instanceof ExecMachineryError) {
-    switch (err.kind) {
-      case 'busy':
-        return SANDBOX_BUSY_TEXT;
-      case 'template_busy':
-        return TEMPLATE_BUSY_TEXT;
-      case 'token_expired':
-        return TOKEN_EXPIRED_TEXT;
-      default:
-        return `sandbox failure: ${describeError(err).replace(/^sandbox failure: /, '')}`;
-    }
-  }
-  if (err instanceof ExecRefusedError) {
-    return (
-      `the sandbox refused the call: ${describeError(err)} ` +
-      '(if the sandbox expired or was deleted, run `mocactl sbx up` for a new one)'
-    );
-  }
-  return `sandbox failure: ${describeError(err)}`;
+  // The relay's and worker's messages are remote text: sanitized before they reach a terminal.
+  const text = execFailureText(err, { audience: 'cli' });
+  return text !== undefined ? sanitizeRemote(text) : `sandbox failure: ${describeError(err)}`;
 }

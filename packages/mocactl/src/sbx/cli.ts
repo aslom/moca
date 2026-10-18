@@ -4,6 +4,7 @@ import { parseArgs } from 'node:util';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { MAX_STDIN_BYTES, q, WORKSPACE } from '@moca/sandbox-client';
 import { loadConfig, normalizeUrl, resolvePaths, type Paths, type TuiConfig } from '../config.js';
+import { sanitizeRemote } from '../core/sanitize.js';
 import type { Io } from '../headless.js';
 import { buildRuntime, ensureRuntimeAuth, type Runtime } from '../runtime.js';
 import { SandboxApiClient } from './api.js';
@@ -35,7 +36,9 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
   mocactl sbx token [ID] [--json]                print a fresh sandbox token (15 minutes by default)
   mocactl sbx env [ID]                           shell exports for a direct sandbox/v1 client
   mocactl sbx run [--sandbox ID] [--timeout S] [-- CMD ...]   run CMD (or the script on stdin) in /workspace
-                                                 (exit: the command's code; 124 timed out or killed;
+                                                 (CMD's words are quoted, so they run exactly as typed:
+                                                 for pipes, $VARS or globs use stdin or -- sh -c '...';
+                                                 exit: the command's code; 124 timed out or killed;
                                                  125 sandbox failure; S defaults to, and is capped at,
                                                  the sandbox token's lifetime minus 60 s)
   mocactl sbx put PATH [--sandbox ID]            write stdin to PATH under /workspace
@@ -55,7 +58,7 @@ export interface SbxDeps {
   /** All of stdin as text: `run`'s script. */
   readStdin?: () => Promise<string>;
   /** All of stdin, byte for byte: `put`'s content. */
-  readStdinBytes?: () => Promise<Buffer>;
+  readStdinBytes?: (limit?: number) => Promise<Buffer>;
   /** The gRPC connection (tests pass a fake). */
   execFactory?: ExecFactory;
   /** `mcp`'s transport (default stdio). */
@@ -120,7 +123,10 @@ export async function openSbx(
   env: NodeJS.ProcessEnv,
   io: Io,
   deps: SbxDeps,
-  opts: { login?: boolean } = {},
+  opts: {
+    login?: boolean;
+    /** Where a `flags.controlPlaneUrl` came from, when not a flag. */ urlFrom?: string;
+  } = {},
 ): Promise<{ rt: Runtime; api: SandboxApiClient; url: string; explicitUrl?: string } | number> {
   const remembered = loadConfig(resolvePaths(env, deps.home ?? homedir())).config;
   const url = resolveSbxUrl(flags.controlPlaneUrl, env, remembered);
@@ -142,9 +148,10 @@ export async function openSbx(
     // A URL from a flag (or a bound sandbox's) is not what a bare `sbx login` would use: name it.
     const login =
       sbxUrlSource(flags.controlPlaneUrl, env, remembered) === 'flag'
-        ? `mocactl sbx login --control-plane-url ${q(url)}`
+        ? `mocactl sbx login --control-plane-url ${q(sanitizeRemote(url))}`
         : 'mocactl sbx login';
-    io.err(`sbx: not logged in to the sandbox service: run \`${login}\``);
+    const where = opts.urlFrom ? ` at ${sanitizeRemote(url)} (from ${opts.urlFrom})` : '';
+    io.err(`sbx: not logged in to the sandbox service${where}: run \`${login}\``);
     return SBX_EXIT.loginRequired;
   }
   if (auth.kind === 'unreachable') return failRefresh(io, auth.error);
@@ -277,7 +284,7 @@ export async function sbxMain(
       return SBX_EXIT.usage;
     }
     if (!SANDBOX_ID_RE.test(id)) {
-      io.err(`sbx: '${id}' is not a sandbox id (sbx-…)`);
+      io.err(`sbx: '${sanitizeRemote(id)}' is not a sandbox id (sbx-…)`);
       return SBX_EXIT.usage;
     }
   }
@@ -285,7 +292,9 @@ export async function sbxMain(
   if (timeout === null) return SBX_EXIT.usage;
   let script: string | undefined;
   if (command === 'run') {
-    script = positionals.slice(1).join(' ');
+    // Each word quoted: `run -- grep 'a b' f` runs exactly that, and `$HOME` stays literal. Shell
+    // syntax is for a script on stdin, or `-- sh -c '...'`.
+    script = positionals.slice(1).map(q).join(' ');
     if (!script) {
       if (deps.stdinIsTTY === true || !deps.readStdin) {
         io.err('sbx: run needs a command (sbx run -- CMD ...), or a script on stdin');
@@ -306,7 +315,12 @@ export async function sbxMain(
       io.err(`sbx: put writes under ${WORKSPACE}; '${arg}' is not under it`);
       return SBX_EXIT.usage;
     }
-    content = (await deps.readStdinBytes?.()) ?? Buffer.alloc(0);
+    if (deps.stdinIsTTY === true || !deps.readStdinBytes) {
+      io.err('sbx: put writes its stdin: pipe or redirect the content (sbx put PATH < FILE)');
+      return SBX_EXIT.usage;
+    }
+    // One byte past the cap is enough to refuse: a huge stdin is never held in full.
+    content = await deps.readStdinBytes(MAX_STDIN_BYTES + 1);
     if (content.length > MAX_STDIN_BYTES) {
       io.err(
         `sbx: stdin is ${mib(content.length)}, over the ${mib(MAX_STDIN_BYTES)} one Exec can carry; ` +
@@ -334,8 +348,10 @@ export async function sbxMain(
   // the one remembered at login (a `sbx mcp` started by an agent has no MOCACTL_SBX_URL): the flag
   // and the environment still win (R5j).
   const flagUrl = values['control-plane-url'] || (env.MOCACTL_SBX_URL ? undefined : boundUrl);
+  const fromBinding = !values['control-plane-url'] && flagUrl !== undefined;
   const opened = await openSbx({ controlPlaneUrl: flagUrl }, env, io, deps, {
     login: command === 'login' || command === 'logout',
+    ...(fromBinding ? { urlFrom: '.sbx/sandbox.json' } : {}),
   });
   if (typeof opened === 'number') return opened;
   const ctx: SbxCtx = { ...opened, io, json: values.json === true, signal: deps.signal };

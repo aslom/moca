@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -78,10 +79,69 @@ describe('mocactl sbx run (SBX0 §6.1, §6.5)', () => {
     });
     expect(x.opened[0]!.caPem).toBeUndefined();
     // The default timeout is the token lifetime minus 60 s, derived from the token's iat/exp.
-    expect(x.sent).toEqual([{ command: 'npm test', stdin: undefined, timeoutS: CAP }]);
-    expect(io.outs.join('')).toBe('out\n');
-    expect(io.errs.join('\n')).toContain('err');
+    // Each word quoted: exactly what was typed runs (R1 of the review).
+    expect(x.sent).toEqual([{ command: "'npm' 'test'", stdin: undefined, timeoutS: CAP }]);
+    expect(Buffer.concat(io.outB).toString()).toBe('out\n');
+    expect(Buffer.concat(io.errB).toString()).toBe('err\n');
+    expect(io.outs).toEqual([]);
     expect(x.closed()).toBe(1);
+  });
+
+  it('runs each argument as typed: a space stays inside its word, $HOME stays literal', async () => {
+    const { home, env, io } = setup();
+    const x = fakeExec();
+    await sbxMain(['run', '--sandbox', SBX, '--', 'grep', 'a b', 'f'], env, io, {
+      home,
+      fetchImpl: mint().fetchImpl,
+      execFactory: x.factory,
+    });
+    await sbxMain(['run', '--sandbox', SBX, '--', 'echo', '$HOME', "it's", '*'], env, io, {
+      home,
+      fetchImpl: mint().fetchImpl,
+      execFactory: x.factory,
+    });
+    expect(x.sent.map((s) => s.command)).toEqual([
+      "'grep' 'a b' 'f'",
+      `'echo' '$HOME' 'it'\\''s' '*'`,
+    ]);
+    // And through a real shell, those words come back unchanged.
+    const words = execFileSync('sh', ['-c', `printf '%s\\n' ${x.sent[1]!.command.slice(7)}`])
+      .toString()
+      .split('\n');
+    expect(words.slice(0, 3)).toEqual(['$HOME', "it's", '*']);
+  });
+
+  it("passes the command's output through byte for byte: no decoding, no newline added", async () => {
+    const { home, env, io } = setup();
+    const bin = Buffer.from([0xff, 0xfe, 0x00, 0xc3, 0x28, 0x0a, 0x80]); // not UTF-8
+    const x = fakeExec(() => res({ stdout: bin, stderr: Buffer.from('warning: no newline') }));
+    expect(
+      await sbxMain(['run', '--sandbox', SBX, '--', 'cat', 'img'], env, io, {
+        home,
+        fetchImpl: mint().fetchImpl,
+        execFactory: x.factory,
+      }),
+    ).toBe(0);
+    expect(Buffer.concat(io.outB).equals(bin)).toBe(true);
+    expect(Buffer.concat(io.errB).toString()).toBe('warning: no newline');
+    expect(io.outs).toEqual([]);
+    expect(io.errs).toEqual([]);
+  });
+
+  it("starts mocactl's own note on a new line after stderr with no trailing newline", async () => {
+    const { home, env, io } = setup();
+    const x = fakeExec(() =>
+      res({ stdout: Buffer.alloc(0), stderr: Buffer.from('partial'), exitCode: -9 }),
+    );
+    expect(
+      await sbxMain(['run', '--sandbox', SBX, '--', 'x'], env, io, {
+        home,
+        fetchImpl: mint().fetchImpl,
+        execFactory: x.factory,
+      }),
+    ).toBe(124);
+    expect(Buffer.concat(io.errB).toString()).toBe('partial\n');
+    expect(io.errs.join('\n')).toMatch(/killed/);
   });
 
   it('runs the script on stdin when no command is given, and honours --timeout', async () => {
@@ -319,6 +379,7 @@ describe('mocactl sbx put (SBX0 §6.1)', () => {
       home,
       fetchImpl: mint().fetchImpl,
       execFactory: x.factory,
+      stdinIsTTY: false,
       readStdinBytes: async () => Buffer.from('héllo\n'),
     });
     expect(code).toBe(0);
@@ -342,6 +403,7 @@ describe('mocactl sbx put (SBX0 §6.1)', () => {
         home,
         fetchImpl: mint().fetchImpl,
         execFactory: x.factory,
+        stdinIsTTY: false,
         readStdinBytes: async () => Buffer.from('x'),
       }),
     ).toBe(1);
@@ -356,6 +418,7 @@ describe('mocactl sbx put (SBX0 §6.1)', () => {
         home,
         fetchImpl: cp.fetchImpl,
         execFactory: fakeExec().factory,
+        stdinIsTTY: false,
         readStdinBytes: async () => Buffer.alloc(MAX_STDIN_BYTES + 1),
       }),
     ).toBe(2);
@@ -372,12 +435,43 @@ describe('mocactl sbx put (SBX0 §6.1)', () => {
           home,
           fetchImpl: cp.fetchImpl,
           execFactory: fakeExec().factory,
+          stdinIsTTY: false,
           readStdinBytes: async () => Buffer.from('x'),
         }),
       ).toBe(2);
     }
     expect(io.errs.join('\n')).toMatch(/not under it/);
     expect(cp.calls).toEqual([]);
+  });
+
+  it('reads stdin only up to one byte past the cap', async () => {
+    const { home, env, io } = setup();
+    const limits: (number | undefined)[] = [];
+    await sbxMain(['put', 'a', '--sandbox', SBX], env, io, {
+      home,
+      fetchImpl: mint().fetchImpl,
+      execFactory: fakeExec().factory,
+      stdinIsTTY: false,
+      readStdinBytes: async (limit) => (limits.push(limit), Buffer.from('x')),
+    });
+    expect(limits).toEqual([MAX_STDIN_BYTES + 1]);
+  });
+
+  it('refuses when stdin is a terminal, reading nothing (exit 2)', async () => {
+    const { home, env, io } = setup();
+    const cp = mint();
+    let read = false;
+    expect(
+      await sbxMain(['put', 'a', '--sandbox', SBX], env, io, {
+        home,
+        fetchImpl: cp.fetchImpl,
+        stdinIsTTY: true,
+        readStdinBytes: async () => ((read = true), Buffer.from('x')),
+      }),
+    ).toBe(2);
+    expect(read).toBe(false);
+    expect(cp.calls).toEqual([]);
+    expect(io.errs.join('\n')).toMatch(/pipe or redirect/);
   });
 
   it('takes exactly one PATH (exit 2)', async () => {
@@ -660,7 +754,38 @@ describe("a bound sandbox's control plane (R5j)", () => {
       }),
     ).toBe(3);
     expect(io.errs.join('\n')).toContain(`mocactl sbx login --control-plane-url '${MCP_URL}'`);
+    expect(io.errs.join('\n')).toContain(`at ${MCP_URL} (from .sbx/sandbox.json)`);
     expect(h.seen).toEqual([]);
+  });
+
+  it('ignores a binding URL with a control character or a space, and never prints the escape', async () => {
+    const { home, paths, io } = setup();
+    saveConfig(paths, { ...DEFAULT_CONFIG, sbxControlPlaneUrl: URL_ });
+    for (const bad of [
+      'https://x.example.invalid/\u001b]52;c;aGk=\u0007',
+      'https://a b.example.invalid',
+    ]) {
+      const h = hosts();
+      await sbxMain(['run', '--', 'ls'], { HOME: home }, io, {
+        home,
+        fetchImpl: h.fetchImpl,
+        execFactory: fakeExec().factory,
+        cwd: repoBoundTo(bad),
+      });
+      expect(h.seen).toEqual([URL_]); // the remembered one, not the bad binding
+    }
+    expect(io.errs.join('\n')).not.toContain('\u001b');
+  });
+
+  it('prints a bad bound id without its terminal escapes', async () => {
+    const { home, env, io } = setup();
+    const repo = mkdtempSync(join(tmpdir(), 'mocactl-sbx-repo-'));
+    mkdirSync(join(repo, '.git'));
+    mkdirSync(join(repo, '.sbx'));
+    writeFileSync(join(repo, '.sbx', 'sandbox.json'), JSON.stringify({ id: 'sbx-\u001b[2Jx' }));
+    expect(await sbxMain(['run', '--', 'ls'], env, io, { home, cwd: repo })).toBe(2);
+    expect(io.errs.join('\n')).toContain("'sbx-x' is not a sandbox id");
+    expect(io.errs.join('\n')).not.toContain('\u001b');
   });
 
   it('a flag or MOCACTL_SBX_URL still wins over the binding', async () => {

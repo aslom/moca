@@ -37,6 +37,12 @@ export function readBoundSandbox(cwd: string): string | undefined {
 }
 
 /**
+ * A binding's control-plane URL: http(s), and printable ASCII only (no space, no control character,
+ * nothing a terminal would act on when the URL is printed).
+ */
+export const BINDING_URL_RE = /^https?:\/\/[\x21-\x7e]+$/i;
+
+/**
  * The binding as written, unvalidated: the caller checks the id (`SANDBOX_ID_RE`) and reports a bad
  * one, rather than treating it as no binding. `controlPlaneUrl` is the control plane `sbx up` used,
  * kept only when it is an http(s) URL.
@@ -50,7 +56,7 @@ export function readBinding(cwd: string): { id: string; controlPlaneUrl?: string
     const url = typeof b.controlPlaneUrl === 'string' ? b.controlPlaneUrl : undefined;
     return {
       id: b.id,
-      ...(url && /^https?:\/\/[^\s]+$/i.test(url) ? { controlPlaneUrl: url } : {}),
+      ...(url && BINDING_URL_RE.test(url) ? { controlPlaneUrl: url } : {}),
     };
   } catch {
     return undefined;

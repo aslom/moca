@@ -577,6 +577,20 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
       expect(io.errs.join('\n')).toMatch(/did not confirm/);
     });
 
+    it("logout leaves another control plane's login in place and names it", async () => {
+      const { home, env, paths, io } = setup({ loggedIn: false });
+      const OTHER = 'https://sbx-other.example.invalid';
+      saveAuth(sbxPaths(paths), { ...LOGIN, controlPlaneUrl: OTHER });
+      const cp = fakeCp({});
+      expect(await sbxMain(['logout'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
+      expect(cp.calls).toEqual([]);
+      expect(loadAuth(sbxPaths(paths), OTHER)?.apiToken).toBe('api-1'); // untouched
+      const msg = io.errs.join('\n');
+      expect(msg).toContain(`not logged in to ${URL_}`);
+      expect(msg).toContain(`is for ${OTHER}, left in place`);
+      expect(msg).toContain(`mocactl sbx logout --control-plane-url '${OTHER}'`);
+    });
+
     it('logout with no login says so and exits 0, asking nothing', async () => {
       const { home, env, io } = setup({ loggedIn: false });
       const cp = fakeCp({});

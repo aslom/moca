@@ -36,6 +36,7 @@ export {
   TEMPLATE_BUSY_TEXT,
   TOKEN_EXPIRED_TEXT,
   createSandboxMcpServer,
+  execFailureText,
   type CallRecord,
   type SandboxMcpOptions,
 } from './mcp-server.js';

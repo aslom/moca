@@ -28,8 +28,17 @@ import { workspaceResetText } from './render/blocks.js';
 import { ensureRuntimeAuth, sessionManager, setAuth, type Runtime } from './runtime.js';
 
 export interface Io {
+  /** mocactl's own text on stdout. */
   out(s: string): void;
+  /** mocactl's own messages on stderr, one line each (a newline is added). */
   err(s: string): void;
+  /**
+   * Bytes on stdout exactly as given: a remote command's output (`sbx run`), which may not be
+   * UTF-8 and need not end in a newline. Absent: written as text through `out`.
+   */
+  outBytes?(b: Uint8Array): void;
+  /** Bytes on stderr exactly as given, with no newline added. Absent: written through `err`. */
+  errBytes?(b: Uint8Array): void;
 }
 
 // Only the control plane is required: it says where the harness is (GET /v1/discovery).

@@ -50,6 +50,23 @@ describe('layering (spec §3.1)', () => {
     ]);
   });
 
+  it('keeps Pi out of @moca/sandbox-client/src: no @earendil-works import (ADR-0042)', () => {
+    const scSrc = new URL('../../sandbox-client/src/', import.meta.url).pathname;
+    const walk = (dir: string): string[] =>
+      readdirSync(join(scSrc, dir), { withFileTypes: true }).flatMap((d) =>
+        d.isDirectory() ? walk(join(dir, d.name)) : [join(dir, d.name)],
+      );
+    const files = walk('.').filter((f) => f.endsWith('.ts'));
+    expect(files.length).toBeGreaterThan(3);
+    for (const f of files) {
+      const text = readFileSync(join(scSrc, f), 'utf8');
+      const imports = [...text.matchAll(/(?:from|import)\s*\(?\s*['"]([^'"]+)['"]/g)].map(
+        (m) => m[1],
+      );
+      for (const i of imports) expect(i, `${f} imports ${i}`).not.toMatch(/^@earendil-works\//);
+    }
+  });
+
   it('depends on @moca/sandbox-client (ADR-0042)', () => {
     expect(pkg.dependencies['@moca/sandbox-client']).toBe('workspace:*');
   });

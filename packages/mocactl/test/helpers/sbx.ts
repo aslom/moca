@@ -54,14 +54,23 @@ export function setup(opts: { loggedIn?: boolean; expired?: boolean } = { logged
     // The sbx login lives in its own file (sbx-auth.json), never in MOCA's auth.json.
     saveAuth(sbxPaths(paths), { ...LOGIN, ...(opts.expired ? { expiresAt: 1_000 } : {}) });
   }
+  // As main.ts wires it: text for mocactl's own messages, bytes for a remote command's output.
   const io = {
     outs: [] as string[],
     errs: [] as string[],
+    outB: [] as Buffer[],
+    errB: [] as Buffer[],
     out(s: string) {
       this.outs.push(s);
     },
     err(s: string) {
       this.errs.push(s);
+    },
+    outBytes(b: Uint8Array) {
+      this.outB.push(Buffer.from(b));
+    },
+    errBytes(b: Uint8Array) {
+      this.errB.push(Buffer.from(b));
     },
   };
   return { home, env, paths, io };

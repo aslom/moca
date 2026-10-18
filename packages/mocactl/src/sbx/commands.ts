@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 // sandbox-client's POSIX single quotes: safe to `eval`, whatever the control plane sent.
 import { q } from '@moca/sandbox-client';
@@ -127,6 +127,17 @@ export async function cmdLogin(c: SbxCtx, remember: boolean): Promise<number> {
  */
 export async function cmdLogout(c: SbxCtx): Promise<number> {
   const auth = c.rt.auth;
+  const other = auth ? undefined : storedLoginUrl(c.rt.paths.authFile);
+  if (other && other !== c.url) {
+    // sbx-auth.json holds ONE login: one for another sandbox control plane is not this logout's to
+    // end. It is left, and named, with the command that would end it.
+    c.io.err(
+      `sbx: not logged in to ${sanitizeRemote(c.url)}; the sandbox-service login on this machine is ` +
+        `for ${sanitizeRemote(other)}, left in place (end it with ` +
+        `\`mocactl sbx logout --control-plane-url ${q(sanitizeRemote(other))}\`)`,
+    );
+    return SBX_EXIT.ok;
+  }
   let code: number = SBX_EXIT.ok;
   if (auth?.refreshToken && c.rt.cp) {
     try {
@@ -145,6 +156,17 @@ export async function cmdLogout(c: SbxCtx): Promise<number> {
     c.io.err(auth ? 'logged out of the sandbox service' : 'not logged in to the sandbox service');
   }
   return code;
+}
+
+/** The control-plane URL of the login stored in `file`, whatever URL it is for. */
+function storedLoginUrl(file: string): string | undefined {
+  try {
+    const u = (JSON.parse(readFileSync(file, 'utf8')) as { controlPlaneUrl?: unknown })
+      .controlPlaneUrl;
+    return typeof u === 'string' ? u : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 const when = (epochS: number) => new Date(epochS * 1000).toISOString();

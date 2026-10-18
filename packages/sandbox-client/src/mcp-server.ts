@@ -87,14 +87,21 @@ function terminated(err: unknown): 'deleted' | 'expired' | undefined {
   const e = err as { code?: unknown; reason?: unknown; message?: unknown };
   if (e.code !== 'sandbox_terminated') return undefined;
   if (e.reason === 'deleted' || e.reason === 'expired') return e.reason;
-  // The control plane's message is "sandbox was deleted" or "sandbox has expired" (its `reason`
-  // field is not carried by ApiError).
+  // mocactl's ApiError carries the control plane's `reason`; without one (another token source),
+  // its message is "sandbox was deleted" or "sandbox has expired".
   return typeof e.message === 'string' && /deleted/.test(e.message) ? 'deleted' : 'expired';
 }
 
-/** The tool error for anything a tool threw: never shown as the command's output. */
-function describe(err: unknown, expiresAt?: number): string {
-  if (err instanceof ToolInputError) return `invalid input: ${err.message}`;
+/**
+ * The one text for an Exec failure that was not the command's outcome (spec §6.4), shared by the
+ * MCP server and `mocactl sbx`; undefined for any other error. `audience: 'model'` (the default)
+ * adds "not your command's output" to a machinery failure, which a model needs told and a person
+ * at a terminal (`'cli'`) does not.
+ */
+export function execFailureText(
+  err: unknown,
+  o: { audience?: 'model' | 'cli' } = {},
+): string | undefined {
   if (err instanceof ExecMachineryError) {
     switch (err.kind) {
       case 'busy':
@@ -103,13 +110,24 @@ function describe(err: unknown, expiresAt?: number): string {
         return TEMPLATE_BUSY_TEXT;
       case 'token_expired':
         return TOKEN_EXPIRED_TEXT;
-      default:
-        return `sandbox failure, not your command's output: ${err.message.replace(/^sandbox failure: /, '')}`;
+      default: {
+        const what =
+          o.audience === 'cli' ? 'sandbox failure' : "sandbox failure, not your command's output";
+        return `${what}: ${err.message.replace(/^sandbox failure: /, '')}`;
+      }
     }
   }
   if (err instanceof ExecRefusedError) {
     return `the sandbox refused the call (${err.message}). If it expired or was deleted, ${UP}.`;
   }
+  return undefined;
+}
+
+/** The tool error for anything a tool threw: never shown as the command's output. */
+function describe(err: unknown, expiresAt?: number): string {
+  if (err instanceof ToolInputError) return `invalid input: ${err.message}`;
+  const exec = execFailureText(err);
+  if (exec !== undefined) return exec;
   const gone = terminated(err);
   if (gone === 'deleted') return `sandbox was deleted; ${UP}`;
   if (gone === 'expired') {

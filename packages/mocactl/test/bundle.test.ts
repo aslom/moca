@@ -59,6 +59,15 @@ describe('the bundle', () => {
     expect(r.stdout).toBe(`${VERSION}\n`);
   });
 
+  // ADR-0036/0042: Pi stays out of mocactl. sandbox-client's contract test links Pi as a dev
+  // dependency; nothing of it may be bundled.
+  it('bundles nothing of Pi', () => {
+    const text = readFileSync(bundle, 'utf8');
+    for (const pi of ['@earendil-works', 'pi-coding-agent', 'pi-agent-core']) {
+      expect(text.includes(pi), pi).toBe(false);
+    }
+  });
+
   it('starts with a node shebang, so the installer can run it as `mocactl`', () => {
     expect(readFileSync(bundle, 'utf8').split('\n')[0]).toBe('#!/usr/bin/env node');
   });

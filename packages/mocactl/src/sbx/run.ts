@@ -23,8 +23,17 @@ export function parseTimeout(io: Io, raw: string | undefined): number | undefine
   return n;
 }
 
-/** Output passed through to stderr: `io.err` ends every write with a newline of its own. */
-const errText = (b: Buffer) => b.toString().replace(/\n$/, '');
+/** The command's own output, byte for byte: never decoded, never given a newline. */
+function passThrough(io: Io, stdout: Buffer, stderr: Buffer): void {
+  if (stdout.length) {
+    if (io.outBytes) io.outBytes(stdout);
+    else io.out(stdout.toString());
+  }
+  if (stderr.length) {
+    if (io.errBytes) io.errBytes(stderr);
+    else io.err(stderr.toString().replace(/\n$/, ''));
+  }
+}
 
 /**
  * `mocactl sbx run` (SBX0 §6.1): one Exec, never retried once started. Exits with the command's
@@ -59,8 +68,12 @@ export async function cmdRun(
       ...(timeoutS !== undefined ? { timeoutS } : {}),
       signal: c.signal,
     });
-    if (r.stdout.length) c.io.out(r.stdout.toString());
-    if (r.stderr.length) c.io.err(errText(r.stderr));
+    passThrough(c.io, r.stdout, r.stderr);
+    // mocactl's own notes start on a line of their own, after the command's stderr.
+    const notes = r.truncated || r.capped || r.timedOutS !== undefined || r.exitCode < 0;
+    if (notes && c.io.errBytes && r.stderr.length && r.stderr.at(-1) !== 0x0a) {
+      c.io.errBytes(Buffer.from('\n'));
+    }
     if (r.truncated) c.io.err("sbx: stdout exceeded the sandbox's 8 MiB cap and was cut");
     if (r.capped) {
       c.io.err('sbx: the timeout was cut to fit what the sandbox token had left');

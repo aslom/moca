@@ -91,8 +91,8 @@ export async function main(
     stdinIsTTY?: boolean;
     /** All of stdin; `credentials add` reads its secret from it, `sbx run` its script. */
     readStdin?: () => Promise<string>;
-    /** All of stdin, byte for byte: `sbx put`'s content. */
-    readStdinBytes?: () => Promise<Buffer>;
+    /** All of stdin, byte for byte (at least `limit` bytes when given): `sbx put`'s content. */
+    readStdinBytes?: (limit?: number) => Promise<Buffer>;
   } = {},
 ): Promise<number> {
   // `mocactl sbx` (SBX0) is its own command group with its own flags and its own control plane, so
