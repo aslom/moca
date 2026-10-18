@@ -12,6 +12,7 @@ import {
   createSandboxMcpServer,
   type CallRecord,
   type SandboxMcpOptions,
+  line,
 } from '../src/mcp-server.js';
 import { PI_SCHEMAS } from '../src/schemas.js';
 
@@ -322,7 +323,23 @@ describe('the sandbox MCP server (SBX0 §6.4)', () => {
       ['bash', 1, true],
       ['bash', 1, true],
     ]);
-    expect(records[0]!.error).toMatch(/^sandbox busy: `sleep 99`/);
+    // The agent is told which call it waited behind; the record keeps no command text.
+    expect(records[0]!.error).toBe('sandbox busy (client-side): waited behind a running call');
+    expect(JSON.stringify(records)).not.toContain('sleep 99');
+  });
+
+  it('does not queue a call whose signal was already aborted', async () => {
+    // The MCP client never sends such a request, so this pins the queue itself: an abort listener
+    // never fires for a signal that is already aborted, and the call must not wait for its turn.
+    const q = line(60_000, () => 0);
+    expect(await q.acquire('slow', new AbortController().signal)).toBe('go');
+    const ac = new AbortController();
+    ac.abort();
+    const started = Date.now();
+    expect(await q.acquire('never', ac.signal)).toBe('cancelled');
+    expect(Date.now() - started).toBeLessThan(1_000);
+    q.release(); // nothing was queued behind 'slow'
+    expect(await q.acquire('next', new AbortController().signal)).toBe('go');
   });
 
   it('names a running file tool by its tool and path, in seconds under a minute', async () => {

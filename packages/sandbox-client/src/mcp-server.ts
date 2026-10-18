@@ -139,7 +139,8 @@ type Turn = 'go' | 'busy' | 'cancelled';
  * anyway; doing it here is what lets a call that would wait too long be refused unsent, naming the
  * call it would wait behind.
  */
-function line(waitMs: number, now: () => number) {
+/** @internal Exported for its unit test only. */
+export function line(waitMs: number, now: () => number) {
   let running: { detail: string; since: number } | undefined;
   const waiting: Array<{ go: () => void }> = [];
 
@@ -152,6 +153,8 @@ function line(waitMs: number, now: () => number) {
     next?.go();
   };
   const acquire = (detail: string, signal: AbortSignal): Promise<Turn> => {
+    // An abort listener never fires for a signal that is already aborted: refuse that call now.
+    if (signal.aborted) return Promise.resolve('cancelled');
     if (!running && waiting.length === 0) {
       take(detail);
       return Promise.resolve('go');
@@ -221,8 +224,9 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
         // The flight recorder is diagnostics: a full disk must not fail the agent's call.
       }
     };
-    const refuse = (text: string): CallToolResult => {
-      record(false, text);
+    // `recorded` is the record's copy when it must differ from what the agent sees.
+    const refuse = (text: string, recorded = text): CallToolResult => {
+      record(false, recorded);
       return fail(text);
     };
 
@@ -247,7 +251,9 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
     if (tool.name === 'sandbox_info') return run(); // costs no VM: never queued
 
     const turn = await queue.acquire(detailOf(tool.name, args), extra.signal);
-    if (turn === 'busy') return refuse(queue.busy());
+    // The record leaves out the running call's command text: a command line can hold a secret.
+    if (turn === 'busy')
+      return refuse(queue.busy(), 'sandbox busy (client-side): waited behind a running call');
     if (turn === 'cancelled') return refuse(CANCELLED);
     try {
       return await run();
