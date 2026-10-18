@@ -191,6 +191,43 @@ export function innerOf(text: string, path: (string | number)[]): string | undef
   return text.slice(c.offset + 1, c.offset + c.length - 1);
 }
 
+export interface Slot {
+  from: number;
+  to: number;
+  /** The container's brackets. */
+  open: number;
+  close: number;
+  /** The member is the container's only one. */
+  only: boolean;
+}
+
+/**
+ * Where the member at `path` sits in its container, as offsets into `text`: its slot runs from the
+ * end of the member before it (or just inside the opening bracket) to the start of the member
+ * after it (or the closing bracket), and holds the member itself, its commas and whatever
+ * whitespace and comments lie between. A removal may cut only inside it (agent-config's
+ * guard), apart from an emptied container's recorded inside (`only`: it is the only member).
+ */
+export function slotOf(text: string, path: (string | number)[]): Slot | undefined {
+  const n = findNodeAtLocation(tree(text), path);
+  if (!n || !path.length) return undefined;
+  const u = unitOf(n);
+  const c = u.parent!;
+  const kids = (c.children ?? []).map(unitOf);
+  const i = kids.indexOf(u);
+  const prev = i > 0 ? kids[i - 1] : undefined;
+  const next = kids[i + 1];
+  const open = c.offset;
+  const close = c.offset + c.length - 1;
+  return {
+    from: prev ? prev.offset + prev.length : open + 1,
+    to: next ? next.offset : close,
+    open,
+    close,
+    only: kids.length === 1,
+  };
+}
+
 /**
  * Removes the member at `path` (an object key, or an array index), undoing `append`: a member on
  * its own line goes with that whole line (its comma and any comment after it); the comma before it
@@ -254,6 +291,48 @@ export function remove(
     }
     return collapse(cut(text, ranges));
   }
+  if (next && prev && startsLine(text, u.offset)) {
+    // It starts its line, and another member follows it there (one the developer put after it,
+    // say): what `append` wrote goes, the line break before its line, its indentation, the member
+    // and its comma, and everything else stays, the lines before it (blank lines the developer
+    // put there) and what follows its comma. A comment between the member and its comma stays.
+    let ls = u.offset;
+    while (ls > 0 && text[ls - 1] !== '\n') ls--;
+    const eol = text.slice(ls - 2, ls) === '\r\n' ? ls - 2 : ls - 1;
+    const comma = own!;
+    const between = text.slice(end, comma).trim() !== '';
+    if (hasLineComment(text, prev.offset + prev.length, eol)) {
+      // The line break must stay, or that comment would swallow what follows: the next member
+      // takes this one's place on the line.
+      let to = comma + 1;
+      while (to < next.offset && (text[to] === ' ' || text[to] === '\t')) to++;
+      return cut(
+        text,
+        between
+          ? [
+              [u.offset, end],
+              [comma, to],
+            ]
+          : [[u.offset, to]],
+      );
+    }
+    return cut(
+      text,
+      between
+        ? [
+            [eol, end],
+            [comma, comma + 1],
+          ]
+        : [[eol, comma + 1]],
+    );
+  }
+  if (next && !prev) {
+    // The first of several: it goes with its comma and the spaces after it, so the next member
+    // takes its place on the line.
+    let to = own !== undefined ? own + 1 : end;
+    while (to < next.offset && (text[to] === ' ' || text[to] === '\t')) to++;
+    return cut(text, [[u.offset, to]]);
+  }
   let start = u.offset;
   while (start > open + 1 && isWs(text[start - 1]!)) start--;
   if (prev) {
@@ -266,13 +345,6 @@ export function remove(
           [comma, comma + 1],
           [start, end],
         ]);
-  }
-  if (next) {
-    // The first of several: it goes with its comma and the spaces after it, so the next member
-    // takes its place on the line.
-    let to = own !== undefined ? own + 1 : end;
-    while (to < next.offset && (text[to] === ' ' || text[to] === '\t')) to++;
-    return cut(text, [[u.offset, to]]);
   }
   return collapse(cut(text, [[start, own !== undefined ? own + 1 : end]]));
 }

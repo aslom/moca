@@ -495,6 +495,21 @@ describe('agent configuration (SBX0 §6.3)', () => {
     expect(r.warnings).toEqual([]);
   });
 
+  // Review round 4 (probe14): blank lines the developer put between two of ours, and a key of
+  // theirs after ours on its line, come through rm.
+  it('keeps blank lines added between its members, and a key added after one on its line', () => {
+    const d = dir();
+    writeFileSync(join(d, 'opencode.json'), '{\n  "model": "x"\n}\n');
+    writeAgentConfig(d);
+    const mid = text(d, 'opencode.json')
+      .replace('  },\n  "tools": {', '  },\n\n\n  "tools": {')
+      .replace(/  }\n}\n$/, '  }, "theme": "y"\n}\n');
+    writeFileSync(join(d, 'opencode.json'), mid);
+    takeBackAgentConfig(d);
+    // What up wrote is gone; the blank lines and ` "theme": "y"` are the developer's, kept.
+    expect(text(d, 'opencode.json')).toBe('{\n  "model": "x",\n\n "theme": "y"\n}\n');
+  });
+
   it('removes the .claude directory it created, and enabledMcpjsonServers with it', () => {
     const d = dir();
     writeAgentConfig(d);

@@ -15,7 +15,16 @@ import {
 } from 'node:fs';
 import { basename, dirname, join, relative, sep } from 'node:path';
 import { parse, parseTree, ParseErrorCode, type Node, type ParseError } from 'jsonc-parser';
-import { append, commentsOf, innerOf, remove, styleOf, type Style } from './json-edit.js';
+import {
+  append,
+  commentsOf,
+  innerOf,
+  remove,
+  slotOf,
+  styleOf,
+  type Slot,
+  type Style,
+} from './json-edit.js';
 
 /**
  * The agent configuration `sbx up` writes (SBX0 spec §6.3): Claude Code and OpenCode pointed at the
@@ -425,9 +434,13 @@ function dropAt(doc: Doc, path: (string | number)[], recs: JsonRec[] = []): void
   const emptyInner = r?.op === 'inner' ? r.inner : '';
   const expected = without(doc.data, path);
   const comments = commentsOf(doc.text);
+  const before = doc.text;
+  const slot = slotOf(before, path);
   edit(doc, (t) => remove(t, path, { emptyInner }));
-  // The guard on the rm side: the document, as an agent parses it, lost exactly that member and
-  // nothing else, and every comment in it is still there (sbx up never adds one).
+  // The guards on the rm side: the document, as an agent parses it, lost exactly that member and
+  // nothing else; every comment in it is still there (sbx up never adds one); and the text is the
+  // text before with only cuts made, all inside the member's slot (bar an emptied container's
+  // recorded inside), so no byte the developer wrote outside it changed.
   if (!same(doc.data, expected)) {
     throw new ConfigConflict(
       doc.rel,
@@ -449,6 +462,33 @@ function dropAt(doc: Doc, path: (string | number)[], recs: JsonRec[] = []): void
       RM_GUARD_HINT,
     );
   }
+  if (!slot || !isCut(before, doc.text, slot, emptyInner)) {
+    throw new ConfigConflict(
+      doc.rel,
+      path.join('.'),
+      'needs a manual edit: removing it would have changed text around it, not only taken it out',
+      RM_GUARD_HINT,
+    );
+  }
+}
+
+/**
+ * Whether `after` is `before` with ranges deleted, all inside `slot` (from the end of the member
+ * before to the start of the one after; json-edit's `slotOf`): the text outside the slot is the
+ * same, and what is left of the slot is a subsequence of it. The one other shape allowed is an
+ * emptied container's recorded inside (`emptyInner`) in place of all of the slot.
+ */
+function isCut(before: string, after: string, slot: Slot, emptyInner: string): boolean {
+  const head = before.slice(0, slot.from);
+  const tail = before.slice(slot.to);
+  if (after.length < head.length + tail.length) return false;
+  if (!after.startsWith(head) || !after.endsWith(tail)) return false;
+  const left = after.slice(head.length, after.length - tail.length);
+  if (slot.only && left === emptyInner) return true;
+  const was = before.slice(slot.from, slot.to);
+  let j = 0;
+  for (let i = 0; i < was.length && j < left.length; i++) if (was[i] === left[j]) j++;
+  return j === left.length && left.length < was.length;
 }
 
 /** `data` without the member at `path` (a deep copy; `data` is unchanged). */

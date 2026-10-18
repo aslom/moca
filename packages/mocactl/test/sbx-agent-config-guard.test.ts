@@ -9,6 +9,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { findNodeAtLocation, parseTree } from 'jsonc-parser';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // The guards in agent-config's edits, driven by a json-edit that misbehaves on demand: an edit that
@@ -130,4 +131,56 @@ describe('the edit guards', () => {
     expect(readFileSync(join(d, 'opencode.json'), 'utf8')).toBe(up);
     expect(existsSync(join(d, '.sbx/agent-config.json'))).toBe(true);
   });
+
+  // Review round 4 (probe12): removals that keep the parsed value and every comment, but change
+  // bytes the developer wrote. Each removal must be a cut, inside the removed member's slot.
+  const USER =
+    '{\n  "model": "x.0", // the model\n\n  "n": 1.50,\n  "s": "\\u0041",\n' +
+    '  "theme": "y", /* t */\n  "z": [1, 2]\n}\n';
+  /** The member at `path` wrapped in a block comment: still parses, and loses no comment. */
+  const commentOut = (text: string, path: (string | number)[]) => {
+    const n = findNodeAtLocation(parseTree(text)!, path)!.parent!;
+    const end = n.offset + n.length;
+    return `${text.slice(0, n.offset)}/* ${text.slice(n.offset, end)} */${text.slice(end)}`;
+  };
+  it.each([
+    ['re-indents a line of theirs', (o: string) => o.replace('\n  "n"', '\n\t"n"')],
+    [
+      'moves their block comment',
+      (o: string) => o.replace(' /* t */', '').replace('"n": 1.50', '"n": /* t */ 1.50'),
+    ],
+    ['rewrites 1.50 as 1.5', (o: string) => o.replace('1.50', '1.5')],
+    ['rewrites \\u0041 as A', (o: string) => o.replace('\\u0041', 'A')],
+    ['rewrites [1, 2] as [1,2]', (o: string) => o.replace('[1, 2]', '[1,2]')],
+    ['drops their blank line', (o: string) => o.replace('\n\n', '\n')],
+    ['comments the member out instead', undefined],
+  ])(
+    'refuses a removal that %s, keeping the file and the record',
+    (_n, hostile: ((o: string) => string) | undefined) => {
+      const d = dir();
+      writeFileSync(join(d, 'opencode.json'), USER);
+      writeAgentConfig(d);
+      const up = readFileSync(join(d, 'opencode.json'), 'utf8');
+      // Only in opencode.json (whose paths start mcp or tools); the other files come back.
+      broken.remove = (real, text, path, o) => {
+        const p = path as (string | number)[];
+        if (p[0] !== 'mcp' && p[0] !== 'tools') {
+          return (real as Real).remove(text as string, p, o as never);
+        }
+        return hostile
+          ? hostile((real as Real).remove(text as string, p, o as never))
+          : commentOut(text as string, p);
+      };
+      const err = conflict(() => removeAgentConfig(d));
+      expect(err.file).toBe('opencode.json');
+      expect(err.message).toMatch(/needs a manual edit/);
+      expect(readFileSync(join(d, 'opencode.json'), 'utf8')).toBe(up);
+      expect(existsSync(join(d, '.sbx/agent-config.json'))).toBe(true);
+      expect(existsSync(join(d, '.mcp.json'))).toBe(true); // no file was changed
+      // And the real removal takes it all back, byte for byte.
+      broken.remove = undefined;
+      removeAgentConfig(d);
+      expect(readFileSync(join(d, 'opencode.json'), 'utf8')).toBe(USER);
+    },
+  );
 });

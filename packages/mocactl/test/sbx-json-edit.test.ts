@@ -1,6 +1,6 @@
 import { parse } from 'jsonc-parser';
 import { describe, expect, it } from 'vitest';
-import { append, innerOf, remove, styleOf } from '../src/sbx/json-edit.js';
+import { append, innerOf, remove, slotOf, styleOf } from '../src/sbx/json-edit.js';
 
 const val = (t: string) => parse(t, [], { allowTrailingComma: true }) as unknown;
 
@@ -165,6 +165,40 @@ describe('style-keeping JSON edits', () => {
     expect(remove('{\n  "a": 1, "b": 2,\n  "c": 3\n}', ['b'])).toBe('{\n  "a": 1,\n  "c": 3\n}');
     expect(val(remove('{\n  "a": 1,\n  "b": 2, "c": 3\n}', ['b']))).toEqual({ a: 1, c: 3 });
     expect(remove('{\n  "a": 1, "b": 2,\n  "c": 3\n}', ['a'])).toBe('{\n  "b": 2,\n  "c": 3\n}');
+  });
+
+  it('removes a member that starts its line with another after it, keeping what is not its own', () => {
+    // Review round 4 (probe14): the blank lines before it, and what follows its comma, stay.
+    expect(remove('{\n  "a": 1,\n\n\n  "t": {}, "b": 2\n}\n', ['t'])).toBe(
+      '{\n  "a": 1,\n\n "b": 2\n}\n',
+    );
+    expect(remove('{\n  "a": 1,\n  "t": {}, "b": 2\n}\n', ['t'])).toBe('{\n  "a": 1, "b": 2\n}\n');
+    expect(remove('{\n  "a": 1,\n  "t": 1 /* c */, "b": 2\n}', ['t'])).toBe(
+      '{\n  "a": 1, /* c */ "b": 2\n}',
+    );
+    // A line comment before it: the line break stays, and the next member takes its place.
+    expect(remove('{\n  "a": 1, // n\n  "t": 1, "b": 2\n}', ['t'])).toBe(
+      '{\n  "a": 1, // n\n  "b": 2\n}',
+    );
+  });
+
+  it('names the slot a member sits in: from the end of the one before to the start of the next', () => {
+    const t = '{\n  "a": 1,\n  "t": 2, "b": 3\n}';
+    expect(slotOf(t, ['t'])).toEqual({
+      from: t.indexOf('1') + 1,
+      to: t.indexOf('"b"'),
+      open: 0,
+      close: t.length - 1,
+      only: false,
+    });
+    expect(slotOf('{"d": [7]}', ['d', 0])).toEqual({
+      from: 7,
+      to: 8,
+      open: 6,
+      close: 8,
+      only: true,
+    });
+    expect(slotOf('{}', ['x'])).toBeUndefined();
   });
 
   it('empties a container when its only member goes: just its span, or the inside it had', () => {
