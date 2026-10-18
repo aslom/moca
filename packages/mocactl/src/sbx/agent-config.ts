@@ -737,8 +737,32 @@ function loadManifest(root: string): { m?: Manifest; bad?: string } {
   if (!isObj(m) || m.version !== 1) {
     return { bad: `is of an unknown version (${JSON.stringify(isObj(m) ? m.version : m)})` };
   }
-  const bad = manifestProblem(m);
+  const bad = manifestProblem(m, recordable(root));
   return bad ? { bad } : { m: m as Manifest };
+}
+
+/** The JSON and Markdown files `sbx up` writes, and the directory it may create. */
+const JSON_FILES = [MCP_JSON, SETTINGS, 'opencode.json', 'opencode.jsonc'];
+const MD_FILES = ['CLAUDE.md', 'AGENTS.md'];
+const DIRS = [dirname(SETTINGS)];
+
+/**
+ * The files a record may name: the ones `sbx up` writes, and where each of them leads now if it
+ * is a link inside the repository (a record holds the path written, after links). A forged or
+ * stale entry naming any other file (`package.json`) is a malformed record, never edited.
+ */
+function recordable(root: string): { json: string[]; md: string[] } {
+  const via = (names: string[]) =>
+    uniq(
+      names.flatMap((f) => {
+        try {
+          return [f, target(root, f).rel];
+        } catch {
+          return [f]; // a link outside, or to nothing: only its own name
+        }
+      }),
+    );
+  return { json: via(JSON_FILES), md: via(MD_FILES) };
 }
 
 /** A path inside the repository, as `sbx up` records one: relative, no `..`, no `.git`. */
@@ -752,20 +776,21 @@ const isStr = (v: unknown): v is string => typeof v === 'string';
 const isKeys = (v: unknown): v is string[] => Array.isArray(v) && v.every(isStr);
 
 /** What is wrong with a version-1 record's shape, or undefined when every entry is well-formed. */
-function manifestProblem(m: Json): string | undefined {
+function manifestProblem(m: Json, ok: { json: string[]; md: string[] }): string | undefined {
   for (const k of ['files', 'dirs', 'json', 'markdown'] as const) {
     if (!Array.isArray(m[k])) return `has no ${k} list`;
   }
   const at = (what: string, i: number) => `has a malformed ${what} entry (#${i + 1})`;
-  for (const [what, xs] of [
-    ['files', m.files],
-    ['dirs', m.dirs],
+  const one = (names: string[]) => (v: unknown) => isRelPath(v) && names.includes(v);
+  for (const [what, xs, allowed] of [
+    ['files', m.files, [...ok.json, ...ok.md]],
+    ['dirs', m.dirs, DIRS],
   ] as const) {
-    const i = (xs as unknown[]).findIndex((x) => !isRelPath(x));
+    const i = (xs as unknown[]).findIndex((x) => !one(allowed)(x));
     if (i >= 0) return at(what, i);
   }
   const jsonOk = (r: unknown): boolean => {
-    if (!isObj(r) || !isRelPath(r.file) || !isKeys(r.path)) return false;
+    if (!isObj(r) || !one(ok.json)(r.file) || !isKeys(r.path)) return false;
     switch (r.op) {
       case 'key':
       case 'item':
@@ -781,7 +806,7 @@ function manifestProblem(m: Json): string | undefined {
   const ji = (m.json as unknown[]).findIndex((r) => !jsonOk(r));
   if (ji >= 0) return at('json', ji);
   const mdOk = (r: unknown): boolean => {
-    if (!isObj(r) || !isRelPath(r.file)) return false;
+    if (!isObj(r) || !one(ok.md)(r.file)) return false;
     switch (r.mode) {
       case 'created':
         return true;

@@ -575,6 +575,22 @@ describe('agent configuration (SBX0 §6.3)', () => {
     expect(realpathSync(join(d, 'CLAUDE.md'))).toBe(join(d, 'AGENTS.md'));
   });
 
+  it('takes back a .mcp.json that links to a file inside the repository (review round 4)', () => {
+    const d = dir();
+    mkdirSync(join(d, 'config'));
+    writeFileSync(join(d, 'config/mcp.json'), '{\n  "mcpServers": {}\n}\n');
+    symlinkSync('config/mcp.json', join(d, '.mcp.json'));
+    writeAgentConfig(d);
+    expect(
+      json(d, '.sbx/agent-config.json').json.some(
+        (r: { file: string }) => r.file === 'config/mcp.json',
+      ),
+    ).toBe(true);
+    const r = takeBackAgentConfig(d);
+    expect(r.recordKept).toBe(false);
+    expect(text(d, 'config/mcp.json')).toBe('{\n  "mcpServers": {}\n}\n');
+  });
+
   it('refuses a file that links outside the repository', () => {
     const d = dir();
     const outside = realpathSync(mkdtempSync(join(tmpdir(), 'sbx-out-')));
@@ -688,6 +704,45 @@ describe('agent configuration (SBX0 §6.3)', () => {
     [
       'with a file outside the repository',
       JSON.stringify({ version: 1, files: ['../x.json'], dirs: [], json: [], markdown: [] }),
+    ],
+    // Review round 4: a record names only the files sbx up writes.
+    [
+      'with a JSON entry for a file sbx up never writes',
+      JSON.stringify({
+        version: 1,
+        files: [],
+        dirs: [],
+        json: [{ file: 'package.json', op: 'container', path: ['scripts'] }],
+        markdown: [],
+      }),
+    ],
+    [
+      'with a created file sbx up never writes',
+      JSON.stringify({ version: 1, files: ['package.json'], dirs: [], json: [], markdown: [] }),
+    ],
+    [
+      'with a Markdown entry for a file sbx up never writes',
+      JSON.stringify({
+        version: 1,
+        files: [],
+        dirs: [],
+        json: [],
+        markdown: [{ file: 'README.md', mode: 'created' }],
+      }),
+    ],
+    [
+      'with a JSON entry for a Markdown file',
+      JSON.stringify({
+        version: 1,
+        files: [],
+        dirs: [],
+        json: [{ file: 'CLAUDE.md', op: 'container', path: ['x'] }],
+        markdown: [],
+      }),
+    ],
+    [
+      'with a directory sbx up never creates',
+      JSON.stringify({ version: 1, files: [], dirs: ['src'], json: [], markdown: [] }),
     ],
   ])('a record that is %s is kept, with a warning, and nothing is removed', (_n, body) => {
     const d = dir();
