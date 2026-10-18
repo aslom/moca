@@ -1,12 +1,14 @@
 import { parse } from 'jsonc-parser';
 import { describe, expect, it } from 'vitest';
-import { append, remove, styleOf } from '../src/sbx/json-edit.js';
+import { append, innerOf, remove, styleOf } from '../src/sbx/json-edit.js';
 
 const val = (t: string) => parse(t, [], { allowTrailingComma: true }) as unknown;
 
 /** Appends, checks the value, removes, and checks the bytes are back. */
 function roundTrip(text: string, path: string[], key: string | undefined, value: unknown) {
   const s = styleOf(text);
+  // As agent-config records it: the container's inside, if it was empty.
+  const emptyInner = innerOf(text, path);
   const out = append(text, path, key, value, s);
   const before = val(text) as Record<string, unknown>;
   const after = val(out) as Record<string, unknown>;
@@ -15,10 +17,10 @@ function roundTrip(text: string, path: string[], key: string | undefined, value:
   if (key === undefined) {
     expect((cur as unknown[]).at(-1)).toEqual(value);
     const idx = (cur as unknown[]).length - 1;
-    expect(remove(out, [...path, idx])).toBe(text);
+    expect(remove(out, [...path, idx], { emptyInner })).toBe(text);
   } else {
     expect((cur as Record<string, unknown>)[key]).toEqual(value);
-    expect(remove(out, [...path, key])).toBe(text);
+    expect(remove(out, [...path, key], { emptyInner })).toBe(text);
   }
   expect(before).toBeDefined();
   return out;
@@ -84,11 +86,24 @@ describe('style-keeping JSON edits', () => {
     expect(o).toBe(t);
   });
 
-  it('appends to an empty multi-line object; removal leaves it {} (whitespace only differs)', () => {
-    const t = '{\n  "a": {\n  }\n}\n';
-    const o = append(t, ['a'], 'b', 1, styleOf(t));
-    expect(o).toBe('{\n  "a": {\n    "b": 1\n  }\n}\n');
-    expect(remove(o, ['a', 'b'])).toBe('{\n  "a": {}\n}\n');
+  // Review round 2: an emptied container keeps the whitespace it had inside.
+  it.each([
+    ['{ }\n', []],
+    ['{\n}\n', []],
+    ['{\n  "a": {\n  }\n}\n', ['a']],
+    ['{\n  "a": { }\n}\n', ['a']],
+    ['{\r\n}\r\n', []],
+    ['{\n  "d": [ ]\n}\n', ['d']],
+  ])('an empty container round-trips byte for byte: %j', (text, path) => {
+    const s = styleOf(text);
+    const isArr = text.includes('[');
+    const emptyInner = innerOf(text, path as string[]);
+    expect(emptyInner).toBeDefined();
+    const o = isArr
+      ? append(text, path as string[], undefined, 'x', s)
+      : append(text, path as string[], 'b', { c: 1 }, s);
+    expect(val(o)).toBeDefined();
+    expect(remove(o, [...(path as string[]), isArr ? 0 : 'b'], { emptyInner })).toBe(text);
   });
 
   // Review I1: a removal mirrors the append, whatever comments sit around the members.
@@ -146,8 +161,9 @@ describe('style-keeping JSON edits', () => {
     expect(remove('{\n  "a": 1, "b": 2,\n  "c": 3\n}', ['a'])).toBe('{\n  "b": 2,\n  "c": 3\n}');
   });
 
-  it('empties a container to {} or [] when its only member goes', () => {
-    expect(remove('{\n  "a": 1\n}', ['a'])).toBe('{}');
+  it('empties a container when its only member goes: just its span, or the inside it had', () => {
+    expect(remove('{\n  "a": 1\n}', ['a'])).toBe('{\n}');
+    expect(remove('{\n  "a": 1\n}', ['a'], { emptyInner: '' })).toBe('{}');
     expect(remove('{"a":[1]}', ['a', 0])).toBe('{"a":[]}');
     expect(remove('{\n  // c\n  "a": 1\n}', ['a'])).toBe('{\n  // c\n}');
   });

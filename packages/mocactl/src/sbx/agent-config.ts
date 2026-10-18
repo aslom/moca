@@ -15,7 +15,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, join, relative, sep } from 'node:path';
 import { parse, parseTree, ParseErrorCode, type Node, type ParseError } from 'jsonc-parser';
-import { append, remove, styleOf, type Style } from './json-edit.js';
+import { append, innerOf, remove, styleOf, type Style } from './json-edit.js';
 
 /**
  * The agent configuration `sbx up` writes (SBX0 spec §6.3): Claude Code and OpenCode pointed at the
@@ -125,7 +125,9 @@ type JsonPath = string[];
 type JsonRec =
   | { file: string; op: 'key'; path: JsonPath; value: unknown }
   | { file: string; op: 'item'; path: JsonPath; value: unknown }
-  | { file: string; op: 'container'; path: JsonPath };
+  | { file: string; op: 'container'; path: JsonPath }
+  /** What was inside a container, empty, before the first append into it (restored on removal). */
+  | { file: string; op: 'inner'; path: JsonPath; inner: string };
 type MdRec =
   | { file: string; mode: 'created' }
   | { file: string; mode: 'appended'; before: string; after: string }
@@ -382,13 +384,21 @@ function edit(doc: Doc, f: (text: string) => string): void {
 }
 
 /** Sets `path` (which is absent) to `value`, creating the objects above it that are missing. */
-function addKey(doc: Doc, path: JsonPath, value: unknown): void {
+function addKey(doc: Doc, path: JsonPath, value: unknown, recs: JsonRec[]): void {
   let i = path.length - 1;
   while (i > 0 && at(doc.data, path.slice(0, i)) === undefined) i--;
   let v = value;
   for (let j = path.length - 1; j > i; j--) v = { [path[j]!]: v };
+  noteInner(doc, path.slice(0, i), recs);
   edit(doc, (t) => append(t, path.slice(0, i), path[i]!, v, doc.style));
   holds(doc, path, value);
+}
+
+/** Records an empty container's inside before the first append into it (`{ }`, `{\n}`). */
+function noteInner(doc: Doc, path: JsonPath, recs: JsonRec[]): void {
+  if (!doc.exists) return; // a file sbx creates is deleted, not restored
+  const inner = innerOf(doc.text, path);
+  if (inner !== undefined && inner !== '') recs.push({ file: doc.rel, op: 'inner', path, inner });
 }
 
 /**
@@ -409,8 +419,11 @@ function holds(doc: Doc, path: JsonPath, value: unknown, item = false): void {
   }
 }
 
-function dropAt(doc: Doc, path: (string | number)[]): void {
-  edit(doc, (t) => remove(t, path));
+function dropAt(doc: Doc, path: (string | number)[], recs: JsonRec[] = []): void {
+  const parent = JSON.stringify(path.slice(0, -1));
+  const r = recs.find((x) => x.op === 'inner' && JSON.stringify(x.path) === parent);
+  const emptyInner = r?.op === 'inner' ? r.inner : '';
+  edit(doc, (t) => remove(t, path, { emptyInner }));
 }
 
 /** Refuses a key on `path` whose value is there but not an object (it cannot be merged into). */
@@ -442,7 +455,7 @@ function recordMissing(doc: Doc, path: JsonPath, recs: JsonRec[]): void {
 
 function setKey(doc: Doc, path: JsonPath, value: unknown, recs: JsonRec[]): void {
   recordMissing(doc, path.slice(0, -1), recs);
-  addKey(doc, path, value);
+  addKey(doc, path, value, recs);
   recs.push({ file: doc.rel, op: 'key', path, value });
 }
 
@@ -450,8 +463,9 @@ function addItems(doc: Doc, path: JsonPath, values: unknown[], recs: JsonRec[]):
   if (!values.length) return;
   if (at(doc.data, path) === undefined) {
     recordMissing(doc, path, recs);
-    addKey(doc, path, values);
+    addKey(doc, path, values, recs);
   } else {
+    noteInner(doc, path, recs);
     for (const v of values) {
       edit(doc, (t) => append(t, path, undefined, v, doc.style));
       holds(doc, path, v, true);
@@ -878,10 +892,10 @@ export function takeBackAgentConfig(root: string): TakeBack {
       if (!Array.isArray(arr)) continue;
       let i = arr.length - 1;
       while (i >= 0 && !same(arr[i], r.value)) i--;
-      if (i >= 0) dropAt(d, [...r.path, i]);
+      if (i >= 0) dropAt(d, [...r.path, i], mine);
     }
     for (const r of mine) {
-      if (r.op === 'key' && same(at(d.data, r.path), r.value)) dropAt(d, r.path);
+      if (r.op === 'key' && same(at(d.data, r.path), r.value)) dropAt(d, r.path, mine);
     }
     const containers = mine
       .filter((r) => r.op === 'container')
@@ -889,7 +903,7 @@ export function takeBackAgentConfig(root: string): TakeBack {
     for (const r of containers) {
       const v = at(d.data, r.path);
       const empty = Array.isArray(v) ? v.length === 0 : isObj(v) && Object.keys(v).length === 0;
-      if (empty) dropAt(d, r.path);
+      if (empty) dropAt(d, r.path, mine);
     }
     if (m.files.includes(d.rel) && Object.keys(d.data).length === 0) {
       writes.push({ abs: d.abs });

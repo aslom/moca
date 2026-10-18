@@ -313,6 +313,21 @@ describe('agent configuration (SBX0 §6.3)', () => {
     expect(err.message).toContain(`opencode.json: ${key}`);
   });
 
+  it.each(['{ }\n', '{\n}\n', '{\n  "tools": { }\n}\n', '{\n  "mcp": {\n  }\n}\n'])(
+    'an empty object keeps its inside through up and rm (review round 2): %j',
+    (oc) => {
+      const d = dir();
+      writeFileSync(join(d, 'opencode.json'), oc);
+      mkdirSync(join(d, '.claude'));
+      writeFileSync(join(d, '.claude/settings.json'), '{\n  "permissions": {\n  }\n}\n');
+      writeAgentConfig(d);
+      expect(checkAgentConfig(d)).toEqual([]);
+      removeAgentConfig(d);
+      expect(text(d, 'opencode.json')).toBe(oc);
+      expect(text(d, '.claude/settings.json')).toBe('{\n  "permissions": {\n  }\n}\n');
+    },
+  );
+
   it('puts new members after a multi-line block comment, not inside it (review round 2)', () => {
     const d = dir();
     const oc = '{\n  "model": "x" /* a\n  b */\n}\n';

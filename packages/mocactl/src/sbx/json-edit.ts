@@ -170,13 +170,33 @@ function cut(text: string, ranges: [number, number][]): string {
   return out + text.slice(at);
 }
 
+/** The text inside the container at `path` when it has no members (for `remove`'s `emptyInner`). */
+export function innerOf(text: string, path: (string | number)[]): string | undefined {
+  const root = tree(text);
+  const c = path.length ? findNodeAtLocation(root, path) : root;
+  if (!c || (c.type !== 'object' && c.type !== 'array') || (c.children ?? []).length) {
+    return undefined;
+  }
+  return text.slice(c.offset + 1, c.offset + c.length - 1);
+}
+
 /**
  * Removes the member at `path` (an object key, or an array index), undoing `append`: a member on
  * its own line goes with that whole line (its comma and any comment after it); the comma before it
  * is touched only when it was the last member and had no comma of its own, which is the one
  * `append` added. A member sharing its line with others is cut with its separating comma.
  */
-export function remove(text: string, path: (string | number)[]): string {
+export function remove(
+  text: string,
+  path: (string | number)[],
+  o: {
+    /**
+     * What was inside the container before its first member was appended (`innerOf`): restored
+     * when the member removed is the only one, so `{}`, `{ }` and `{\n}` each come back as they were.
+     */
+    emptyInner?: string;
+  } = {},
+): string {
   const root = tree(text);
   const n = findNodeAtLocation(root, path);
   if (!n) return text;
@@ -191,14 +211,17 @@ export function remove(text: string, path: (string | number)[]): string {
   const end = u.offset + u.length;
   const own = commas(text, end, next ? next.offset : close)[0];
   const tail = lineTail(text, end);
+  // The container left empty: its inside as it was before the first append, when known and only
+  // whitespace is left; otherwise just the member's span is gone.
   const collapse = (t: string): string => {
-    if (kids.length !== 1) return t;
-    // The container is left empty: `{}` / `[]` when only whitespace is left inside it.
+    if (kids.length !== 1 || o.emptyInner === undefined) return t;
     const r = tree(t);
     const e = path.length > 1 ? findNodeAtLocation(r, path.slice(0, -1)) : r;
     if (!e) return t;
     const inner = t.slice(e.offset + 1, e.offset + e.length - 1);
-    return inner.trim() === '' ? t.slice(0, e.offset + 1) + t.slice(e.offset + e.length - 1) : t;
+    return inner.trim() === ''
+      ? t.slice(0, e.offset + 1) + o.emptyInner + t.slice(e.offset + e.length - 1)
+      : t;
   };
 
   const ownLine =
