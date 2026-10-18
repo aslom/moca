@@ -14,7 +14,8 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join, relative, sep } from 'node:path';
-import { applyEdits, modify, parse, type FormattingOptions, type ParseError } from 'jsonc-parser';
+import { parse, type ParseError } from 'jsonc-parser';
+import { append, remove, styleOf, type Style } from './json-edit.js';
 
 /**
  * The agent configuration `sbx up` writes (SBX0 spec §6.3): Claude Code and OpenCode pointed at the
@@ -22,8 +23,9 @@ import { applyEdits, modify, parse, type FormattingOptions, type ParseError } fr
  *
  * It is MERGED into what the developer has and never overwrites: a key is added, an array item
  * appended, a Markdown block put between markers; a value already there that disagrees stops
- * `sbx up` (a `ConfigConflict` naming the file and key). JSON is edited in place (jsonc-parser), so
- * the file keeps its indentation, key order, line endings and, in OpenCode's JSONC, its comments.
+ * `sbx up` (a `ConfigConflict` naming the file and key). JSON is edited in place (json-edit.ts), so
+ * the file keeps its indentation, key order, line endings and, in OpenCode's JSONC, its comments;
+ * removal undoes an insertion byte for byte.
  * Every write is atomic (a temp file, then a rename) and keeps the file's mode.
  *
  * What was added is recorded in `.sbx/agent-config.json`, so `removeAgentConfig` takes back exactly
@@ -241,17 +243,10 @@ function writeAtomic(abs: string, body: string, mode?: number): void {
 interface Doc extends Target {
   text: string;
   data: Json;
-  fmt: FormattingOptions;
+  style: Style;
   jsonc: boolean;
   /** The text as read ('' for a file that does not exist yet). */
   original: string;
-}
-
-function formatOf(text: string): FormattingOptions {
-  const eol = text.includes('\r\n') ? '\r\n' : '\n';
-  const indent = /\n([ \t]+)\S/.exec(text)?.[1];
-  if (indent?.startsWith('\t')) return { insertSpaces: false, tabSize: 1, eol };
-  return { insertSpaces: true, tabSize: indent ? indent.length : 2, eol };
 }
 
 /** Parses JSON (or, for `jsonc`, JSON with comments and trailing commas, as OpenCode reads it). */
@@ -273,7 +268,7 @@ function loadDoc(root: string, rel: string, jsonc: boolean, hint = WRITE_HINT): 
       ...t,
       text: '{}',
       data: {},
-      fmt: formatOf(''),
+      style: styleOf(''),
       jsonc,
       original: '',
     };
@@ -289,7 +284,7 @@ function loadDoc(root: string, rel: string, jsonc: boolean, hint = WRITE_HINT): 
     );
   }
   if (!isObj(v)) throw new ConfigConflict(t.rel, t.rel, 'is not a JSON object', hint);
-  return { ...t, text, data: v, fmt: formatOf(text), jsonc, original: text };
+  return { ...t, text, data: v, style: styleOf(text), jsonc, original: text };
 }
 
 function at(data: unknown, path: (string | number)[]): unknown {
@@ -301,12 +296,25 @@ function at(data: unknown, path: (string | number)[]): unknown {
   return cur;
 }
 
-function edit(doc: Doc, path: (string | number)[], value: unknown, insert = false): void {
-  doc.text = applyEdits(
-    doc.text,
-    modify(doc.text, path, value, { formattingOptions: doc.fmt, isArrayInsertion: insert }),
-  );
-  doc.data = parseDoc(doc.text, doc.jsonc) as Json;
+function edit(doc: Doc, f: (text: string) => string): void {
+  doc.text = f(doc.text);
+  const v = parseDoc(doc.text, doc.jsonc);
+  // Every edit is made by this module on a document it parsed: anything else is a bug here.
+  if (!isObj(v)) throw new Error(`editing ${doc.rel} produced a document that does not parse`);
+  doc.data = v;
+}
+
+/** Sets `path` (which is absent) to `value`, creating the objects above it that are missing. */
+function addKey(doc: Doc, path: JsonPath, value: unknown): void {
+  let i = path.length - 1;
+  while (i > 0 && at(doc.data, path.slice(0, i)) === undefined) i--;
+  let v = value;
+  for (let j = path.length - 1; j > i; j--) v = { [path[j]!]: v };
+  edit(doc, (t) => append(t, path.slice(0, i), path[i]!, v, doc.style));
+}
+
+function dropAt(doc: Doc, path: (string | number)[]): void {
+  edit(doc, (t) => remove(t, path));
 }
 
 /** Refuses a key on `path` whose value is there but not an object (it cannot be merged into). */
@@ -338,7 +346,7 @@ function recordMissing(doc: Doc, path: JsonPath, recs: JsonRec[]): void {
 
 function setKey(doc: Doc, path: JsonPath, value: unknown, recs: JsonRec[]): void {
   recordMissing(doc, path.slice(0, -1), recs);
-  edit(doc, path, value);
+  addKey(doc, path, value);
   recs.push({ file: doc.rel, op: 'key', path, value });
 }
 
@@ -346,16 +354,16 @@ function addItems(doc: Doc, path: JsonPath, values: unknown[], recs: JsonRec[]):
   if (!values.length) return;
   if (at(doc.data, path) === undefined) {
     recordMissing(doc, path, recs);
-    edit(doc, path, values);
+    addKey(doc, path, values);
   } else {
-    for (const v of values) edit(doc, [...path, -1], v, true);
+    for (const v of values) edit(doc, (t) => append(t, path, undefined, v, doc.style));
   }
   for (const v of values) recs.push({ file: doc.rel, op: 'item', path, value: v });
 }
 
 /** The doc's new text: a file created here ends with a newline. */
 function finalText(doc: Doc): string {
-  if (!doc.exists && !doc.text.endsWith(doc.fmt.eol!)) return doc.text + doc.fmt.eol!;
+  if (!doc.exists && !doc.text.endsWith(doc.style.eol)) return doc.text + doc.style.eol;
   return doc.text;
 }
 
@@ -667,10 +675,10 @@ export function removeAgentConfig(root: string): string[] {
       if (!Array.isArray(arr)) continue;
       let i = arr.length - 1;
       while (i >= 0 && !same(arr[i], r.value)) i--;
-      if (i >= 0) edit(d, [...r.path, i], undefined);
+      if (i >= 0) dropAt(d, [...r.path, i]);
     }
     for (const r of mine) {
-      if (r.op === 'key' && same(at(d.data, r.path), r.value)) edit(d, r.path, undefined);
+      if (r.op === 'key' && same(at(d.data, r.path), r.value)) dropAt(d, r.path);
     }
     const containers = mine
       .filter((r) => r.op === 'container')
@@ -678,7 +686,7 @@ export function removeAgentConfig(root: string): string[] {
     for (const r of containers) {
       const v = at(d.data, r.path);
       const empty = Array.isArray(v) ? v.length === 0 : isObj(v) && Object.keys(v).length === 0;
-      if (empty) edit(d, r.path, undefined);
+      if (empty) dropAt(d, r.path);
     }
     if (m.files.includes(d.rel) && Object.keys(d.data).length === 0) {
       writes.push({ abs: d.abs });
