@@ -781,7 +781,7 @@ function manifestProblem(m: Json, ok: { json: string[]; md: string[] }): string 
     if (!Array.isArray(m[k])) return `has no ${k} list`;
   }
   const at = (what: string, i: number) => `has a malformed ${what} entry (#${i + 1})`;
-  const one = (names: string[]) => (v: unknown) => isRelPath(v) && names.includes(v);
+  const one = (names: readonly string[]) => (v: unknown) => isRelPath(v) && names.includes(v);
   for (const [what, xs, allowed] of [
     ['files', m.files, [...ok.json, ...ok.md]],
     ['dirs', m.dirs, DIRS],
