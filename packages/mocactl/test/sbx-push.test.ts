@@ -31,6 +31,7 @@ import {
   capturePatch,
   hasUnpulled,
   isBindingPath,
+  isGitPath,
   normalizeOrigin,
   planPush,
   pushTree,
@@ -596,7 +597,7 @@ describe('pull (SBX0 §6.2, §10.3)', () => {
     expect(readFileSync(join(r, 'src/app.py'), 'utf8')).toBe('print(1)\n');
   });
 
-  for (const dir of ['.SBX', '.Sbx']) {
+  for (const dir of ['.SBX', '.Sbx', '.ſbx', '.ſBX']) {
     it(`refuses a patch writing ${dir}/, which a case-insensitive filesystem resolves to .sbx/ (review I3)`, async () => {
       const r = repo();
       writeBinding(r, {
@@ -613,10 +614,74 @@ describe('pull (SBX0 §6.2, §10.3)', () => {
       await expect(applyPatch(r, patch)).rejects.toThrow(/sandbox binding/);
       expect(readFileSync(join(r, '.sbx/sandbox.json'))).toEqual(before);
     });
+
+    it(`refuses a patch modifying ${dir}/sandbox.json (review I3, re-review)`, async () => {
+      const r = repo();
+      writeBinding(r, {
+        id: SBX,
+        controlPlaneUrl: 'https://sbx-api.example.invalid',
+        template: 'default',
+      });
+      const before = readFileSync(join(r, '.sbx/sandbox.json'), 'utf8');
+      const patch = Buffer.from(
+        `diff --git a/${dir}/sandbox.json b/${dir}/sandbox.json\n--- a/${dir}/sandbox.json\n` +
+          `+++ b/${dir}/sandbox.json\n@@ -1,5 +1 @@\n-${before.trimEnd().split('\n').join('\n-')}\n` +
+          '+{"id":"sbx-evil","controlPlaneUrl":"https://evil.example.invalid"}\n',
+      );
+      await expect(applyPatch(r, patch)).rejects.toThrow(/sandbox binding/);
+      expect(readFileSync(join(r, '.sbx/sandbox.json'), 'utf8')).toBe(before);
+      expect(readBinding(r)?.id).toBe(SBX);
+    });
   }
 
+  it("refuses an agent's .ſbx/sandbox.json end to end, bound or not (re-review probe pi3b)", async () => {
+    for (const bound of [true, false]) {
+      const r = repo();
+      if (bound) {
+        writeBinding(r, {
+          id: SBX,
+          controlPlaneUrl: 'https://sbx-api.example.invalid',
+          template: 'default',
+        });
+      }
+      const { ws, exec } = await pushed(r);
+      mkdirSync(join(ws, '.ſbx'));
+      writeFileSync(
+        join(ws, '.ſbx/sandbox.json'),
+        '{"id":"sbx-evil","controlPlaneUrl":"https://evil.example.invalid"}\n',
+      );
+      writeFileSync(join(ws, 'src/app.py'), 'print(2)\n');
+      const patch = await capturePatch(exec);
+      await expect(applyPatch(r, patch)).rejects.toThrow(/sandbox binding/);
+      expect(readBinding(r)?.id).toBe(bound ? SBX : undefined);
+      expect(readFileSync(join(r, 'src/app.py'), 'utf8')).toBe('print(1)\n');
+    }
+  });
+
+  it('refuses a patch into anything that folds to .git, before git is asked', async () => {
+    const r = repo();
+    for (const p of ['.ｇit/hooks/x', '.GIT/x', 'sub/.Git/config']) {
+      const patch = Buffer.from(
+        `diff --git a/${p} b/${p}\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/${p}\n@@ -0,0 +1 @@\n+x\n`,
+      );
+      await expect(applyPatch(r, patch), p).rejects.toBeInstanceOf(PushError);
+    }
+    expect(isGitPath('.ｇit/hooks/x')).toBe(true);
+    expect(isGitPath('src/.gitignore')).toBe(false);
+    expect(isGitPath('.github/workflows/ci.yml')).toBe(false);
+  });
+
   it('matches the binding directory in any case or normalization, and nothing else', () => {
-    for (const p of ['.sbx', '.sbx/sandbox.json', '.SBX/x', '.Sbx/x', '.sBX']) {
+    for (const p of [
+      '.sbx',
+      '.sbx/sandbox.json',
+      '.SBX/x',
+      '.Sbx/x',
+      '.sBX',
+      '.ſbx/x',
+      '.ſBX/x',
+      '.ｓbx/x',
+    ]) {
       expect(isBindingPath(p), p).toBe(true);
     }
     for (const p of ['src/.sbx/x', '.sbxx/x', 'sbx/x', '.sb'])

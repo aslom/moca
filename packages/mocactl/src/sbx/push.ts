@@ -118,12 +118,26 @@ export class UnpulledError extends PushError {
 }
 
 /**
- * Whether a path is in the binding's directory, as a case-insensitive (macOS, Windows) or
- * normalizing (macOS: NFD) filesystem would resolve it: `.SBX/sandbox.json` is `.sbx/` there.
+ * A path component as a case-folding filesystem might resolve it: NFKC (which maps U+017F `ſ` to
+ * `s`, and full-width letters to ASCII), then lowercased both directly and through uppercase.
+ * APFS folds `.ſbx` and `.SBX` to `.sbx`. Erring wide is safe: a look-alike is only refused.
+ */
+function folds(seg: string): string[] {
+  const k = seg.normalize('NFKC');
+  return [k.toLowerCase(), k.toUpperCase().toLowerCase()];
+}
+
+/**
+ * Whether a path is in the binding's directory as a case-insensitive or normalizing filesystem
+ * (macOS, Windows) would resolve it: `.SBX/` and `.ſbx/` are `.sbx/` there.
  */
 export function isBindingPath(p: string): boolean {
-  const first = p.normalize('NFC').split('/')[0]!.toLowerCase();
-  return first === '.sbx';
+  return folds(p.split('/')[0]!).includes('.sbx');
+}
+
+/** Whether any component of a path folds to `.git` (git refuses most of these itself). */
+export function isGitPath(p: string): boolean {
+  return p.split('/').some((seg) => folds(seg).includes('.git'));
 }
 
 const run = promisify(execFile);
@@ -753,6 +767,13 @@ export async function applyPatch(root: string, patch: Buffer): Promise<string[]>
     const touched = await patchPaths(root, f);
     // The binding is the laptop's: a patch that would write it (an agent that un-excluded .sbx/
     // in the sandbox) could repoint every later command, so it is refused outright.
+    const gitPaths = touched.filter(isGitPath);
+    if (gitPaths.length) {
+      throw new PushError(
+        `the patch writes ${list(gitPaths)}, inside a repository's .git, which a pull never ` +
+          'changes; nothing was changed. Look at it with mocactl sbx pull -o FILE',
+      );
+    }
     const binding = touched.filter(isBindingPath);
     if (binding.length) {
       throw new PushError(
