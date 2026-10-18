@@ -484,7 +484,12 @@ export async function sbxMain(
       const f = findSandboxFile(deps.cwd ?? process.cwd());
       const bindingRoot = f ? dirname(dirname(f)) : undefined;
       const bound = bindingRoot !== undefined && readBoundSandbox(bindingRoot) === id;
-      const code = await cmdRm(ctx, id!, { goneOk: bound });
+      // "Already gone" only from the control plane the binding names: another one not knowing
+      // the id says nothing about the bound sandbox, so that 404 stays a failure.
+      const bindingUrl =
+        bindingRoot !== undefined ? readBinding(bindingRoot)?.controlPlaneUrl : undefined;
+      const sameCp = bindingUrl !== undefined && normalizeUrl(bindingUrl) === normalizeUrl(ctx.url);
+      const code = await cmdRm(ctx, id!, { goneOk: bound && sameCp });
       if (code !== SBX_EXIT.ok || values['keep-config'] || !bound) return code;
       return unbind(ctx, bindingRoot!);
     }

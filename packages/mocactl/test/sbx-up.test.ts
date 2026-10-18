@@ -445,6 +445,31 @@ describe('mocactl sbx up and rm: the agent configuration (SBX0 §6.3, plan Revie
     expect(h.err()).toMatch(/no such sandbox/);
   });
 
+  it("rm's already-gone applies only on the binding's own control plane (review round 2)", async () => {
+    const h = harness();
+    expect(await h.run(['up'])).toBe(0);
+    const elsewhere = 'https://other-sbx.example.invalid';
+    saveAuth(sbxPaths(h.paths), { ...LOGIN, controlPlaneUrl: elsewhere });
+    // Every control plane now answers sandbox_not_found for it (the fake ignores the host): on
+    // another one, that is a failure, and nothing is removed.
+    h.cp.boxes.delete(NEW);
+    for (const env of [
+      { HOME: h.home, MOCACTL_SBX_URL: elsewhere },
+      { HOME: h.home, MOCACTL_SBX_URL: `${elsewhere}/` },
+    ]) {
+      expect(await h.run(['rm'], { env })).toBe(1);
+      expect(h.err()).not.toMatch(/already gone/);
+      expect(h.err()).toMatch(/no such sandbox/);
+      expect(existsSync(join(h.r, '.sbx/sandbox.json'))).toBe(true);
+      expect(checkAgentConfig(h.r)).toEqual([]);
+    }
+    // The binding's own, spelled with a trailing slash: the same control plane.
+    saveAuth(sbxPaths(h.paths), LOGIN);
+    expect(await h.run(['rm'], { env: { HOME: h.home, MOCACTL_SBX_URL: `${URL_}/` } })).toBe(0);
+    expect(h.err()).toContain('already gone');
+    expect(existsSync(join(h.r, '.sbx'))).toBe(false);
+  });
+
   it('rm keeps .sbx/ when the record is unreadable, and says so', async () => {
     const h = harness();
     expect(await h.run(['up'])).toBe(0);
