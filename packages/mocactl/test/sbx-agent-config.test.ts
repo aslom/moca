@@ -567,6 +567,80 @@ describe('agent configuration (SBX0 §6.3)', () => {
   it.each([
     ['corrupt', '{ broken'],
     ['of an unknown version', JSON.stringify({ version: 2, files: [] })],
+    // Review round 3: every entry's shape is checked.
+    ['missing a list', JSON.stringify({ version: 1, files: [], dirs: [], json: [] })],
+    [
+      'with a list that is not one',
+      JSON.stringify({ version: 1, files: {}, dirs: [], json: [], markdown: [] }),
+    ],
+    [
+      'with a file that is not a string',
+      JSON.stringify({ version: 1, files: [1], dirs: [], json: [], markdown: [] }),
+    ],
+    [
+      'with an inner that is not a string',
+      JSON.stringify({
+        version: 1,
+        files: [],
+        dirs: [],
+        json: [{ file: 'opencode.json', op: 'inner', path: ['mcp'], inner: 7 }],
+        markdown: [],
+      }),
+    ],
+    [
+      'with an unknown op',
+      JSON.stringify({
+        version: 1,
+        files: [],
+        dirs: [],
+        json: [{ file: 'opencode.json', op: 'drop', path: [] }],
+        markdown: [],
+      }),
+    ],
+    [
+      'with a path that is not a list of keys',
+      JSON.stringify({
+        version: 1,
+        files: [],
+        dirs: [],
+        json: [{ file: 'opencode.json', op: 'key', path: 'mcp', value: 1 }],
+        markdown: [],
+      }),
+    ],
+    [
+      'with a key and no value',
+      JSON.stringify({
+        version: 1,
+        files: [],
+        dirs: [],
+        json: [{ file: 'opencode.json', op: 'key', path: ['mcp'] }],
+        markdown: [],
+      }),
+    ],
+    [
+      'with a Markdown entry of an unknown mode',
+      JSON.stringify({
+        version: 1,
+        files: [],
+        dirs: [],
+        json: [],
+        markdown: [{ file: 'CLAUDE.md', mode: 'moved' }],
+      }),
+    ],
+    [
+      'with a replaced entry and no previous block',
+      JSON.stringify({
+        version: 1,
+        files: [],
+        dirs: [],
+        json: [],
+        markdown: [{ file: 'CLAUDE.md', mode: 'replaced' }],
+      }),
+    ],
+    [
+      'with a file outside the repository',
+      JSON.stringify({ version: 1, files: ['../x.json'], dirs: [], json: [], markdown: [] }),
+    ],
   ])('a record that is %s is kept, with a warning, and nothing is removed', (_n, body) => {
     const d = dir();
     writeAgentConfig(d);

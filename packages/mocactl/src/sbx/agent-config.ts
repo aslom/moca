@@ -697,12 +697,65 @@ function loadManifest(root: string): { m?: Manifest; bad?: string } {
   if (!isObj(m) || m.version !== 1) {
     return { bad: `is of an unknown version (${JSON.stringify(isObj(m) ? m.version : m)})` };
   }
-  const list = (v: unknown) => (Array.isArray(v) ? v : undefined);
-  const files = list(m.files) ?? [];
-  const dirs = list(m.dirs) ?? [];
-  const json = list(m.json) ?? [];
-  const markdown = list(m.markdown) ?? [];
-  return { m: { version: 1, files, dirs, json, markdown } };
+  const bad = manifestProblem(m);
+  return bad ? { bad } : { m: m as Manifest };
+}
+
+/** A path inside the repository, as `sbx up` records one: relative, no `..`, no `.git`. */
+const isRelPath = (v: unknown): v is string =>
+  typeof v === 'string' &&
+  v !== '' &&
+  !v.startsWith('/') &&
+  !v.includes('\\') &&
+  v.split('/').every((seg) => seg !== '' && seg !== '.' && seg !== '..' && seg !== '.git');
+const isStr = (v: unknown): v is string => typeof v === 'string';
+const isKeys = (v: unknown): v is string[] => Array.isArray(v) && v.every(isStr);
+
+/** What is wrong with a version-1 record's shape, or undefined when every entry is well-formed. */
+function manifestProblem(m: Json): string | undefined {
+  for (const k of ['files', 'dirs', 'json', 'markdown'] as const) {
+    if (!Array.isArray(m[k])) return `has no ${k} list`;
+  }
+  const at = (what: string, i: number) => `has a malformed ${what} entry (#${i + 1})`;
+  for (const [what, xs] of [
+    ['files', m.files],
+    ['dirs', m.dirs],
+  ] as const) {
+    const i = (xs as unknown[]).findIndex((x) => !isRelPath(x));
+    if (i >= 0) return at(what, i);
+  }
+  const jsonOk = (r: unknown): boolean => {
+    if (!isObj(r) || !isRelPath(r.file) || !isKeys(r.path)) return false;
+    switch (r.op) {
+      case 'key':
+      case 'item':
+        return 'value' in r;
+      case 'container':
+        return true;
+      case 'inner':
+        return isStr(r.inner);
+      default:
+        return false;
+    }
+  };
+  const ji = (m.json as unknown[]).findIndex((r) => !jsonOk(r));
+  if (ji >= 0) return at('json', ji);
+  const mdOk = (r: unknown): boolean => {
+    if (!isObj(r) || !isRelPath(r.file)) return false;
+    switch (r.mode) {
+      case 'created':
+        return true;
+      case 'appended':
+        return isStr(r.before) && isStr(r.after);
+      case 'replaced':
+        return isStr(r.previous);
+      default:
+        return false;
+    }
+  };
+  const mi = (m.markdown as unknown[]).findIndex((r) => !mdOk(r));
+  if (mi >= 0) return at('markdown', mi);
+  return undefined;
 }
 
 const BAD_RECORD_HINT =
