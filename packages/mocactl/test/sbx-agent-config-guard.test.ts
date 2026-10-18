@@ -75,6 +75,28 @@ describe('the edit guards', () => {
     expect(existsSync(join(d, '.sbx'))).toBe(false);
   });
 
+  it('refuses an item appended to an existing list that does not land last, writing nothing', () => {
+    const d = dir();
+    mkdirSync(join(d, '.claude'));
+    const body = '{\n  "permissions": {\n    "deny": [\n      "Bash"\n    ]\n  }\n}\n';
+    writeFileSync(join(d, '.claude/settings.json'), body);
+    // Appends a different item into the list (key undefined: the addItems path).
+    broken.append = (real, text, path, key, v, st) =>
+      (real as Real).append(
+        text as string,
+        path as string[],
+        key as string | undefined,
+        key === undefined ? `${String(v)}-misplaced` : v,
+        st as never,
+      );
+    const err = conflict(() => writeAgentConfig(d));
+    expect(err.file).toBe('.claude/settings.json');
+    expect(err.key).toBe('permissions.deny');
+    expect(err.message).toMatch(/could not be edited safely/);
+    expect(readFileSync(join(d, '.claude/settings.json'), 'utf8')).toBe(body);
+    expect(existsSync(join(d, '.sbx'))).toBe(false);
+  });
+
   it('refuses a removal that loses a comment, keeping the file and the record', () => {
     const d = dir();
     const body = '{\n  "model": "x" // mine\n}\n';
