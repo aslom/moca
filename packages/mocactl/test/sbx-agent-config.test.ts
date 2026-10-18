@@ -671,6 +671,27 @@ describe('agent configuration (SBX0 §6.3)', () => {
         markdown: [],
       }),
     ],
+    // Review round 4: a path names at least one key.
+    [
+      'with an empty path',
+      JSON.stringify({
+        version: 1,
+        files: [],
+        dirs: [],
+        json: [{ file: 'opencode.json', op: 'key', path: [], value: 1 }],
+        markdown: [],
+      }),
+    ],
+    [
+      'with a container of an empty path',
+      JSON.stringify({
+        version: 1,
+        files: [],
+        dirs: [],
+        json: [{ file: 'opencode.json', op: 'container', path: [] }],
+        markdown: [],
+      }),
+    ],
     [
       'with a key and no value',
       JSON.stringify({

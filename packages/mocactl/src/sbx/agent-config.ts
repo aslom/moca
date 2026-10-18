@@ -792,11 +792,13 @@ function manifestProblem(m: Json, ok: { json: string[]; md: string[] }): string 
   const jsonOk = (r: unknown): boolean => {
     if (!isObj(r) || !one(ok.json)(r.file) || !isKeys(r.path)) return false;
     switch (r.op) {
+      // A key, a list or a container sbx up added names at least one key: [] is the document.
       case 'key':
       case 'item':
-        return 'value' in r;
+        return r.path.length > 0 && 'value' in r;
       case 'container':
-        return true;
+        return r.path.length > 0;
+      // The inside an empty container had: [] is the document's own, `{ }` (review round 2).
       case 'inner':
         return isStr(r.inner);
       default:
