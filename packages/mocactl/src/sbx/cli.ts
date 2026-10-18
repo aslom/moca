@@ -21,6 +21,7 @@ import {
   SBX_EXIT,
   type SbxCtx,
 } from './commands.js';
+import { cmdDoctor } from './doctor.js';
 import { type ExecFactory } from './exec.js';
 import { cmdMcp, cmdPut, cmdRun, parseTimeout, workspacePath } from './run.js';
 import { PushError, repoRoot } from './push.js';
@@ -64,6 +65,8 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
   mocactl sbx pull [--apply] [-o FILE]           the sandbox's changes as a patch, on stdout or in
                                                  FILE (--apply: apply it here, then advance the
                                                  sandbox's baseline)
+  mocactl sbx doctor [--sandbox ID] [--json]     check login, sandbox, agent config, exec and recent
+                                                 calls (exit 0 when every check passes, else 1)
 ID (or --sandbox ID) defaults to the sandbox in the nearest .sbx/sandbox.json. The control plane
 comes from --control-plane-url, MOCACTL_SBX_URL, the bound sandbox's, or the one remembered at
 login. The login is kept apart from \`mocactl login\`'s, so both can be active at once.
@@ -182,13 +185,13 @@ export async function openSbx(
 /** The commands with no --json output (R5i): refused with exit 2 rather than ignored. */
 const NO_JSON = new Set(['login', 'logout', 'env', 'run', 'put', 'mcp', 'up', 'push', 'pull']);
 /** The commands that open without the login check: they log in, out, or check it themselves (R7). */
-const OWN_LOGIN = new Set(['login', 'logout']);
+const OWN_LOGIN = new Set(['login', 'logout', 'doctor']);
 /** The commands that act on one sandbox: `[ID]` as an argument (or `--sandbox ID`). */
 const TAKES_ID_ARG = new Set(['rm', 'token', 'env']);
 /** The commands that act on one sandbox through `--sandbox ID` only. */
 const TAKES_SANDBOX_FLAG = new Set(['run', 'put', 'mcp', 'push', 'pull', ...TAKES_ID_ARG]);
 /** The commands that work on the git repository around the current directory. */
-const IN_REPO = new Set(['up', 'push', 'pull']);
+const IN_REPO = new Set(['up', 'push', 'pull', 'doctor']);
 /** Flags that belong to some commands only: refused elsewhere rather than silently ignored. */
 const SYNC_FLAGS: [
   'force' | 'include-secrets' | 'max-push' | 'apply' | 'out' | 'no-agent-config' | 'keep-config',
@@ -280,6 +283,7 @@ export async function sbxMain(
     'up',
     'push',
     'pull',
+    'doctor',
   ];
   if (!known.includes(command)) {
     io.err(`sbx: unknown command '${command}'\n${SBX_USAGE}`);
@@ -291,7 +295,7 @@ export async function sbxMain(
     io.err(`sbx: ${command} has no --json output\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
-  if (values.sandbox !== undefined && !TAKES_SANDBOX_FLAG.has(command)) {
+  if (values.sandbox !== undefined && !TAKES_SANDBOX_FLAG.has(command) && command !== 'doctor') {
     io.err(`sbx: --sandbox does not apply to ${command}\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
@@ -365,6 +369,16 @@ export async function sbxMain(
     if (bound && !SANDBOX_ID_RE.test(bound.id)) {
       io.err(`sbx: ignoring .sbx/sandbox.json: '${sanitizeRemote(bound.id)}' is not a sandbox id`);
     } else upBound = bound?.id;
+  }
+  if (command === 'doctor') {
+    // No sandbox is one of doctor's failed checks, not a usage error; a malformed id still is.
+    const bound = values.sandbox === undefined ? readBinding(root!) : undefined;
+    id = values.sandbox ?? bound?.id;
+    boundUrl = bound?.controlPlaneUrl;
+    if (id !== undefined && !SANDBOX_ID_RE.test(id)) {
+      io.err(`sbx: '${sanitizeRemote(id)}' is not a sandbox id (sbx-…)`);
+      return SBX_EXIT.usage;
+    }
   }
   if (TAKES_SANDBOX_FLAG.has(command)) {
     id = (TAKES_ID_ARG.has(command) ? arg : undefined) ?? values.sandbox;
@@ -469,6 +483,8 @@ export async function sbxMain(
       const bindingRoot = dirname(dirname(f));
       return readBoundSandbox(bindingRoot) === id ? unbind(ctx, bindingRoot) : code;
     }
+    case 'doctor':
+      return cmdDoctor(ctx, root!, id, deps.execFactory);
     case 'token':
       return cmdToken(ctx, id!);
     case 'run':
