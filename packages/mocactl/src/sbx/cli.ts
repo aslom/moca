@@ -1,6 +1,8 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
+import { MAX_STDIN_BYTES, q, WORKSPACE } from '@moca/sandbox-client';
 import { loadConfig, normalizeUrl, resolvePaths, type Paths, type TuiConfig } from '../config.js';
 import type { Io } from '../headless.js';
 import { buildRuntime, ensureRuntimeAuth, type Runtime } from '../runtime.js';
@@ -18,7 +20,9 @@ import {
   SBX_EXIT,
   type SbxCtx,
 } from './commands.js';
-import { readBoundSandbox, SANDBOX_ID_RE } from './state.js';
+import { type ExecFactory } from './exec.js';
+import { cmdMcp, cmdPut, cmdRun, parseTimeout, workspacePath } from './run.js';
+import { readBinding, SANDBOX_ID_RE } from './state.js';
 
 export const SBX_USAGE = `usage (the sandbox service, SBX0):
   mocactl sbx login [--control-plane-url URL]    log in with the GitHub device flow (the URL is remembered)
@@ -30,9 +34,15 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
   mocactl sbx rm [ID] [--json]                   delete a sandbox
   mocactl sbx token [ID] [--json]                print a fresh sandbox token (15 minutes by default)
   mocactl sbx env [ID]                           shell exports for a direct sandbox/v1 client
-ID defaults to the sandbox in the nearest .sbx/sandbox.json. The control plane comes from
---control-plane-url, MOCACTL_SBX_URL, or the one remembered at login. The login is kept apart
-from \`mocactl login\`'s, so both can be active at once.
+  mocactl sbx run [--sandbox ID] [--timeout S] [-- CMD ...]   run CMD (or the script on stdin) in /workspace
+                                                 (exit: the command's code; 124 timed out or killed;
+                                                 125 sandbox failure; S defaults to, and is capped at,
+                                                 the sandbox token's lifetime minus 60 s)
+  mocactl sbx put PATH [--sandbox ID]            write stdin to PATH under /workspace
+  mocactl sbx mcp [--sandbox ID]                 the stdio MCP server for Claude Code / OpenCode
+ID (or --sandbox ID) defaults to the sandbox in the nearest .sbx/sandbox.json. The control plane
+comes from --control-plane-url, MOCACTL_SBX_URL, the bound sandbox's, or the one remembered at
+login. The login is kept apart from \`mocactl login\`'s, so both can be active at once.
 exit: 0 ok, 1 failed, 2 usage, 3 log in first, 4 control plane unreachable`;
 
 export interface SbxDeps {
@@ -40,6 +50,16 @@ export interface SbxDeps {
   home?: string;
   fetchImpl?: typeof fetch;
   cwd?: string;
+  /** Whether stdin is a terminal: `run` with no command then refuses rather than wait on it. */
+  stdinIsTTY?: boolean;
+  /** All of stdin as text: `run`'s script. */
+  readStdin?: () => Promise<string>;
+  /** All of stdin, byte for byte: `put`'s content. */
+  readStdinBytes?: () => Promise<Buffer>;
+  /** The gRPC connection (tests pass a fake). */
+  execFactory?: ExecFactory;
+  /** `mcp`'s transport (default stdio). */
+  mcpTransport?: Transport;
 }
 
 export function resolveSbxUrl(
@@ -119,7 +139,12 @@ export async function openSbx(
   if (opts.login) return opened;
   const auth = await ensureRuntimeAuth(rt);
   if (auth.kind === 'login_required') {
-    io.err('sbx: not logged in to the sandbox service: run `mocactl sbx login`');
+    // A URL from a flag (or a bound sandbox's) is not what a bare `sbx login` would use: name it.
+    const login =
+      sbxUrlSource(flags.controlPlaneUrl, env, remembered) === 'flag'
+        ? `mocactl sbx login --control-plane-url ${q(url)}`
+        : 'mocactl sbx login';
+    io.err(`sbx: not logged in to the sandbox service: run \`${login}\``);
     return SBX_EXIT.loginRequired;
   }
   if (auth.kind === 'unreachable') return failRefresh(io, auth.error);
@@ -127,7 +152,13 @@ export async function openSbx(
 }
 
 /** The commands with no --json output (R5i): refused with exit 2 rather than ignored. */
-const NO_JSON = new Set(['login', 'logout', 'env']);
+const NO_JSON = new Set(['login', 'logout', 'env', 'run', 'put', 'mcp']);
+/** The commands that act on one sandbox: `[ID]` as an argument (or `--sandbox ID`). */
+const TAKES_ID_ARG = new Set(['rm', 'token', 'env']);
+/** The commands that act on one sandbox through `--sandbox ID` only. */
+const TAKES_SANDBOX_FLAG = new Set(['run', 'put', 'mcp', ...TAKES_ID_ARG]);
+
+const mib = (n: number) => `${(n / (1024 * 1024)).toFixed(n % (1024 * 1024) ? 1 : 0)} MiB`;
 
 function parseLabels(io: Io, raw: string[]): Record<string, string> | undefined {
   const labels: Record<string, string> = {};
@@ -161,6 +192,8 @@ export async function sbxMain(
         label: { type: 'string', multiple: true },
         all: { type: 'boolean' },
         json: { type: 'boolean' },
+        sandbox: { type: 'string' },
+        timeout: { type: 'string' },
         help: { type: 'boolean', short: 'h' },
       },
     });
@@ -178,7 +211,19 @@ export async function sbxMain(
     io.err(SBX_USAGE);
     return SBX_EXIT.usage;
   }
-  const known = ['login', 'logout', 'templates', 'create', 'ls', 'rm', 'token', 'env'];
+  const known = [
+    'login',
+    'logout',
+    'templates',
+    'create',
+    'ls',
+    'rm',
+    'token',
+    'env',
+    'run',
+    'put',
+    'mcp',
+  ];
   if (!known.includes(command)) {
     io.err(`sbx: unknown command '${command}'\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
@@ -189,22 +234,84 @@ export async function sbxMain(
     io.err(`sbx: ${command} has no --json output\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
-  const takesId = command === 'rm' || command === 'token' || command === 'env';
-  if (extra.length > 0 || (arg !== undefined && !takesId)) {
-    io.err(`sbx: too many arguments for ${command}\n${SBX_USAGE}`);
+  if (values.sandbox !== undefined && !TAKES_SANDBOX_FLAG.has(command)) {
+    io.err(`sbx: --sandbox does not apply to ${command}\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (values.timeout !== undefined && command !== 'run') {
+    io.err(`sbx: --timeout only applies to run\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  // `run` takes everything after the command (after `--`) as CMD; `put` exactly one PATH; rm, token
+  // and env at most one ID; every other command no argument at all.
+  const argsOk =
+    command === 'run' ||
+    (command === 'put'
+      ? arg !== undefined && extra.length === 0
+      : extra.length === 0 && (arg === undefined || TAKES_ID_ARG.has(command)));
+  if (!argsOk) {
+    io.err(
+      `sbx: ${command === 'put' ? 'put takes exactly one PATH' : `too many arguments for ${command}`}\n${SBX_USAGE}`,
+    );
     return SBX_EXIT.usage;
   }
 
-  // Everything checkable locally is checked before a request (or a refresh) is made.
+  // Everything checkable locally is checked before a request (or a refresh) is made. Every id is
+  // checked, whether it came from an argument, --sandbox or .sbx/sandbox.json: it goes into URLs
+  // and the flight recorder's file name.
   let id: string | undefined;
-  if (takesId) {
-    id = arg ?? readBoundSandbox(deps.cwd ?? process.cwd());
+  let boundUrl: string | undefined;
+  if (TAKES_SANDBOX_FLAG.has(command)) {
+    id = (TAKES_ID_ARG.has(command) ? arg : undefined) ?? values.sandbox;
+    if (id === undefined) {
+      const bound = readBinding(deps.cwd ?? process.cwd());
+      id = bound?.id;
+      boundUrl = bound?.controlPlaneUrl;
+    }
     if (!id) {
-      io.err(`sbx: ${command} needs a sandbox id (or a .sbx/sandbox.json in this repository)`);
+      io.err(
+        TAKES_ID_ARG.has(command)
+          ? `sbx: ${command} needs a sandbox id (or a .sbx/sandbox.json in this repository)`
+          : `sbx: ${command} needs --sandbox ID (or a .sbx/sandbox.json in this repository)`,
+      );
       return SBX_EXIT.usage;
     }
     if (!SANDBOX_ID_RE.test(id)) {
       io.err(`sbx: '${id}' is not a sandbox id (sbx-…)`);
+      return SBX_EXIT.usage;
+    }
+  }
+  const timeout = parseTimeout(io, values.timeout);
+  if (timeout === null) return SBX_EXIT.usage;
+  let script: string | undefined;
+  if (command === 'run') {
+    script = positionals.slice(1).join(' ');
+    if (!script) {
+      if (deps.stdinIsTTY === true || !deps.readStdin) {
+        io.err('sbx: run needs a command (sbx run -- CMD ...), or a script on stdin');
+        return SBX_EXIT.usage;
+      }
+      script = await deps.readStdin();
+    }
+    if (!script.trim()) {
+      io.err('sbx: run needs a command (sbx run -- CMD ...), or a script on stdin');
+      return SBX_EXIT.usage;
+    }
+  }
+  let content: Buffer | undefined;
+  let target: string | undefined;
+  if (command === 'put') {
+    target = workspacePath(arg!);
+    if (!target) {
+      io.err(`sbx: put writes under ${WORKSPACE}; '${arg}' is not under it`);
+      return SBX_EXIT.usage;
+    }
+    content = (await deps.readStdinBytes?.()) ?? Buffer.alloc(0);
+    if (content.length > MAX_STDIN_BYTES) {
+      io.err(
+        `sbx: stdin is ${mib(content.length)}, over the ${mib(MAX_STDIN_BYTES)} one Exec can carry; ` +
+          'put it in parts, or use `mocactl sbx push`',
+      );
       return SBX_EXIT.usage;
     }
   }
@@ -223,7 +330,11 @@ export async function sbxMain(
     };
   }
 
-  const opened = await openSbx({ controlPlaneUrl: values['control-plane-url'] }, env, io, deps, {
+  // A sandbox bound by .sbx/sandbox.json lives on the control plane `sbx up` used, which may not be
+  // the one remembered at login (a `sbx mcp` started by an agent has no MOCACTL_SBX_URL): the flag
+  // and the environment still win (R5j).
+  const flagUrl = values['control-plane-url'] || (env.MOCACTL_SBX_URL ? undefined : boundUrl);
+  const opened = await openSbx({ controlPlaneUrl: flagUrl }, env, io, deps, {
     login: command === 'login' || command === 'logout',
   });
   if (typeof opened === 'number') return opened;
@@ -244,6 +355,12 @@ export async function sbxMain(
       return cmdRm(ctx, id!);
     case 'token':
       return cmdToken(ctx, id!);
+    case 'run':
+      return cmdRun(ctx, id!, script!, timeout, deps.execFactory);
+    case 'put':
+      return cmdPut(ctx, id!, target!, content!, deps.execFactory);
+    case 'mcp':
+      return cmdMcp(ctx, id!, deps.mcpTransport, deps.execFactory);
     default:
       return cmdEnv(ctx, id!);
   }

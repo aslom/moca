@@ -35,3 +35,24 @@ export function readBoundSandbox(cwd: string): string | undefined {
     return undefined;
   }
 }
+
+/**
+ * The binding as written, unvalidated: the caller checks the id (`SANDBOX_ID_RE`) and reports a bad
+ * one, rather than treating it as no binding. `controlPlaneUrl` is the control plane `sbx up` used,
+ * kept only when it is an http(s) URL.
+ */
+export function readBinding(cwd: string): { id: string; controlPlaneUrl?: string } | undefined {
+  const f = findSandboxFile(cwd);
+  if (!f) return undefined;
+  try {
+    const b = JSON.parse(readFileSync(f, 'utf8')) as { id?: unknown; controlPlaneUrl?: unknown };
+    if (typeof b.id !== 'string') return undefined;
+    const url = typeof b.controlPlaneUrl === 'string' ? b.controlPlaneUrl : undefined;
+    return {
+      id: b.id,
+      ...(url && /^https?:\/\/[^\s]+$/i.test(url) ? { controlPlaneUrl: url } : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}

@@ -9,7 +9,6 @@ import {
   DEFAULT_CONFIG,
   loadAuth,
   loadConfig,
-  resolvePaths,
   saveAuth,
   saveConfig,
 } from '../src/config.js';
@@ -18,90 +17,10 @@ import { buildRuntime } from '../src/runtime.js';
 import { SandboxApiClient } from '../src/sbx/api.js';
 import { openSbxRuntime, sbxMain, sbxPaths } from '../src/sbx/cli.js';
 import { readBoundSandbox } from '../src/sbx/state.js';
+import { fakeCp, LOGIN, sandbox, SBX, setup, TOKEN, URL_, type Handler } from './helpers/sbx.js';
 
-const URL_ = 'https://sbx-api.example.invalid';
 const MOCA_URL = 'https://moca-api.example.invalid';
-const SBX = 'sbx-0123456789abcdef0123456789';
 
-type Req = { method: string; path: string; body: unknown; auth?: string };
-type Handler = (req: Req) => { status: number; body?: unknown } | Error;
-
-/** A scripted control plane: one handler per "METHOD /path", recording every call. */
-function fakeCp(routes: Record<string, Handler>) {
-  const calls: Req[] = [];
-  const fetchImpl = (async (input: string | URL, init?: RequestInit) => {
-    const u = new URL(String(input));
-    const req: Req = {
-      method: init?.method ?? 'GET',
-      path: u.pathname + u.search,
-      body: init?.body ? JSON.parse(String(init.body)) : undefined,
-      auth: (init?.headers as Record<string, string> | undefined)?.authorization,
-    };
-    calls.push(req);
-    const h = routes[`${req.method} ${u.pathname}`];
-    if (!h) return new Response(JSON.stringify({ error: 'not_found' }), { status: 404 });
-    const r = h(req);
-    if (r instanceof Error) throw r;
-    return new Response(r.body === undefined ? null : JSON.stringify(r.body), {
-      status: r.status,
-      headers: { 'content-type': 'application/json' },
-    });
-  }) as typeof fetch;
-  return { fetchImpl, calls };
-}
-
-const LOGIN = {
-  apiToken: 'api-1',
-  subject: 'github:1',
-  roles: [],
-  expiresAt: 4_000_000_000,
-  controlPlaneUrl: URL_,
-  refreshToken: 'mrt_x',
-  refreshExpiresAt: 4_000_000_000,
-};
-
-function setup(opts: { loggedIn?: boolean; expired?: boolean } = { loggedIn: true }) {
-  const home = mkdtempSync(join(tmpdir(), 'mocactl-sbx-'));
-  const env = { HOME: home, MOCACTL_SBX_URL: URL_ };
-  const paths = resolvePaths(env, home);
-  if (opts.loggedIn !== false) {
-    // The sbx login lives in its own file (sbx-auth.json), never in MOCA's auth.json.
-    saveAuth(sbxPaths(paths), { ...LOGIN, ...(opts.expired ? { expiresAt: 1_000 } : {}) });
-  }
-  const io = {
-    outs: [] as string[],
-    errs: [] as string[],
-    out(s: string) {
-      this.outs.push(s);
-    },
-    err(s: string) {
-      this.errs.push(s);
-    },
-  };
-  return { home, env, paths, io };
-}
-
-const sandbox = (over: Record<string, unknown> = {}) => ({
-  id: SBX,
-  owner: 'github:1',
-  name: 'web',
-  template: 'node22',
-  state: 'ready',
-  reason: null,
-  createdAt: 1_800_000_000,
-  expiresAt: 1_800_604_800,
-  terminatedAt: null,
-  labels: {},
-  ...over,
-});
-const TOKEN = {
-  token: 'eyJ.sbx.tok',
-  expiresAt: 1_800_000_900,
-  execEndpoint: 'sbx-exec.example.invalid:443',
-  wrk: 'sbx_node22',
-  wsk: SBX,
-  execCa: null,
-};
 const DEVICE = {
   deviceCode: 'dc',
   userCode: 'ABCD-EFGH',
@@ -125,6 +44,20 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     const { env, io } = setup();
     expect(await main(['sbx', '--help'], env, io)).toBe(0);
     expect(io.outs.join('')).toContain('mocactl sbx login');
+  });
+
+  it('passes the terminal check and stdin through from the top-level CLI to sbx run', async () => {
+    const { env, io } = setup();
+    let read = 0;
+    const readStdin = async () => (read++, '');
+    expect(
+      await main(['sbx', 'run', '--sandbox', SBX], env, io, { stdinIsTTY: true, readStdin }),
+    ).toBe(2);
+    expect(read).toBe(0);
+    expect(
+      await main(['sbx', 'run', '--sandbox', SBX], env, io, { stdinIsTTY: false, readStdin }),
+    ).toBe(2);
+    expect(read).toBe(1);
   });
 
   it('needs a control plane URL, and says how to give one', async () => {
@@ -401,7 +334,7 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
       [`POST /v1/sandboxes/${SBX}/token`]: () => ({ status: 200, body: TOKEN }),
     });
     expect(await sbxMain(['token', SBX], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
-    expect(io.outs.join('')).toBe('eyJ.sbx.tok\n');
+    expect(io.outs.join('')).toBe(`${TOKEN.token}\n`);
   });
 
   it('says why a terminated sandbox gives no token', async () => {
@@ -432,7 +365,7 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     expect(out).toContain(
       `export SBX_TOKEN_CMD='mocactl sbx token --control-plane-url '\\''${URL_}'\\'' ${SBX}'`,
     );
-    expect(out).not.toContain('eyJ.sbx.tok'); // never the token itself: it lives 15 minutes
+    expect(out).not.toContain(TOKEN.token); // never the token itself: it lives 15 minutes
     const ca = join(paths.stateDir, 'sbx', `${SBX}-exec-ca.crt`);
     expect(isAbsolute(ca)).toBe(true);
     expect(out).toContain(`export SBX_CA_FILE='${ca}'`);

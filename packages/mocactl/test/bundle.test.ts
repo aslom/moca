@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   copyFileSync,
   mkdirSync,
@@ -9,6 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -139,6 +140,98 @@ describe('the bundle', () => {
     });
     expect(viaCopy.stdout).not.toBe(`${VERSION}\n`);
   });
+
+  // `sbx mcp` loads the MCP SDK's stdio transport lazily: a bundling gap would show only here. The
+  // control plane is an in-process fake; the client closes stdin, and the server must then exit.
+  it('serves MCP on stdio as `sbx mcp`, with nothing but frames on stdout', async () => {
+    const SBX = 'sbx-0123456789abcdef0123456789';
+    const srv = createServer((req, res) => {
+      res.setHeader('content-type', 'application/json');
+      if (req.url !== `/v1/sandboxes/${SBX}`) {
+        res.statusCode = 404;
+        return res.end('{"error":"not_found"}');
+      }
+      res.end(
+        JSON.stringify({
+          id: SBX,
+          owner: 'github:1',
+          name: null,
+          template: 'node22',
+          state: 'ready',
+          reason: null,
+          createdAt: 1,
+          expiresAt: 4_000_000_000,
+          terminatedAt: null,
+          labels: {},
+        }),
+      );
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    try {
+      const url = `http://127.0.0.1:${(srv.address() as { port: number }).port}`;
+      const config = join(dir, 'mcp-config');
+      mkdirSync(join(config, 'mocactl'), { recursive: true });
+      writeFileSync(
+        join(config, 'mocactl', 'sbx-auth.json'),
+        JSON.stringify({
+          apiToken: 'api-1',
+          subject: 'github:1',
+          roles: [],
+          expiresAt: 4_000_000_000,
+          controlPlaneUrl: url,
+        }),
+      );
+      const p = spawn(process.execPath, [bundle, 'sbx', 'mcp', '--sandbox', SBX], {
+        cwd: dir,
+        env: cleanEnv({
+          XDG_CONFIG_HOME: config,
+          XDG_STATE_HOME: join(dir, 'mcp-state'),
+          MOCACTL_SBX_URL: url,
+        }),
+      });
+      let out = '';
+      let err = '';
+      p.stdout.on('data', (d) => (out += d));
+      p.stderr.on('data', (d) => (err += d));
+      const frames = () => out.split('\n').filter((l) => l.trim());
+      const send = (m: object) => p.stdin.write(JSON.stringify(m) + '\n');
+      send({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2025-06-18',
+          capabilities: {},
+          clientInfo: { name: 't', version: '0' },
+        },
+      });
+      send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+      send({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: { name: 'sandbox_info', arguments: {} },
+      });
+      const deadline = Date.now() + 10_000;
+      while (frames().length < 2 && Date.now() < deadline)
+        await new Promise((r) => setTimeout(r, 50));
+      p.stdin.end();
+      const code = await new Promise((r) => p.on('exit', r));
+      expect(code, err).toBe(0);
+      const parsed = frames().map(
+        (l) =>
+          JSON.parse(l) as {
+            jsonrpc: string;
+            id?: number;
+            result?: { content: { text: string }[] };
+          },
+      );
+      expect(parsed.every((f) => f.jsonrpc === '2.0')).toBe(true);
+      expect(parsed.find((f) => f.id === 2)?.result?.content[0]?.text).toMatch(/template node22/);
+    } finally {
+      srv.close();
+    }
+  }, 20_000);
 
   it('turns a missing clipboard tool into a rejected copy, not a crash', () => {
     const probe = join(dir, 'clipboard-probe.mjs');

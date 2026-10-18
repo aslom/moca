@@ -1,5 +1,7 @@
 import { chmodSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+// sandbox-client's POSIX single quotes: safe to `eval`, whatever the control plane sent.
+import { q } from '@moca/sandbox-client';
 import { ApiError, TOKEN_CODES } from '../api/errors.js';
 import { deviceLogin, toCachedAuth } from '../core/auth.js';
 import { describeError } from '../core/messages.js';
@@ -239,9 +241,6 @@ export async function cmdToken(c: SbxCtx, id: string): Promise<number> {
     return failed(c, err);
   }
 }
-
-/** POSIX single quotes: safe to `eval`, whatever the control plane sent. */
-const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
 /**
  * Write-then-rename into a 0700 directory, chmodding both, so the file is 0600 even when a

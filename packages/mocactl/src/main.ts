@@ -1,6 +1,12 @@
 import { main } from './cli.js';
 
 const ac = new AbortController();
+
+async function readStdinBytes(): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+  return Buffer.concat(chunks);
+}
 process.once('SIGINT', () => ac.abort());
 
 const code = await main(
@@ -10,11 +16,8 @@ const code = await main(
   {
     signal: ac.signal,
     stdinIsTTY: process.stdin.isTTY === true,
-    readStdin: async () => {
-      const chunks: Buffer[] = [];
-      for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
-      return Buffer.concat(chunks).toString('utf8');
-    },
+    readStdin: async () => (await readStdinBytes()).toString('utf8'),
+    readStdinBytes,
     // Loaded lazily so the headless commands never load Ink or React.
     startInteractive: async (rt, opts) => (await import('./start.js')).startInteractive(rt, opts),
   },
