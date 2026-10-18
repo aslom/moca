@@ -110,8 +110,18 @@ export function isBindingPath(p: string): boolean {
 }
 
 const run = promisify(execFile);
-async function git(cwd: string, args: string[], input?: Buffer): Promise<Buffer> {
-  const p = run('git', args, { cwd, encoding: 'buffer', maxBuffer: 512 << 20 });
+async function git(
+  cwd: string,
+  args: string[],
+  input?: Buffer,
+  env?: NodeJS.ProcessEnv,
+): Promise<Buffer> {
+  const p = run('git', args, {
+    cwd,
+    encoding: 'buffer',
+    maxBuffer: 512 << 20,
+    ...(env ? { env: { ...process.env, ...env } } : {}),
+  });
   if (input) p.child.stdin?.end(input);
   return (await p).stdout;
 }
@@ -583,8 +593,11 @@ async function patchPaths(root: string, file: string): Promise<string[]> {
   return out.filter(Boolean);
 }
 
-/** Every path with a local change not committed: modified, staged, unmerged or untracked. */
-async function uncommitted(root: string): Promise<Set<string>> {
+/**
+ * Of `touched`, every path with a local change not committed: modified, staged, unmerged,
+ * untracked, or an ignored file that exists (a patch creating it must not overwrite it).
+ */
+async function uncommitted(root: string, touched: string[]): Promise<string[]> {
   const t = (await git(root, ['status', '--porcelain=v1', '-z', '--untracked-files=all']))
     .toString('utf8')
     .split('\0');
@@ -595,7 +608,13 @@ async function uncommitted(root: string): Promise<Set<string>> {
     out.add(e.slice(3));
     if (e[0] === 'R' || e[0] === 'C') out.add(t[++i]!); // the rename's source
   }
-  return out;
+  const indexed = new Set(
+    (await git(root, ['ls-files', '-z'])).toString('utf8').split('\0').filter(Boolean),
+  );
+  // An ignored file is in neither list; one the patch touches is local data all the same.
+  return touched.filter(
+    (p) => out.has(p) || (!indexed.has(p) && lstatOrGone(join(root, p)) !== undefined),
+  );
 }
 
 const gitText = (err: unknown) =>
@@ -620,13 +639,37 @@ const list = (ps: string[]) =>
   ps.length > 10 ? `${ps.slice(0, 10).join(', ')} and ${ps.length - 10} more` : ps.join(', ');
 
 /**
+ * `git apply --3way --cached` into a throwaway index read from HEAD: the paths it leaves unmerged
+ * (empty when the merge is clean). The user's index and working tree are not touched.
+ */
+async function dryRun3way(root: string, dir: string, patch: string): Promise<string[]> {
+  const env = { GIT_INDEX_FILE: join(dir, 'index') };
+  await git(root, ['read-tree', 'HEAD'], undefined, env);
+  try {
+    await git(root, ['apply', '--3way', '--cached', '--whitespace=nowarn', patch], undefined, env);
+    return [];
+  } catch (err) {
+    const unmerged = (await git(root, ['ls-files', '-u', '-z'], undefined, env))
+      .toString('utf8')
+      .split('\0')
+      .filter(Boolean)
+      .map((l) => l.slice(l.indexOf('\t') + 1));
+    if (unmerged.length) return [...new Set(unmerged)];
+    throw new PushError(
+      `the patch does not apply here; nothing was changed (git said: ${gitText(err)})`,
+    );
+  }
+}
+
+/**
  * Applies a pulled patch in the local repository (R6c):
  * 1. a plain `git apply`, which changes only the working tree and is all or nothing;
  * 2. if that fails because a file it touches has uncommitted local changes, it is refused with
  *    those files named, and nothing is changed;
- * 3. otherwise (the files differ only by local commits), `git apply --3way`. On a clean merge the
- *    touched paths' index entries go back to what they were (their HEAD), so the index is as
- *    before; a conflict leaves git's markers, named, and the error says what to do.
+ * 3. otherwise (the files differ only by local commits), a 3-way merge, dry-run first in a
+ *    throwaway index: a conflict is refused, naming the files, with nothing applied, staged or
+ *    marked. Only a clean merge is applied for real, and the touched paths' index entries go back
+ *    to what they were (their HEAD), so the index is as before.
  * Returns the paths the patch touched.
  */
 export async function applyPatch(root: string, patch: Buffer): Promise<string[]> {
@@ -652,8 +695,7 @@ export async function applyPatch(root: string, patch: Buffer): Promise<string[]>
     } catch (err) {
       plainErr = err;
     }
-    const dirty = await uncommitted(root);
-    const local = touched.filter((p) => dirty.has(p));
+    const local = await uncommitted(root, touched);
     if (local.length) {
       const failing = failedPaths(plainErr).filter((p) => !local.includes(p));
       throw new PushError(
@@ -664,26 +706,23 @@ export async function applyPatch(root: string, patch: Buffer): Promise<string[]>
           `(git said: ${gitText(plainErr)})`,
       );
     }
+    // A dry run first, in a throwaway index from HEAD (whose touched entries the user's index
+    // matches, by step 2): a conflict is found there, with nothing applied, staged or marked.
+    const conflicts = await dryRun3way(root, dir, f);
+    if (conflicts.length) {
+      throw new PushError(
+        `the patch conflicts with local commits in ${list(conflicts)}; nothing was applied. ` +
+          'Save it with mocactl sbx pull -o FILE and merge it by hand (git apply --3way FILE), ' +
+          'then make the sandbox match with mocactl sbx push --force',
+      );
+    }
     try {
       await git(root, ['apply', '--3way', '--whitespace=nowarn', f]);
     } catch (err) {
-      const conflicted = [...(await uncommitted(root))].filter((p) => touched.includes(p));
-      const unmerged = (await git(root, ['diff', '--name-only', '-z', '--diff-filter=U']))
-        .toString('utf8')
-        .split('\0')
-        .filter(Boolean);
-      if (unmerged.length) {
-        throw new PushError(
-          `the patch conflicted with local commits: conflict markers in ${list(unmerged)} ` +
-            '(the cleanly merged files are staged). Resolve them and commit; the sandbox still ' +
-            'holds its changes, so then run mocactl sbx push --force to make it match',
-        );
-      }
+      // The dry run was clean, so only a change made meanwhile gets here.
       throw new PushError(
-        `the patch did not apply (git said: ${gitText(err)})` +
-          (conflicted.length
-            ? `; files it may have changed: ${list(conflicted)}`
-            : '; nothing was changed'),
+        `the patch did not apply (git said: ${gitText(err)}); check git status, as files it ` +
+          `touches may have changed: ${list(touched)}`,
       );
     }
     // A clean merge staged its paths; they were at HEAD before (step 2), so put the index back.

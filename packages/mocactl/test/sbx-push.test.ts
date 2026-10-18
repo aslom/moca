@@ -665,15 +665,43 @@ describe('applyPatch on a dirty local tree (plan 1c R6c)', () => {
     expect(git(r, 'status', '--porcelain', '--', 'src')).toBe(' M src/m.txt\n?? src/added.py\n');
   });
 
-  it('names the files left with conflict markers when the 3-way merge conflicts', async () => {
-    const { r, patch } = await agentEdit({ untracked: false });
+  it('refuses a 3-way conflict with nothing applied, staged or marked (review I4)', async () => {
+    const r = repo();
+    const { ws, exec } = await pushed(r);
+    writeFileSync(join(ws, 'src/app.py'), 'print(2)\n');
+    writeFileSync(join(ws, 'bin/run.sh'), '#!/bin/sh\necho agent\n'); // merges cleanly alone
+    writeFileSync(join(ws, 'src/new.py'), 'new\n');
+    const patch = await capturePatch(exec);
     writeFileSync(join(r, 'src/app.py'), 'print("local")\n');
     git(r, 'commit', '-qam', 'local');
+    git(r, 'config', 'rerere.enabled', 'true'); // a user who has rerere on
+    const tree = snapshot(r);
+    const index = readFileSync(join(r, '.git/index'));
+    // rerere state, which a 3-way apply may record into (when the user has rerere on).
+    const rr = () =>
+      execFileSync('find', ['.git', '-path', '*rr*', '-print'], { cwd: r }).toString();
+    const rrBefore = rr();
     const err = await applyPatch(r, patch).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(PushError);
-    expect((err as Error).message).toMatch(/conflict.*src\/app\.py/);
-    expect((err as Error).message).toMatch(/push --force/);
-    expect(readFileSync(join(r, 'src/app.py'), 'utf8')).toMatch(/<<<<<<< ours/);
+    expect((err as Error).message).toMatch(
+      /conflicts with local commits in src\/app\.py; nothing was applied/,
+    );
+    expect((err as Error).message).toMatch(/pull -o FILE/);
+    expect(snapshot(r)).toEqual(tree); // byte-identical: no markers, no half-applied file
+    expect(readFileSync(join(r, '.git/index'))).toEqual(index); // and the index too
+    expect(rr()).toBe(rrBefore);
+  });
+
+  it('refuses a patch creating a file that exists locally but is ignored, keeping it (review)', async () => {
+    const r = repo();
+    const { ws, exec } = await pushed(r);
+    writeFileSync(join(ws, 'build/out.o'), 'agent'); // ignored locally, absent in the sandbox
+    git(ws, 'add', '-f', 'build/out.o'); // (the sandbox's exclude would hide it otherwise)
+    writeFileSync(join(ws, '.git/info/exclude'), '');
+    const patch = await capturePatch(exec);
+    expect(patch.toString()).toContain('build/out.o');
+    await expect(applyPatch(r, patch)).rejects.toThrow(/not yet committed \(build\/out\.o\)/);
+    expect(readFileSync(join(r, 'build/out.o'), 'utf8')).toBe('ignored\n');
   });
 
   it('tries no 3-way merge while a touched file has uncommitted changes, naming both kinds', async () => {
