@@ -1,0 +1,295 @@
+import { writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { ApiError } from '../api/errors.js';
+import { sanitizeRemote } from '../core/sanitize.js';
+import type { SbxSandbox } from './api.js';
+import { failed, SBX_EXIT, type SbxCtx } from './commands.js';
+import { execFailed, openExec, type ExecFactory, type OpenedExec } from './exec.js';
+import {
+  PushError,
+  advanceBaseline,
+  applyPatch,
+  bindingUrl,
+  capture,
+  hasUnpulled,
+  planPush,
+  pushTree,
+  repoId,
+  writeBinding,
+  type PushPlan,
+} from './push.js';
+
+/**
+ * `mocactl sbx up`, `push` and `pull` (SBX0 §6.1, §6.2): the commands over push.ts. Every message
+ * is on stderr; stdout carries only what a script reads (the sandbox id from `up`, the patch from
+ * `pull`).
+ */
+
+/** The template `up` and `create` use when none is given (spec §6.1). */
+export const DEFAULT_TEMPLATE = 'default';
+
+export const UNPULLED_TEXT = 'the sandbox has changes not yet pulled';
+
+const mib = (n: number) => `${(n / 2 ** 20).toFixed(1)} MiB`;
+const when = (epochS: number) => new Date(epochS * 1000).toISOString();
+const say = (c: SbxCtx, s: string) => c.io.err(`sbx: ${sanitizeRemote(s)}`);
+
+/** Runs `fn` on one sandbox's Exec function, closing it after; failures become exit codes. */
+async function withExec(
+  c: SbxCtx,
+  id: string,
+  factory: ExecFactory | undefined,
+  fn: (x: OpenedExec) => Promise<number>,
+): Promise<number> {
+  let x: OpenedExec;
+  try {
+    x = await openExec(c.api, id, factory);
+  } catch (err) {
+    return execFailed(c, err);
+  }
+  try {
+    return await fn(x);
+  } catch (err) {
+    if (err instanceof PushError) {
+      say(c, err.message);
+      return SBX_EXIT.failed;
+    }
+    return execFailed(c, err);
+  } finally {
+    x.close();
+  }
+}
+
+/** The plan, with what was left out said; or the exit code after saying why it was refused. */
+async function plan(
+  c: SbxCtx,
+  root: string,
+  o: { includeSecrets?: boolean; maxPush?: number },
+): Promise<PushPlan | number> {
+  let p: PushPlan;
+  try {
+    p = await planPush(root, o);
+  } catch (err) {
+    if (!(err instanceof PushError)) throw err;
+    say(c, err.message);
+    return SBX_EXIT.failed;
+  }
+  if (p.excludedSecrets.length) {
+    say(
+      c,
+      `not pushed, as they may hold secrets (--include-secrets pushes them): ${p.excludedSecrets.join(', ')}`,
+    );
+  }
+  for (const s of p.skipped) say(c, `not pushed: ${s}`);
+  return p;
+}
+
+async function doPush(c: SbxCtx, x: OpenedExec, id: string, p: PushPlan): Promise<void> {
+  await pushTree(x.exec, p, undefined, {
+    ...(c.signal ? { signal: c.signal } : {}),
+    onChunk: (i, n) => {
+      if (n > 1) c.io.err(`pushing part ${i} of ${n}`);
+    },
+  });
+  c.io.err(`pushed ${p.files} files (${mib(p.bytes)}) to ${id}`);
+}
+
+export interface PushFlags {
+  force: boolean;
+  includeSecrets: boolean;
+  maxPush?: number;
+}
+
+/** `mocactl sbx push`: refused while the sandbox holds changes not yet pulled, unless `--force`. */
+export async function cmdPush(
+  c: SbxCtx,
+  root: string,
+  id: string,
+  f: PushFlags,
+  factory?: ExecFactory,
+): Promise<number> {
+  const p = await plan(c, root, f);
+  if (typeof p === 'number') return p;
+  return withExec(c, id, factory, async (x) => {
+    if (!f.force && (await hasUnpulled(x.exec, undefined, { signal: c.signal }))) {
+      say(c, `${UNPULLED_TEXT}: run mocactl sbx pull, or push --force to discard them`);
+      return SBX_EXIT.failed;
+    }
+    await doPush(c, x, id, p);
+    return SBX_EXIT.ok;
+  });
+}
+
+export interface PullFlags {
+  apply: boolean;
+  /** A file to write the patch to; `-` is stdout. */
+  out?: string;
+  /** Where `--apply` applies: the repository root. */
+  root?: string;
+}
+
+/**
+ * `mocactl sbx pull`: the patch on stdout (or `-o FILE`). With `--apply`, applied in the local
+ * repository, and only after a clean apply is the sandbox's baseline advanced (spec §6.2).
+ */
+export async function cmdPull(
+  c: SbxCtx,
+  id: string,
+  f: PullFlags,
+  cwd: string,
+  factory?: ExecFactory,
+): Promise<number> {
+  return withExec(c, id, factory, async (x) => {
+    const { patch, tree } = await capture(x.exec, undefined, { signal: c.signal });
+    if (patch.length === 0) {
+      c.io.err('nothing to pull');
+      return SBX_EXIT.ok;
+    }
+    if (f.out !== undefined && f.out !== '-') {
+      writeFileSync(resolve(cwd, f.out), patch);
+      c.io.err(`wrote the sandbox's changes to ${f.out} (${patch.length} bytes)`);
+    } else if (f.out === '-' || !f.apply) {
+      if (c.io.outBytes) c.io.outBytes(patch);
+      else c.io.out(patch.toString());
+    }
+    if (!f.apply) return SBX_EXIT.ok;
+    const touched = await applyPatch(f.root!, patch);
+    try {
+      await advanceBaseline(x.exec, undefined, tree, { signal: c.signal });
+    } catch (err) {
+      say(
+        c,
+        `applied the sandbox's changes here, but advancing its baseline failed, so the next pull ` +
+          `shows them again (mocactl sbx push --force makes the sandbox match this tree): ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
+      return SBX_EXIT.failed;
+    }
+    c.io.err(
+      `applied the sandbox's changes to ${touched.length} ${touched.length === 1 ? 'file' : 'files'} ` +
+        `(${patch.length} bytes of patch)`,
+    );
+    return SBX_EXIT.ok;
+  });
+}
+
+export interface UpFlags extends PushFlags {
+  /** `--template`, if given: a reused sandbox must have it. */
+  template?: string;
+  name?: string;
+  noAgentConfig: boolean;
+  /** The id in `.sbx/sandbox.json`, if valid. */
+  boundId?: string;
+}
+
+function stateText(s: SbxSandbox): string {
+  return s.state === 'terminated' && s.reason ? `terminated (${s.reason})` : s.state;
+}
+
+/**
+ * The sandbox `up` uses: the bound one if ready; else the user's newest ready one labelled
+ * `project=<repo id>`; else a new one. A reused sandbox must have `--template` when it was given.
+ */
+async function findOrCreate(
+  c: SbxCtx,
+  rid: string,
+  f: UpFlags,
+): Promise<{ sandbox: SbxSandbox; reused: boolean } | number> {
+  const fits = (s: SbxSandbox) => f.template === undefined || s.template === f.template;
+  if (f.boundId) {
+    let bound: SbxSandbox | undefined;
+    try {
+      bound = await c.api.getSandbox(f.boundId);
+    } catch (err) {
+      if (!(err instanceof ApiError && err.code === 'sandbox_not_found')) return failed(c, err);
+      say(c, `the bound sandbox ${f.boundId} no longer exists; finding or creating another`);
+    }
+    if (bound?.state === 'ready') {
+      if (!fits(bound)) {
+        say(
+          c,
+          `the bound sandbox ${bound.id} has template ${bound.template}, not ${f.template}: ` +
+            `pull its work, remove it (mocactl sbx rm ${bound.id}), or run up without --template`,
+        );
+        return SBX_EXIT.failed;
+      }
+      return { sandbox: bound, reused: true };
+    }
+    if (bound) {
+      say(c, `the bound sandbox ${bound.id} is ${stateText(bound)}; finding or creating another`);
+    }
+  }
+  try {
+    const mine = (await c.api.listSandboxes())
+      .filter((s) => s.state === 'ready' && s.labels?.project === rid && fits(s))
+      .sort((a, b) => b.createdAt - a.createdAt);
+    if (mine[0]) {
+      c.io.err(`reusing ${sanitizeRemote(mine[0].id)}, this repository's sandbox`);
+      return { sandbox: mine[0], reused: true };
+    }
+    const s = await c.api.createSandbox({
+      template: f.template ?? DEFAULT_TEMPLATE,
+      ...(f.name ? { name: f.name } : {}),
+      labels: { project: rid },
+    });
+    c.io.err(`created ${sanitizeRemote(s.id)} (${sanitizeRemote(s.template)})`);
+    return { sandbox: s, reused: false };
+  } catch (err) {
+    return failed(c, err);
+  }
+}
+
+/**
+ * `mocactl sbx up` (SBX0 §6.1): in a git repository, find or create its sandbox, bind it in
+ * `.sbx/sandbox.json`, and push the working tree -- unless a reused sandbox holds changes not yet
+ * pulled, which are left untouched with a warning.
+ *
+ * Task 6 (agent configuration) hooks in at the two marked points.
+ */
+export async function cmdUp(
+  c: SbxCtx,
+  root: string,
+  f: UpFlags,
+  factory?: ExecFactory,
+): Promise<number> {
+  const p = await plan(c, root, f);
+  if (typeof p === 'number') return p;
+  try {
+    bindingUrl(c.url); // refused now, not after a sandbox was created for nothing
+  } catch (err) {
+    if (!(err instanceof PushError)) throw err;
+    say(c, err.message);
+    return SBX_EXIT.failed;
+  }
+  // [Task 6] the agent-configuration dry run goes here: a conflict stops `up` with nothing done.
+  const rid = await repoId(root);
+  const found = await findOrCreate(c, rid, f);
+  if (typeof found === 'number') return found;
+  const { sandbox: s, reused } = found;
+  try {
+    writeBinding(root, { id: s.id, controlPlaneUrl: c.url, template: s.template });
+  } catch (err) {
+    if (!(err instanceof PushError)) throw err;
+    say(c, err.message);
+    return SBX_EXIT.failed;
+  }
+  const code = await withExec(c, s.id, factory, async (x) => {
+    if (reused && (await hasUnpulled(x.exec, undefined, { signal: c.signal }))) {
+      say(
+        c,
+        `${UNPULLED_TEXT}, so it was left as it is (not pushed): run mocactl sbx pull --apply, ` +
+          'or mocactl sbx push --force to discard them',
+      );
+      return SBX_EXIT.ok;
+    }
+    await doPush(c, x, s.id, p);
+    return SBX_EXIT.ok;
+  });
+  if (code !== SBX_EXIT.ok) return code;
+  // [Task 6] the agent configuration is written here (unless f.noAgentConfig).
+  c.io.out(`${s.id}\n`);
+  c.io.err(
+    `sandbox ${s.id} (${sanitizeRemote(s.template)}), expires ${when(s.expiresAt)}; bound in .sbx/sandbox.json`,
+  );
+  return SBX_EXIT.ok;
+}

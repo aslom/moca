@@ -544,9 +544,10 @@ const list = (ps: string[]) =>
  * 3. otherwise (the files differ only by local commits), `git apply --3way`. On a clean merge the
  *    touched paths' index entries go back to what they were (their HEAD), so the index is as
  *    before; a conflict leaves git's markers, named, and the error says what to do.
+ * Returns the paths the patch touched.
  */
-export async function applyPatch(root: string, patch: Buffer): Promise<void> {
-  if (patch.length === 0) return;
+export async function applyPatch(root: string, patch: Buffer): Promise<string[]> {
+  if (patch.length === 0) return [];
   const dir = mkdtempSync(join(tmpdir(), 'sbx-pull-'));
   const f = join(dir, 'sbx.patch');
   writeFileSync(f, patch, { mode: 0o600 });
@@ -564,7 +565,7 @@ export async function applyPatch(root: string, patch: Buffer): Promise<void> {
     let plainErr: unknown;
     try {
       await git(root, ['apply', '--whitespace=nowarn', f]);
-      return;
+      return touched;
     } catch (err) {
       plainErr = err;
     }
@@ -610,6 +611,7 @@ export async function applyPatch(root: string, patch: Buffer): Promise<void> {
         Buffer.from(touched.join('\0') + '\0', 'utf8'),
       );
     }
+    return touched;
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

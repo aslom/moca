@@ -23,14 +23,16 @@ import {
 } from './commands.js';
 import { type ExecFactory } from './exec.js';
 import { cmdMcp, cmdPut, cmdRun, parseTimeout, workspacePath } from './run.js';
+import { PushError, repoRoot } from './push.js';
 import { readBinding, SANDBOX_ID_RE } from './state.js';
+import { cmdPull, cmdPush, cmdUp, DEFAULT_TEMPLATE } from './sync.js';
 
 export const SBX_USAGE = `usage (the sandbox service, SBX0):
   mocactl sbx login [--control-plane-url URL]    log in with the GitHub device flow (the URL is remembered)
   mocactl sbx logout                             end the sandbox-service login (deletes sbx-auth.json)
   mocactl sbx templates [--json]                 the templates a sandbox can be created from
-  mocactl sbx create --template ID [--name N] [--label k=v ...] [--json]
-                                                 create a sandbox; prints its id and expiry
+  mocactl sbx create [--template ID] [--name N] [--label k=v ...] [--json]
+                                                 create a sandbox (template: default); prints its id
   mocactl sbx ls [--all] [--json]                your sandboxes (--all: everyone's; admins only)
   mocactl sbx rm [ID] [--json]                   delete a sandbox
   mocactl sbx token [ID] [--json]                print a fresh sandbox token (15 minutes by default)
@@ -43,6 +45,16 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  the sandbox token's lifetime minus 60 s)
   mocactl sbx put PATH [--sandbox ID]            write stdin to PATH under /workspace
   mocactl sbx mcp [--sandbox ID]                 the stdio MCP server for Claude Code / OpenCode
+  mocactl sbx up [--template T] [--name N] [--include-secrets] [--max-push MiB] [--no-agent-config]
+                                                 in a git repository: create or reuse its sandbox,
+                                                 push the working tree, bind it in .sbx/sandbox.json
+  mocactl sbx push [--force] [--include-secrets] [--max-push MiB]   push the working tree again
+                                                 (refused while the sandbox has changes not yet
+                                                 pulled, unless --force; .env*, *.pem, *.key and
+                                                 id_* stay behind unless --include-secrets)
+  mocactl sbx pull [--apply] [-o FILE]           the sandbox's changes as a patch, on stdout or in
+                                                 FILE (--apply: apply it here, then advance the
+                                                 sandbox's baseline)
 ID (or --sandbox ID) defaults to the sandbox in the nearest .sbx/sandbox.json. The control plane
 comes from --control-plane-url, MOCACTL_SBX_URL, the bound sandbox's, or the one remembered at
 login. The login is kept apart from \`mocactl login\`'s, so both can be active at once.
@@ -159,11 +171,27 @@ export async function openSbx(
 }
 
 /** The commands with no --json output (R5i): refused with exit 2 rather than ignored. */
-const NO_JSON = new Set(['login', 'logout', 'env', 'run', 'put', 'mcp']);
+const NO_JSON = new Set(['login', 'logout', 'env', 'run', 'put', 'mcp', 'up', 'push', 'pull']);
 /** The commands that act on one sandbox: `[ID]` as an argument (or `--sandbox ID`). */
 const TAKES_ID_ARG = new Set(['rm', 'token', 'env']);
 /** The commands that act on one sandbox through `--sandbox ID` only. */
-const TAKES_SANDBOX_FLAG = new Set(['run', 'put', 'mcp', ...TAKES_ID_ARG]);
+const TAKES_SANDBOX_FLAG = new Set(['run', 'put', 'mcp', 'push', 'pull', ...TAKES_ID_ARG]);
+/** The commands that work on the git repository around the current directory. */
+const IN_REPO = new Set(['up', 'push', 'pull']);
+/** Flags that belong to some commands only: refused elsewhere rather than silently ignored. */
+const SYNC_FLAGS: [
+  'force' | 'include-secrets' | 'max-push' | 'apply' | 'out' | 'no-agent-config',
+  string[],
+][] = [
+  ['force', ['push']],
+  ['include-secrets', ['up', 'push']],
+  ['max-push', ['up', 'push']],
+  ['apply', ['pull']],
+  ['out', ['pull']],
+  ['no-agent-config', ['up']],
+];
+/** `--max-push` in MiB: up to 4 GiB, far above what a push should ever be. */
+const MAX_PUSH_MIB = 4096;
 
 const mib = (n: number) => `${(n / (1024 * 1024)).toFixed(n % (1024 * 1024) ? 1 : 0)} MiB`;
 
@@ -201,6 +229,12 @@ export async function sbxMain(
         json: { type: 'boolean' },
         sandbox: { type: 'string' },
         timeout: { type: 'string' },
+        force: { type: 'boolean' },
+        'include-secrets': { type: 'boolean' },
+        'max-push': { type: 'string' },
+        apply: { type: 'boolean' },
+        out: { type: 'string', short: 'o' },
+        'no-agent-config': { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
       },
     });
@@ -230,6 +264,9 @@ export async function sbxMain(
     'run',
     'put',
     'mcp',
+    'up',
+    'push',
+    'pull',
   ];
   if (!known.includes(command)) {
     io.err(`sbx: unknown command '${command}'\n${SBX_USAGE}`);
@@ -249,6 +286,32 @@ export async function sbxMain(
     io.err(`sbx: --timeout only applies to run\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
+  const flagMisuse = SYNC_FLAGS.find(
+    ([flag, cmds]) => values[flag] !== undefined && !cmds.includes(command),
+  );
+  if (flagMisuse) {
+    io.err(`sbx: --${flagMisuse[0]} only applies to ${flagMisuse[1].join(' and ')}\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (
+    (values.template !== undefined || values.name !== undefined) &&
+    !['create', 'up'].includes(command)
+  ) {
+    io.err(`sbx: --template and --name only apply to create and up\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  let maxPush: number | undefined;
+  if (values['max-push'] !== undefined) {
+    const raw = values['max-push'].trim();
+    const n = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+    if (!Number.isSafeInteger(n) || n < 1 || n > MAX_PUSH_MIB) {
+      io.err(
+        `sbx: --max-push must be a whole number of MiB, 1 to ${MAX_PUSH_MIB} (got '${values['max-push']}')`,
+      );
+      return SBX_EXIT.usage;
+    }
+    maxPush = n * 2 ** 20;
+  }
   // `run` takes everything after the command (after `--`) as CMD; `put` exactly one PATH; rm, token
   // and env at most one ID; every other command no argument at all.
   const argsOk =
@@ -266,12 +329,30 @@ export async function sbxMain(
   // Everything checkable locally is checked before a request (or a refresh) is made. Every id is
   // checked, whether it came from an argument, --sandbox or .sbx/sandbox.json: it goes into URLs
   // and the flight recorder's file name.
+  let root: string | undefined;
+  if (IN_REPO.has(command) && !(command === 'pull' && !values.apply && values.sandbox)) {
+    try {
+      root = await repoRoot(deps.cwd ?? process.cwd());
+    } catch (err) {
+      if (!(err instanceof PushError)) throw err;
+      io.err(`sbx: ${err.message}`);
+      return SBX_EXIT.usage;
+    }
+  }
   let id: string | undefined;
   let boundUrl: string | undefined;
+  let upBound: string | undefined;
+  if (command === 'up') {
+    const bound = readBinding(root!);
+    boundUrl = bound?.controlPlaneUrl;
+    if (bound && !SANDBOX_ID_RE.test(bound.id)) {
+      io.err(`sbx: ignoring .sbx/sandbox.json: '${sanitizeRemote(bound.id)}' is not a sandbox id`);
+    } else upBound = bound?.id;
+  }
   if (TAKES_SANDBOX_FLAG.has(command)) {
     id = (TAKES_ID_ARG.has(command) ? arg : undefined) ?? values.sandbox;
     if (id === undefined) {
-      const bound = readBinding(deps.cwd ?? process.cwd());
+      const bound = readBinding(root ?? deps.cwd ?? process.cwd());
       id = bound?.id;
       boundUrl = bound?.controlPlaneUrl;
     }
@@ -331,14 +412,10 @@ export async function sbxMain(
   }
   let createBody: { template: string; name?: string; labels?: Record<string, string> } | undefined;
   if (command === 'create') {
-    if (!values.template) {
-      io.err(`sbx: create needs --template ID (see mocactl sbx templates)\n${SBX_USAGE}`);
-      return SBX_EXIT.usage;
-    }
     const labels = parseLabels(io, values.label ?? []);
     if (!labels) return SBX_EXIT.usage;
     createBody = {
-      template: values.template,
+      template: values.template || DEFAULT_TEMPLATE,
       ...(values.name ? { name: values.name } : {}),
       ...(Object.keys(labels).length ? { labels } : {}),
     };
@@ -377,6 +454,45 @@ export async function sbxMain(
       return cmdPut(ctx, id!, target!, content!, deps.execFactory);
     case 'mcp':
       return cmdMcp(ctx, id!, deps.mcpTransport, deps.execFactory);
+    case 'up':
+      return cmdUp(
+        ctx,
+        root!,
+        {
+          force: false,
+          includeSecrets: values['include-secrets'] === true,
+          ...(maxPush !== undefined ? { maxPush } : {}),
+          ...(values.template ? { template: values.template } : {}),
+          ...(values.name ? { name: values.name } : {}),
+          noAgentConfig: values['no-agent-config'] === true,
+          ...(upBound ? { boundId: upBound } : {}),
+        },
+        deps.execFactory,
+      );
+    case 'push':
+      return cmdPush(
+        ctx,
+        root!,
+        id!,
+        {
+          force: values.force === true,
+          includeSecrets: values['include-secrets'] === true,
+          ...(maxPush !== undefined ? { maxPush } : {}),
+        },
+        deps.execFactory,
+      );
+    case 'pull':
+      return cmdPull(
+        ctx,
+        id!,
+        {
+          apply: values.apply === true,
+          ...(values.out !== undefined ? { out: values.out } : {}),
+          ...(root ? { root } : {}),
+        },
+        deps.cwd ?? process.cwd(),
+        deps.execFactory,
+      );
     default:
       return cmdEnv(ctx, id!);
   }

@@ -251,9 +251,11 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     expect(io.errs.join('')).toContain(new Date(1_800_604_800 * 1000).toISOString());
   });
 
-  it('refuses create without --template, and a malformed --label', async () => {
+  it('creates from the default template without --template (spec §6.1), and refuses a malformed --label', async () => {
     const { home, env, io } = setup();
-    expect(await sbxMain(['create'], env, io, { home, fetchImpl: fakeCp({}).fetchImpl })).toBe(2);
+    const cp = fakeCp({ 'POST /v1/sandboxes': () => ({ status: 201, body: sandbox() }) });
+    expect(await sbxMain(['create'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
+    expect(cp.calls[0]!.body).toEqual({ template: 'default' });
     expect(
       await sbxMain(['create', '--template', 'x', '--label', 'nope'], env, io, {
         home,
