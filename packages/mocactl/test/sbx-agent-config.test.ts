@@ -462,6 +462,39 @@ describe('agent configuration (SBX0 §6.3)', () => {
     expect(removeAgentConfig(d)).toEqual([]);
   });
 
+  // Review round 4: a file sbx up created is deleted only when nothing the developer wrote is in it.
+  it.each([
+    ['a header comment', (t: string) => '// my notes\n' + t, '// my notes\n{}\n'],
+    [
+      'a comment line inside',
+      (t: string) => t.replace(/\n}\n$/, '\n  /* later */\n}\n'),
+      '{\n  /* later */\n}\n',
+    ],
+  ])(
+    'keeps a file it created that now holds %s, writing back the rest and saying so',
+    (_n, edit, left) => {
+      const d = dir();
+      writeAgentConfig(d);
+      writeFileSync(join(d, 'opencode.json'), edit(text(d, 'opencode.json')));
+      const r = takeBackAgentConfig(d);
+      expect(text(d, 'opencode.json')).toBe(left);
+      expect(r.removed).toContain('opencode.json');
+      expect(r.warnings.join('\n')).toMatch(/opencode\.json: kept: sbx up created it, but/);
+      expect(existsSync(join(d, '.mcp.json'))).toBe(false);
+      expect(existsSync(join(d, '.sbx/agent-config.json'))).toBe(false);
+    },
+  );
+
+  it('still deletes a file it created when only whitespace was added to it', () => {
+    const d = dir();
+    writeAgentConfig(d);
+    writeFileSync(join(d, 'opencode.json'), '\n' + text(d, 'opencode.json') + '\n\n');
+    const r = takeBackAgentConfig(d);
+    expect(existsSync(join(d, 'opencode.json'))).toBe(false);
+    expect(r.removed).toContain('opencode.json');
+    expect(r.warnings).toEqual([]);
+  });
+
   it('removes the .claude directory it created, and enabledMcpjsonServers with it', () => {
     const d = dir();
     writeAgentConfig(d);

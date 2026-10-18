@@ -997,8 +997,18 @@ export function takeBackAgentConfig(root: string): TakeBack {
       const empty = Array.isArray(v) ? v.length === 0 : isObj(v) && Object.keys(v).length === 0;
       if (empty) dropAt(d, r.path, mine);
     }
-    if (m.files.includes(d.rel) && Object.keys(d.data).length === 0) {
+    // A file sbx up created goes only when nothing but `{}` is left: a comment or anything else
+    // the developer wrote there since is theirs, so the rest is written back, and that is said.
+    const createdHere = m.files.includes(d.rel) && Object.keys(d.data).length === 0;
+    if (createdHere && commentsOf(d.text).length === 0 && d.text.replace(/\s/g, '') === '{}') {
       writes.push({ abs: d.abs });
+      touched.push(d.rel);
+    } else if (createdHere) {
+      warnings.push(
+        `${d.rel}: kept: sbx up created it, but it holds text written since (a comment, say); ` +
+          'what sbx up added is gone, the rest is as it was',
+      );
+      writes.push({ abs: d.abs, body: d.text });
       touched.push(d.rel);
     } else if (d.text !== d.original) {
       writes.push({ abs: d.abs, body: d.text });

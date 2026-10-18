@@ -505,6 +505,18 @@ describe('mocactl sbx up and rm: the agent configuration (SBX0 §6.3, plan Revie
     expect(await h.run(['rm', NEW])).toBe(0); // again: nothing left to take back, no crash
   });
 
+  it('rm keeps a file up created once the developer has commented in it, and says so (review round 4)', async () => {
+    const h = harness();
+    expect(await h.run(['up'])).toBe(0);
+    const oc = join(h.r, 'opencode.json');
+    writeFileSync(oc, '// my notes\n' + readFileSync(oc, 'utf8'));
+    expect(await h.run(['rm'])).toBe(0);
+    expect(readFileSync(oc, 'utf8')).toBe('// my notes\n{}\n');
+    expect(h.err()).toMatch(/^sbx: opencode\.json: kept: sbx up created it/m);
+    expect(existsSync(join(h.r, '.mcp.json'))).toBe(false);
+    expect(existsSync(join(h.r, '.sbx'))).toBe(false);
+  });
+
   it('rm reports a file system error as a message naming the file, not a stack trace', async () => {
     const h = harness();
     expect(await h.run(['up'])).toBe(0);
