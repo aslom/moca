@@ -6,7 +6,7 @@ import { ensureRuntimeAuth } from '../runtime.js';
 import { checkAgentConfig } from './agent-config.js';
 import { notEnrolledMessage, SBX_EXIT, type SbxCtx } from './commands.js';
 import { openExec, sandboxFailureText, type ExecFactory, type OpenedExec } from './exec.js';
-import { sandboxState } from './push.js';
+import { PushError, sandboxState } from './push.js';
 import { readRecords } from './recorder.js';
 
 /**
@@ -25,7 +25,10 @@ export interface DoctorCheck {
 }
 
 const DAY_MS = 86_400_000;
-/** The `true` Exec's timeout, and its client-side backstop margin: doctor waits about 30 s at most. */
+/**
+ * Each of doctor's Execs (`true`, the state check): its timeout, and the client-side backstop
+ * margin beyond it, so a hung relay stalls each for about 30 s at most.
+ */
 const EXEC_TIMEOUT_S = 20;
 const EXEC_BACKSTOP_S = 10;
 const UP = 'mocactl sbx up';
@@ -188,7 +191,10 @@ async function execChecks(
     return out;
   }
   try {
-    const s = await sandboxState(x.exec, undefined, c.signal ? { signal: c.signal } : {});
+    const s = await sandboxState(x.exec, undefined, {
+      timeoutS: EXEC_TIMEOUT_S,
+      ...(c.signal ? { signal: c.signal } : {}),
+    });
     const detail = {
       clean: 'nothing to pull',
       empty: 'nothing to pull (never pushed)',
@@ -207,7 +213,13 @@ async function execChecks(
     out.push({
       name: 'changes',
       ok: false,
-      detail: err instanceof ApiError ? describeError(err) : sandboxFailureText(err),
+      detail:
+        err instanceof PushError
+          ? err.message
+          : err instanceof ApiError
+            ? describeError(err)
+            : sandboxFailureText(err),
+      fix: 'retry in a minute; mocactl sbx pull shows the changes once the sandbox answers',
     });
   } finally {
     x.close();

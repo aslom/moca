@@ -97,8 +97,9 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
     expect(byName(cs, 'changes').detail).toBe('nothing to pull');
     expect(x.sent[0]).toBe('true');
     expect(x.closed()).toBe(1);
-    // A hung relay stalls doctor for about 30 s at most: 20 s for `true`, a 10 s backstop margin.
-    expect(x.opts[0]).toEqual({ timeoutS: 20 });
+    // A hung relay stalls doctor for about 30 s at most per Exec: 20 s for `true` and for the
+    // state check (review round 2: not push's 300 s), with a 10 s backstop margin.
+    expect(x.opts).toEqual([{ timeoutS: 20 }, { timeoutS: 20 }]);
     expect(x.conns[0]!.backstopMarginS).toBe(10);
   });
 
@@ -176,6 +177,26 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
     expect(e.fix).toBeDefined();
     expect(cs.some((k) => k.name === 'changes')).toBe(false);
     expect(x.closed()).toBe(1);
+  });
+
+  it('finishes within its bound when the state check hangs', async () => {
+    const w = world();
+    // A sandbox that answers `true`, then hangs until the Exec's own timeout, as the worker would
+    // end it (the fake answers at once with what the worker says at timeoutS).
+    const asked: number[] = [];
+    const exec: Exec = async (command, o = {}) => {
+      if (command === 'true') return res();
+      asked.push(o.timeoutS ?? -1);
+      return res({ exitCode: -1, timedOutS: o.timeoutS ?? 300 });
+    };
+    const t0 = Date.now();
+    const cs = await runDoctor(w.ctx(), w.r, SBX, () => ({ exec, close: () => {} }));
+    expect(Date.now() - t0).toBeLessThan(5_000);
+    expect(asked).toEqual([20]);
+    const c = byName(cs, 'changes');
+    expect(c.ok).toBe(false);
+    expect(c.detail).toBe('checking for changes failed in the sandbox: timed out after 20s');
+    expect(c.fix).toBeDefined();
   });
 
   it('fails the exec check when `true` itself fails', async () => {

@@ -436,6 +436,8 @@ export type SandboxState = 'clean' | 'dirty' | 'empty' | 'no_baseline' | 'incomp
 
 interface SyncOpts {
   signal?: AbortSignal;
+  /** Each Exec's timeout, if not SYNC_TIMEOUT_S (doctor's state check: a short one). */
+  timeoutS?: number;
 }
 
 function outcome(r: ExecResult): string {
@@ -453,7 +455,7 @@ async function must(
 ): Promise<ExecResult> {
   const r = await exec(command, {
     ...(o.stdin ? { stdin: o.stdin } : {}),
-    timeoutS: SYNC_TIMEOUT_S,
+    timeoutS: o.timeoutS ?? SYNC_TIMEOUT_S,
     ...(o.signal ? { signal: o.signal } : {}),
   });
   if (r.exitCode !== 0) throw new PushError(`${what} failed in the sandbox: ${outcome(r)}`);
