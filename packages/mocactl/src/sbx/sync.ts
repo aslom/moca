@@ -2,7 +2,7 @@ import { rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ApiError } from '../api/errors.js';
 import { sanitizeRemote } from '../core/sanitize.js';
-import { ConfigConflict, removeAgentConfig, writeAgentConfig } from './agent-config.js';
+import { ConfigConflict, takeBackAgentConfig, writeAgentConfig } from './agent-config.js';
 import type { SbxSandbox } from './api.js';
 import { failed, SBX_EXIT, type SbxCtx } from './commands.js';
 import { execFailed, openExec, type ExecFactory, type OpenedExec } from './exec.js';
@@ -337,8 +337,12 @@ export async function cmdUp(
  */
 export function unbind(c: SbxCtx, root: string): number {
   let removed: string[];
+  let kept: boolean;
   try {
-    removed = removeAgentConfig(root);
+    const r = takeBackAgentConfig(root);
+    for (const w of r.warnings) say(c, w);
+    removed = r.removed;
+    kept = r.recordKept;
   } catch (err) {
     // A ConfigConflict names its file; anything else (a file system error) names its path, if any.
     const e = err as NodeJS.ErrnoException;
@@ -354,6 +358,11 @@ export function unbind(c: SbxCtx, root: string): number {
   }
   if (removed.length) {
     c.io.err(`removed the agent configuration sbx up added: ${removed.join(', ')}`);
+  }
+  if (kept) {
+    // The sandbox is deleted; only the record is in doubt, so this is not a failure of rm.
+    c.io.err('kept .sbx/, for its agent-config.json');
+    return SBX_EXIT.ok;
   }
   rmSync(join(root, '.sbx'), { recursive: true, force: true });
   c.io.err('removed .sbx/ (the binding)');

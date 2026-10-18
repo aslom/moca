@@ -445,6 +445,17 @@ describe('mocactl sbx up and rm: the agent configuration (SBX0 §6.3, plan Revie
     expect(h.err()).toMatch(/no such sandbox/);
   });
 
+  it('rm keeps .sbx/ when the record is unreadable, and says so', async () => {
+    const h = harness();
+    expect(await h.run(['up'])).toBe(0);
+    writeFileSync(join(h.r, '.sbx/agent-config.json'), '{ broken');
+    expect(await h.run(['rm'])).toBe(0);
+    expect(h.err()).toMatch(/sbx: \.sbx\/agent-config\.json .*kept/);
+    expect(h.err()).toMatch(/kept \.sbx\//);
+    expect(existsSync(join(h.r, '.sbx/agent-config.json'))).toBe(true);
+    expect(existsSync(join(h.r, '.mcp.json'))).toBe(true);
+  });
+
   it('rm --keep-config, or of another sandbox, leaves the configuration and the binding', async () => {
     const h = harness({ boxes: [sandbox({ id: OTHER })] });
     expect(await h.run(['up'])).toBe(0);

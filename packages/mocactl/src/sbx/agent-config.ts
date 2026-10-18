@@ -607,23 +607,29 @@ function planMarkdown(root: string, rel: string): MdPlan {
   };
 }
 
-function readManifest(root: string): Manifest | undefined {
+/** The record: none, read, or there but unreadable (corrupt, or from another mocactl version). */
+function loadManifest(root: string): { m?: Manifest; bad?: string } {
   const p = join(root, MANIFEST);
-  if (!existsSync(p)) return undefined;
+  if (!existsSync(p)) return {};
+  let m: Partial<Manifest>;
   try {
-    const m = JSON.parse(readFileSync(p, 'utf8')) as Partial<Manifest>;
-    if (m.version !== 1) return undefined;
-    return {
-      version: 1,
-      files: m.files ?? [],
-      dirs: m.dirs ?? [],
-      json: m.json ?? [],
-      markdown: m.markdown ?? [],
-    };
+    m = JSON.parse(readFileSync(p, 'utf8')) as Partial<Manifest>;
   } catch {
-    return undefined;
+    return { bad: 'is not valid JSON' };
   }
+  if (!isObj(m) || m.version !== 1) {
+    return { bad: `is of an unknown version (${JSON.stringify(isObj(m) ? m.version : m)})` };
+  }
+  const list = (v: unknown) => (Array.isArray(v) ? v : undefined);
+  const files = list(m.files) ?? [];
+  const dirs = list(m.dirs) ?? [];
+  const json = list(m.json) ?? [];
+  const markdown = list(m.markdown) ?? [];
+  return { m: { version: 1, files, dirs, json, markdown } };
 }
+
+const BAD_RECORD_HINT =
+  'it lists what sbx up added, so it was kept: fix or remove it by hand (taking back what it lists)';
 
 const uniq = <T>(xs: T[]): T[] => {
   const seen = new Set<string>();
@@ -646,7 +652,10 @@ export function writeAgentConfig(root: string, o: { dryRun?: boolean } = {}): Ag
   const created: string[] = [];
   const dirs: string[] = [];
 
-  // Read and check every file first.
+  // Read and check every file first, the record included: one that cannot be read is never
+  // written over, or what it lists could no longer be taken back.
+  const { m: prev, bad } = loadManifest(root);
+  if (bad) throw new ConfigConflict(MANIFEST, MANIFEST, bad, BAD_RECORD_HINT);
   const mcp = loadDoc(root, MCP_JSON, false);
   const settings = loadDoc(root, SETTINGS, false);
   const oc = loadDoc(root, opencodeFile(root), true);
@@ -762,7 +771,6 @@ export function writeAgentConfig(root: string, o: { dryRun?: boolean } = {}): Ag
   if (o.dryRun || !writes.length) return { changed };
 
   // The record first: if a write below fails, removal still knows what may have been added.
-  const prev = readManifest(root);
   const mdRecs = md.flatMap((p) => (p.rec ? [p.rec] : []));
   const merged: Manifest = {
     version: 1,
@@ -787,14 +795,15 @@ export function writeAgentConfig(root: string, o: { dryRun?: boolean } = {}): Ag
 const RM_HINT = 'fix it by hand, then run mocactl sbx rm again (nothing was removed)';
 
 /** Removes the block `sbx up` put in a Markdown file, restoring what it replaced. */
-function unblock(text: string, rec: MdRec): string | undefined {
+function unblock(text: string, rec: MdRec): string | { skipped: string } {
   let m: [number, number] | undefined;
   try {
     m = markers(rec.file, text, RM_HINT);
   } catch {
-    return undefined; // the developer has edited the markers since: theirs now
+    // The developer has edited the markers since: the block is theirs now.
+    return { skipped: `the ${MARK_BEGIN} … ${MARK_END} markers are not one pair any more` };
   }
-  if (!m) return undefined;
+  if (!m) return { skipped: 'the sandbox rules block is no longer there' };
   const [b, e] = m;
   if (rec.mode === 'replaced') return text.slice(0, b) + rec.previous + text.slice(e);
   const eol = text.includes('\r\n') ? '\r\n' : '\n';
@@ -805,15 +814,30 @@ function unblock(text: string, rec: MdRec): string | undefined {
   return text.slice(0, start) + text.slice(end);
 }
 
+export interface TakeBack {
+  /** The files changed back, or deleted. */
+  removed: string[];
+  /** What was left alone, and why: one line each, naming the file. */
+  warnings: string[];
+  /** The record could not be read, so it was kept (and `.sbx/` with it). */
+  recordKept: boolean;
+}
+
 /**
  * Takes back exactly what `writeAgentConfig` added (`.sbx/agent-config.json`), and deletes the files
  * and directory it created when nothing else is left in them. A value the developer had, or added
  * since, is kept. Every file is read and checked before any is changed: one that is no longer
- * valid JSON stops it (a `ConfigConflict`) with nothing removed. Returns the files changed.
+ * valid JSON, or that now links outside the repository, stops it (a `ConfigConflict`) with nothing
+ * removed. A Markdown block whose markers were broken by hand is left alone, and named. A record
+ * that cannot be read is kept, with a warning: deleting it would orphan what it lists.
  */
-export function removeAgentConfig(root: string): string[] {
-  const m = readManifest(root);
-  if (!m) return [];
+export function takeBackAgentConfig(root: string): TakeBack {
+  const { m, bad } = loadManifest(root);
+  if (bad) {
+    return { removed: [], warnings: [`${MANIFEST} ${bad}; ${BAD_RECORD_HINT}`], recordKept: true };
+  }
+  if (!m) return { removed: [], warnings: [], recordKept: false };
+  const warnings: string[] = [];
   const files = uniq(m.json.map((r) => r.file));
   const docs: Doc[] = [];
   for (const f of files) {
@@ -852,12 +876,16 @@ export function removeAgentConfig(root: string): string[] {
     }
   }
   for (const r of m.markdown) {
-    const p = join(root, r.file);
-    if (!existsSync(p)) continue;
-    const abs = realpathSync(p);
+    const t = target(root, r.file, RM_HINT);
+    if (!t.exists) continue;
+    const abs = t.abs;
     const text = readFileSync(abs, 'utf8');
     const out = unblock(text, r);
-    if (out === undefined || out === text) continue;
+    if (typeof out !== 'string') {
+      warnings.push(`${r.file}: skipped: ${out.skipped}; it was left as it is`);
+      continue;
+    }
+    if (out === text) continue;
     if (r.mode === 'created' && out.trim() === '') writes.push({ abs });
     else writes.push({ abs, body: out });
     touched.push(r.file);
@@ -886,7 +914,12 @@ export function removeAgentConfig(root: string): string[] {
     }
   }
   rmSync(join(root, MANIFEST), { force: true });
-  return touched;
+  return { removed: touched, warnings, recordKept: false };
+}
+
+/** `takeBackAgentConfig`'s files: what was changed back. */
+export function removeAgentConfig(root: string): string[] {
+  return takeBackAgentConfig(root).removed;
 }
 
 // ---------------------------------------------------------------------------------------------

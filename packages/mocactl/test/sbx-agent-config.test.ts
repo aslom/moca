@@ -22,6 +22,7 @@ import {
   RULES,
   checkAgentConfig,
   removeAgentConfig,
+  takeBackAgentConfig,
   writeAgentConfig,
 } from '../src/sbx/agent-config.js';
 
@@ -500,6 +501,54 @@ describe('agent configuration (SBX0 §6.3)', () => {
     expect(writeAgentConfig(d).changed).toEqual(['.claude/settings.json']);
     removeAgentConfig(d);
     for (const f of [...FILES, '.claude']) expect(existsSync(join(d, f)), f).toBe(false);
+  });
+
+  it.each([
+    ['corrupt', '{ broken'],
+    ['of an unknown version', JSON.stringify({ version: 2, files: [] })],
+  ])('a record that is %s is kept, with a warning, and nothing is removed', (_n, body) => {
+    const d = dir();
+    writeAgentConfig(d);
+    writeFileSync(join(d, '.sbx/agent-config.json'), body);
+    const r = takeBackAgentConfig(d);
+    expect(r.removed).toEqual([]);
+    expect(r.recordKept).toBe(true);
+    expect(r.warnings.join('\n')).toMatch(/\.sbx\/agent-config\.json .*kept/);
+    expect(text(d, '.sbx/agent-config.json')).toBe(body);
+    expect(existsSync(join(d, '.mcp.json'))).toBe(true);
+    // And up will not write over it, orphaning what it lists.
+    expect(conflictOf(() => writeAgentConfig(d, { dryRun: true })).file).toBe(
+      '.sbx/agent-config.json',
+    );
+  });
+
+  it('names a Markdown file whose markers were broken by hand as skipped, leaving it alone', () => {
+    const d = dir();
+    writeFileSync(join(d, 'CLAUDE.md'), '# Mine\n');
+    writeAgentConfig(d);
+    const broken = text(d, 'CLAUDE.md').replace(MARK_END, '');
+    writeFileSync(join(d, 'CLAUDE.md'), broken);
+    const r = takeBackAgentConfig(d);
+    expect(text(d, 'CLAUDE.md')).toBe(broken);
+    expect(r.removed).not.toContain('CLAUDE.md');
+    expect(r.warnings.join('\n')).toMatch(/CLAUDE\.md: skipped: .*markers/);
+    expect(existsSync(join(d, 'AGENTS.md'))).toBe(false);
+  });
+
+  it('refuses to remove the block from a Markdown file now linked outside the repository', () => {
+    const d = dir();
+    writeAgentConfig(d);
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), 'sbx-out-')));
+    made.push(outside);
+    writeFileSync(join(outside, 'AGENTS.md'), text(d, 'AGENTS.md'));
+    rmSync(join(d, 'AGENTS.md'));
+    symlinkSync(join(outside, 'AGENTS.md'), join(d, 'AGENTS.md'));
+    const before = text(outside, 'AGENTS.md');
+    const err = conflictOf(() => removeAgentConfig(d));
+    expect(err.file).toBe('AGENTS.md');
+    expect(err.message).toMatch(/outside the repository/);
+    expect(text(outside, 'AGENTS.md')).toBe(before);
+    expect(existsSync(join(d, '.mcp.json'))).toBe(true); // nothing removed
   });
 
   it('refuses to remove from a file that is no longer valid JSON, changing nothing', () => {
