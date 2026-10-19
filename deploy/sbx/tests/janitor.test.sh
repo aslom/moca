@@ -34,7 +34,10 @@ MOCK
 for t in mv rm; do
   printf '#!/usr/bin/env bash\n[[ -z "${FS_LOG:-}" ]] || printf "%%s %%s\\n" %s "$*" >>"$FS_LOG"\nexec %q "$@"\n' "$t" "$(command -v "$t")" >"$TMP/bin/$t"
 done
-chmod +x "$TMP/bin/curl" "$TMP/bin/mv" "$TMP/bin/rm"
+# stat: when the file asked about ends with MOCK_STAT_PATH, print MOCK_STAT_VAL instead (a test's
+# way to give a tree an old ctime, which touch cannot, or an unreadable time).
+printf '#!/usr/bin/env bash\nif [[ -n "${MOCK_STAT_PATH:-}" && "${!#}" == *"$MOCK_STAT_PATH" ]]; then printf "%%s\\n" "$MOCK_STAT_VAL"; exit 0; fi\nexec %q "$@"\n' "$(command -v stat)" >"$TMP/bin/stat"
+chmod +x "$TMP/bin/curl" "$TMP/bin/mv" "$TMP/bin/rm" "$TMP/bin/stat"
 export PATH="$TMP/bin:$PATH" MOCK_LOG="$TMP/curl.log" MOCK_JSON="$TMP/list.json"
 export SBX_SRV="$TMP/srv" SBX_ENV_DIR="$TMP/etc" SBX_API_URL=https://sbx-api.example.invalid
 export MOCK_URL="$SBX_API_URL/v1/janitor/sandboxes"
@@ -319,11 +322,88 @@ cat >"$MOCK_JSON" <<JSON
 {"live":[],"terminated":[{"wsk":"$TERM_OLD","wrk":"sbx_default","terminatedAt":$((NOW - 2000))},
  {"wsk":"$TERM_RECENT","wrk":"sbx_default","terminatedAt":"0900"},
  {"wsk":"$LIVE","wrk":"sbx_default","terminatedAt":$((NOW - 7200))000},
- {"wsk":"$UNK_OLD","wrk":["sbx_default"],"terminatedAt":$OLD}]}
+ {"wsk":"$UNK_OLD","wrk":["sbx_default"],"terminatedAt":$OLD},
+ {"wsk":"$(k 7)","wrk":"sbx_default"},
+ {"wsk":"$(k 8)","wrk":"sbx_default","terminatedAt":-5},
+ {"wsk":"$(k 9)","wrk":null,"terminatedAt":$OLD},
+ {"wsk":"$(k 0)","wrk":"../w1","terminatedAt":$OLD}]}
 JSON
 bash "$J" >"$TMP/out" 2>&1 || fail 'janitor failed'
 for k in "$TERM_OLD" "$TERM_RECENT" "$LIVE" "$UNK_OLD"; do [[ -d "$D/$k" ]] || fail "removed $k"; done
-(($(field errors) >= 3)) || fail "records with an unreadable terminatedAt or wrk are not counted as errors: $(summary)"
-grep -q "\"janitor\":\"error\".*\"wsk\":\"$TERM_RECENT\".*bad wrk or terminatedAt" "$TMP/out" || fail 'the bad terminatedAt is not reported'
+# The fixture's own four (the symlink, the file, and the uninstalled worker's two dirs, both unknown
+# under this list) plus one per bad record.
+[[ "$(field errors)" == 11 ]] || fail "errors: want 11 (4 from the fixture, 7 bad records): $(summary)"
+for b in "$TERM_RECENT:terminatedAt \"0900\"" "$LIVE:a millisecond terminatedAt" "$UNK_OLD:a wrk array" "$(k 7):no terminatedAt" \
+  "$(k 8):a negative terminatedAt" "$(k 9):a null wrk" "$(k 0):a ../ wrk"; do
+  [[ "$(grep -c "\"janitor\":\"error\".*\"wsk\":\"${b%%:*}\",\"why\":\"terminated record with a bad wrk or terminatedAt; kept\"" "$TMP/out")" == 1 ]] ||
+    fail "not exactly one error line for the record with ${b#*:}"
+done
 ! grep -qi 'value too great\|syntax error' "$TMP/out" || fail "an arithmetic error leaked: $(cat "$TMP/out")"
-pass 'the wait is decimal (03600 refused; a 2000 s old termination survives 3600 s); unreadable records are errors, kept'
+pass 'the wait is decimal (03600 refused; a 2000 s old termination survives 3600 s); each unreadable record is one error, kept'
+
+# 16. Tombstone times that cannot be trusted: a name time beyond int64 is an error (kept, counted);
+# a name time in the future (a skewed worker clock) falls back to the ctime, so it cannot stay forever.
+setup_dirs
+echo '{"live":[],"terminated":[]}' >"$MOCK_JSON"
+BIG=.reclaiming-x-9999999999999999999-3 FUT=".reclaiming-$TERM_OLD-$((NOW + 86400))" FUTW=".reclaiming-y-$((NOW + 86400))000000000-1"
+FUT_KEEP=".reclaiming-$UNK_OLD-$((NOW + 86400))" # never shimmed: its real (fresh) ctime counts
+mkdir -p "$D/$BIG" "$D/$FUT" "$D/$FUTW" "$D/$FUT_KEEP"
+old "$D/$BIG" "$D/$FUT" "$D/$FUTW" "$D/$FUT_KEEP"
+# FUT and FUTW: years-old ctimes, through the shim (one at a time: it matches one path suffix).
+MOCK_STAT_PATH="/$FUT" MOCK_STAT_VAL=1577836800 bash "$J" >"$TMP/out" 2>&1 || fail 'janitor failed'
+[[ ! -e "$D/$FUT" ]] || fail 'a janitor tombstone named in the future was kept although its ctime is years old'
+MOCK_STAT_PATH="/$FUTW" MOCK_STAT_VAL=1577836800 bash "$J" >"$TMP/out" 2>&1 || fail 'janitor failed'
+[[ ! -e "$D/$FUTW" ]] || fail 'a worker tombstone named in the future was kept although its ctime is years old'
+[[ -d "$D/$BIG" ]] || fail 'removed a tombstone whose name time overflows int64'
+grep -q "\"why\":\"$BIG: its age cannot be read; left alone\"" "$TMP/out" || fail 'the overflowing tombstone time is not an error line'
+[[ "$(field errors)" == 5 ]] || fail "errors: want 5 (4 from the fixture under an empty list, the overflow): $(summary)"
+! grep -qi 'invalid\|value too great' "$TMP/out" || fail "an arithmetic error leaked: $(cat "$TMP/out")"
+bash "$J" >"$TMP/out" 2>&1 || fail 'janitor failed'
+[[ -d "$D/$FUT_KEEP" ]] || fail 'a future-named tombstone with a fresh ctime was removed'
+pass 'a tombstone time beyond int64 is a counted error (kept); a future name time falls back to the ctime'
+
+# 17. A directory whose mtime does not read as a decimal time is an error, kept -- even when its
+# workspace.img's mtime (here: years old) reads fine.
+setup_dirs
+echo '{"live":[],"terminated":[]}' >"$MOCK_JSON"
+MOCK_STAT_PATH="/$UNK_OLD" MOCK_STAT_VAL=0123 bash "$J" >"$TMP/out" 2>&1 || fail 'janitor failed'
+[[ -d "$D/$UNK_OLD" ]] || fail 'removed an unknown dir whose mtime reads 0123'
+grep -q "\"wsk\":\"$UNK_OLD\",\"why\":\"unknown, and its mtime cannot be read; kept\"" "$TMP/out" || fail 'the unreadable mtime is not an error line'
+pass 'an unknown directory with an unreadable mtime is an error, kept'
+
+# 18. A token file owned by another user is refused before anything is asked or touched.
+setup_dirs
+list
+before="$(snapshot)"
+mkdir -p "$TMP/idbin"
+printf '#!/usr/bin/env bash\n[[ "$1" == -u ]] && { echo 4242; exit 0; }\nexec %q "$@"\n' "$(command -v id)" >"$TMP/idbin/id"
+chmod +x "$TMP/idbin/id"
+: >"$MOCK_LOG"
+rc=0
+PATH="$TMP/idbin:$PATH" bash "$J" >"$TMP/out" 2>&1 || rc=$?
+((rc == 2)) || fail "exit $rc with a token file owned by another uid"
+grep -q 'must be owned by uid 4242' "$TMP/out" || fail 'the owner refusal does not say why'
+[[ ! -s "$MOCK_LOG" && "$before" == "$(snapshot)" ]] || fail 'asked the control plane or touched the disk before refusing the owner'
+pass 'refuses a token file owned by another user: exit 2, no request, nothing touched'
+
+# 19. An mv that cannot rename without following a symlink at its target is refused at startup.
+# Two shims: one rejects -T and -h (busybox-like); one accepts them but ignores them (plain mv).
+for kind in rejects ignores; do
+  setup_dirs
+  list
+  before="$(snapshot)"
+  mkdir -p "$TMP/mvbin-$kind"
+  if [[ "$kind" == rejects ]]; then
+    printf '#!/usr/bin/env bash\ncase "$1" in --version|-T|-h) echo "mv: unrecognized option $1" >&2; exit 1;; esac\nexec %q "$@"\n' "$(command -v mv)" >"$TMP/mvbin-$kind/mv"
+  else
+    printf '#!/usr/bin/env bash\ncase "$1" in --version) exit 1;; -T|-h) shift;; esac\n[[ "$1" != -- ]] || shift\nexec /bin/mv -- "$@"\n' >"$TMP/mvbin-$kind/mv"
+  fi
+  chmod +x "$TMP/mvbin-$kind/mv"
+  : >"$MOCK_LOG"
+  rc=0
+  PATH="$TMP/mvbin-$kind:$PATH" bash "$J" >"$TMP/out" 2>&1 || rc=$?
+  ((rc == 2)) || fail "exit $rc with an mv that $kind -T/-h"
+  grep -q 'supports neither -T (GNU) nor -h (BSD)' "$TMP/out" || fail "the mv refusal ($kind) does not say why"
+  [[ ! -s "$MOCK_LOG" && "$before" == "$(snapshot)" ]] || fail "asked the control plane or touched the disk with an mv that $kind -T/-h"
+done
+pass 'refuses, before anything else, an mv that rejects or ignores both -T and -h'

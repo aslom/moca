@@ -74,14 +74,13 @@ env_value() { # env_value KEY FILE: the last KEY=... line's value, without grep
 check_settings() {
   local t
   for t in jq curl realpath stat du mktemp mv rm date id; do command -v "$t" >/dev/null || refuse "needs $t on PATH"; done
-  # The flavour of stat, mv and rm, once: GNU (the host) or BSD (a developer's Mac running the tests).
-  # mv -T (GNU) / -h (BSD): a symlink planted at the tombstone path is never followed into.
+  # The flavour of stat and rm, once: GNU (the host) or BSD (a developer's Mac running the tests).
   if stat -c %Y / >/dev/null 2>&1; then
     STAT=(stat -c %Y) STAT_CTIME=(stat -c %Z) STAT_MODE=(stat -c '%a %u')
   else
     STAT=(stat -f %m) STAT_CTIME=(stat -f %c) STAT_MODE=(stat -f '%Lp %u')
   fi
-  if mv --version >/dev/null 2>&1; then MV=(mv -T --); else MV=(mv -h --); fi
+  pick_mv
   if rm --version >/dev/null 2>&1; then RM=(rm -rf --one-file-system); else RM=(rm -rfx); fi
   # `-`, not `:-`: an EMPTY SBX_SRV is refused, not silently replaced by the default.
   SBX_SRV="${SBX_SRV-/srv/sbx}"
@@ -116,6 +115,30 @@ check_settings() {
     refuse 'SBX_API_CA_FILE must name a readable file'
   NOW="$(date +%s)"
   [[ "$NOW" =~ ^[1-9][0-9]{0,11}$ ]] || refuse "date +%s gave '$NOW'"
+}
+
+# pick_mv: MV, the rename that never follows a symlink planted at its target, found by trying it:
+# in a fresh mktemp -d, each candidate (-T, GNU; -h, BSD) must rename a directory to a new name, and
+# must leave the directory a symlink at the target points to empty. Neither works: refuse, before
+# anything else. The probe is cleaned with rmdir and rm -f, never a recursive removal.
+pick_mv() {
+  local probe f n=0 d v ok=''
+  probe="$(mktemp -d)" || refuse 'mktemp -d failed (needed to probe mv)'
+  for f in -T -h; do
+    n=$((n + 1)) d="$probe/$n"
+    mkdir "$d" "$d/a" "$d/c" "$d/victim" && ln -s "$d/victim" "$d/link" || break
+    if mv "$f" -- "$d/a" "$d/b" >/dev/null 2>&1 && [[ -d "$d/b" && ! -e "$d/a" ]]; then
+      mv "$f" -- "$d/c" "$d/link" >/dev/null 2>&1 || true
+      v=("$d/victim"/* "$d/victim"/.[!.]*)
+      [[ ${#v[@]} -ne 0 || ! -d "$d/victim" ]] || ok="$f"
+    fi
+    rm -f "$d/link" 2>/dev/null || true
+    for v in "$d/victim/c" "$d/victim" "$d/link" "$d/a" "$d/b" "$d/c" "$d"; do rmdir "$v" 2>/dev/null || true; done
+    [[ -z "$ok" ]] || break
+  done
+  rmdir "$probe" 2>/dev/null || true
+  [[ -n "$ok" ]] || refuse 'this mv supports neither -T (GNU) nor -h (BSD) as a rename that never follows a symlink at its target: refusing to rename workspaces with it'
+  MV=(mv "$ok" --)
 }
 
 # dec VALUE: VALUE when it is a decimal count without a leading zero (12 digits at most), else fail.
@@ -242,17 +265,28 @@ newest_mtime() { # newest_mtime DIR: the newer of DIR's and DIR/workspace.img's,
 }
 
 # tomb_time NAME PATH: when the tombstone was made, in seconds: the time in its name, or its ctime
-# (which a rename sets) when the name carries none. Nothing when neither can be read.
+# (which a rename sets) when the name carries none or a time later than now (a skewed clock must
+# not keep a tombstone forever). Prints `bad` when a time cannot be read, so the caller counts it.
 tomb_time() {
-  local name="$1" t
+  local name="$1" t=''
   if [[ "$name" =~ ^\.reclaiming-sbx-[0123456789abcdef]{26}-([1-9][0-9]{0,11})$ ]]; then
-    printf '%s' "${BASH_REMATCH[1]}" # the janitor's own: .reclaiming-<wsk>-<unix s>
+    t="${BASH_REMATCH[1]}" # the janitor's own: .reclaiming-<wsk>-<unix s>
   elif [[ "$name" =~ ^\.reclaiming-.+-([1-9][0-9]{18})-[0-9]+$ ]]; then
-    printf '%s' "$((10#${BASH_REMATCH[1]} / 1000000000))" # the worker's: .reclaiming-<key>-<unix ns>-<seq>
-  else
-    t="$("${STAT_CTIME[@]}" "$2" 2>/dev/null)" || return 0
-    ! dec "$t" || printf '%s' "$t"
+    # The worker's: .reclaiming-<key>-<unix ns>-<seq>. Go wrote an int64, so 19 digits above
+    # 2^63 - 1 are no time it made: unreadable. Checked in two parts, so nothing here can wrap.
+    t="${BASH_REMATCH[1]}"
+    if ((10#${t:0:18} > 922337203685477580 || (10#${t:0:18} == 922337203685477580 && 10#${t:18} > 7))); then
+      printf 'bad'
+      return 0
+    fi
+    t="${t:0:10}" # the seconds: the first ten digits, cut as text
   fi
+  if [[ -n "$t" ]]; then
+    dec "$t" || { printf 'bad'; return 0; }
+    ((10#$t > NOW)) || { printf '%s' "$t"; return 0; }
+  fi
+  t="$("${STAT_CTIME[@]}" "$2" 2>/dev/null)" || { printf 'bad'; return 0; }
+  if dec "$t"; then printf '%s' "$t"; else printf 'bad'; fi
 }
 
 sweep_root() { # sweep_root WRK: every workspace-key entry of a validated root
@@ -290,7 +324,7 @@ sweep_tombstones() { # sweep_tombstones WRK: .reclaiming-* trees older than an h
     [[ "$name" =~ $TOMB_RE ]] || continue
     if [[ -L "$path" || ! -d "$path" ]]; then error "$wrk" '' "$name is not a directory; left alone"; continue; fi
     m="$(tomb_time "$name" "$path")"
-    if [[ -z "$m" ]]; then error "$wrk" '' "$name: its age cannot be read; left alone"; continue; fi
+    if ! dec "$m"; then error "$wrk" '' "$name: its age cannot be read; left alone"; continue; fi
     ((10#$m + TOMB_AGE_S < NOW)) || continue
     kb="$(kb_of "$path")"
     if remove_tree "$wrk" "$name"; then
