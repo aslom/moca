@@ -56,23 +56,11 @@ log() { printf '==> %s\n' "$*" >&2; }
 die() { echo "deploy/sbx/setup.sh: $*" >&2; exit 1; }
 kc() { kubectl "$@"; }
 
-parse_args() {
-  while (($#)); do
-    case "$1" in
-    --env-file)
-      [[ $# -ge 2 && -f "$2" ]] || die '--env-file needs a readable file'
-      set -a
-      # shellcheck disable=SC1090 # the operator's own settings file
-      . "$2"
-      set +a
-      shift 2
-      ;;
-    *) die "unknown argument: $1 (usage: setup.sh [--env-file FILE])" ;;
-    esac
-  done
-}
+# parse_args (--env-file), WORKER_RE and NS_RE, shared with status.sh.
+USAGE='setup.sh [--env-file FILE]'
+# shellcheck source=deploy/sbx/lib.sh
+. "$SBX_DIR/lib.sh"
 
-WORKER_RE='^[A-Za-z_][A-Za-z0-9_]*$'
 SUBJECTS_RE='^github:[0-9]+(,github:[0-9]+)*$'
 # Positive whole numbers. The disk check multiplies SBX_MAX_TOTAL x SBX_WORKSPACE_IMAGE_MB x 10 and
 # SBX_WORKSPACE_FS_GIB x 1024 x 8 in 64-bit shell arithmetic: six digits for the factors of the first
@@ -80,7 +68,6 @@ SUBJECTS_RE='^github:[0-9]+(,github:[0-9]+)*$'
 COUNT6_RE='^[1-9][0-9]{0,5}$'
 COUNT9_RE='^[1-9][0-9]{0,8}$'
 HOST_RE='^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'
-NS_RE='^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
 
 validate() {
   [[ -z "${SBX_CLIENTS:-}" ]] ||
