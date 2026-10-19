@@ -6,6 +6,11 @@ resource), **attach** (passthrough, KVM hosts' workers dial in) and **exec** (pa
 `Exec` calls). Design:
 [`docs/specs/2026-10-15-sbx0-internal-sandbox-service-design.md`](../../docs/specs/2026-10-15-sbx0-internal-sandbox-service-design.md).
 
+This page is the install reference. Day-to-day operation (users, templates, key rotation, outages,
+disk, status and upgrades) is [the runbook](RUNBOOK.md); users have
+[the user guide](../../docs/sbx/user-guide.md); the security gate's checklist is
+[the security review](../../docs/sbx/security-review.md).
+
 ## 1. Cluster side
 
 Needs `kubectl` logged in with edit rights in an **existing** namespace, `jq`, and an `openssl` that
@@ -152,11 +157,19 @@ Uninstalling the last worker leaves the janitor in place. `install-host.sh --uni
 removes it. Re-run `--janitor` with a new bundle after changing `SBX_JANITOR_WAIT_MINUTES`,
 `SBX_API_HOST` or `SBX_API_CA_FILE`.
 
-## 3. Users
+## 3. Status
 
-Users log in with GitHub and create sandboxes from a template:
+`deploy/sbx/status.sh --env-file <file>` reports, read-only, which workers are attached, the live
+and retained sandboxes, and the last hour's Exec latency and error rate from the relay's audit lines.
+On a KVM host, `sudo deploy/sbx/status.sh --host` reports the units, the workspace disk and the
+janitor's last run (see [the runbook](RUNBOOK.md#8-status-and-the-audit-lines)).
+
+## 4. Users
+
+Users log in with GitHub, then bring a repository up in a sandbox; [the user guide](../../docs/sbx/user-guide.md)
+covers it end to end:
 
     mocactl sbx login --control-plane-url https://<api host>
-    mocactl sbx create --template <id>
+    cd <repository> && mocactl sbx up
 
 To call the gRPC API directly, see [the direct-client guide](../../docs/api/sandbox-v1-direct-client.md).
