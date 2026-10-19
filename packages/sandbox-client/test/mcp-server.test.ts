@@ -512,4 +512,14 @@ describe('execFailureText: one mapping for the MCP server and mocactl', () => {
   it('is undefined for an error that is not an Exec failure', () => {
     expect(execFailureText(new Error('x'))).toBeUndefined();
   });
+
+  it('says the sandbox is ending as it is, to the model and the CLI alike (final review M1)', () => {
+    const ending = new ExecMachineryError(
+      'the sandbox expires in 30 s; pull your work now: `mocactl sbx pull --apply`',
+      undefined,
+      'expiring',
+    );
+    expect(execFailureText(ending)).toBe(ending.message);
+    expect(execFailureText(ending, { audience: 'cli' })).toBe(ending.message);
+  });
 });

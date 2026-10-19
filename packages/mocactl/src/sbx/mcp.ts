@@ -36,10 +36,12 @@ export async function serveSbxMcp(
   const s = await c.api.getSandbox(id);
   let conn: Promise<OpenedExec> | undefined;
   const open = () =>
-    (conn ??= openExec(c.api, id, factory).catch((err: unknown) => {
-      conn = undefined; // the next call asks again; this one fails as it is
-      throw err;
-    }));
+    (conn ??= openExec(c.api, id, factory, { sandboxExpiresAt: s.expiresAt }).catch(
+      (err: unknown) => {
+        conn = undefined; // the next call asks again; this one fails as it is
+        throw err;
+      },
+    ));
   const exec: Exec = async (command, opts) => (await open()).exec(command, opts);
   const info = async () => {
     const now = await c.api.getSandbox(id);

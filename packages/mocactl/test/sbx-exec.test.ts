@@ -550,6 +550,40 @@ describe('the sandbox token source (SBX0 §6.5)', () => {
     expect(x.sent[0]!.timeoutS).toBeUndefined();
   });
 
+  it("passes the sandbox's expiry to the connection when the first token is short (final review M1)", async () => {
+    const { home, env, io } = setup();
+    // 90 s left of the sandbox's life: the token is cut to its expiry, so the sandbox is looked up.
+    const short = {
+      ...TOKEN,
+      token: jwt({ iat: TOKEN_IAT, exp: TOKEN_IAT + 90 }),
+      expiresAt: TOKEN_IAT + 90,
+    };
+    const cp = fakeCp({
+      [`POST /v1/sandboxes/${SBX}/token`]: () => ({ status: 200, body: short }),
+      [`GET /v1/sandboxes/${SBX}`]: () => ({
+        status: 200,
+        body: sandbox({ expiresAt: TOKEN_IAT + 90 }),
+      }),
+    });
+    const x = fakeExec();
+    await sbxMain(['run', '--sandbox', SBX, '--', 'true'], env, io, {
+      home,
+      fetchImpl: cp.fetchImpl,
+      execFactory: x.factory,
+    });
+    expect(x.opened[0]!.sandboxExpiresAt).toBe(TOKEN_IAT + 90);
+    // A full-length first token needs no lookup.
+    const cp2 = mint();
+    const y = fakeExec();
+    await sbxMain(['run', '--sandbox', SBX, '--', 'true'], env, io, {
+      home,
+      fetchImpl: cp2.fetchImpl,
+      execFactory: y.factory,
+    });
+    expect(cp2.calls.some((c) => c.method === 'GET')).toBe(false);
+    expect(y.opened[0]!.sandboxExpiresAt).toBeUndefined();
+  });
+
   it('passes a self-issued exec CA to the connection', async () => {
     const { home, env, io } = setup();
     const pem = '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n';

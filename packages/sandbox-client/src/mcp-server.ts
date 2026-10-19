@@ -110,6 +110,8 @@ export function execFailureText(
         return TEMPLATE_BUSY_TEXT;
       case 'token_expired':
         return TOKEN_EXPIRED_TEXT;
+      case 'expiring':
+        return err.message; // the sandbox expires in N s; pull your work now
       default: {
         const what =
           o.audience === 'cli' ? 'sandbox failure' : "sandbox failure, not your command's output";

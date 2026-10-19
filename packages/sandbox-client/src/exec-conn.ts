@@ -33,9 +33,11 @@ export interface ExecResult {
  * - `busy`: the relay's per-sandbox in-flight cap (RESOURCE_EXHAUSTED "sandbox busy"). Nothing ran;
  * - `template_busy`: the template's shared worker is saturated (`busy: queue full`, `memory-budget:`
  *   or `max-runs:`). Nothing ran;
- * - `token_expired`: the relay cancelled the Exec at its token's `exp` (DEADLINE_EXCEEDED).
+ * - `token_expired`: the relay cancelled the Exec at its token's `exp` (DEADLINE_EXCEEDED);
+ * - `expiring`: the sandbox itself ends too soon for a command to run (its token, capped at the
+ *   sandbox's `expiresAt`, has no more than the 60 s margin left). Nothing ran.
  */
-export type ExecFailureKind = 'machinery' | 'busy' | 'template_busy' | 'token_expired';
+export type ExecFailureKind = 'machinery' | 'busy' | 'template_busy' | 'token_expired' | 'expiring';
 
 /** The machinery failed: NOT the command's outcome. `kind` says how (see `ExecFailureKind`). */
 export class ExecMachineryError extends Error {
@@ -96,6 +98,13 @@ export interface ExecConnOptions {
    * backstop for a relay or connection that goes silent without closing. Lowered only by tests.
    */
   backstopMarginS?: number;
+  /**
+   * The sandbox's own `expiresAt` (epoch s), if known. The control plane caps every token's `exp`
+   * at it, so a token ending there is short because the sandbox is ending, not because the
+   * deployment's lifetime is: it is run with a cut timeout, and refused as "the sandbox expires in
+   * N s" (kind `expiring`) only when nothing can run (final review M1).
+   */
+  sandboxExpiresAt?: number;
   /** The clock, in epoch milliseconds (tests). */
   now?: () => number;
 }
@@ -228,6 +237,20 @@ export class SandboxExecConn {
 
   private learn(g: SandboxTokenGrant): void {
     if (g.lifetimeS <= 0) return;
+    const end = this.o.sandboxExpiresAt;
+    if (end && end > 0 && g.expiresAt > 0 && g.expiresAt >= end) {
+      // Cut short by the sandbox's own expiry: not the deployment's lifetime, so nothing is
+      // learnt from it. `prepare` cuts the timeout to what is left, while a command can still run.
+      const leftS = Math.max(0, Math.ceil(end - this.now() / 1000));
+      if (leftS <= TOKEN_MARGIN_S) {
+        throw new ExecMachineryError(
+          `the sandbox expires in ${leftS} s; pull your work now: \`mocactl sbx pull --apply\``,
+          undefined,
+          'expiring',
+        );
+      }
+      return;
+    }
     if (g.lifetimeS < MIN_LIFETIME_S) {
       // Lifetime minus the 60 s margin would leave a timeout of a minute or less, cut to 1 s at
       // worst: fail loudly instead of running every command under a uselessly short timeout.

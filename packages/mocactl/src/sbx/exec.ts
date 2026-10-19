@@ -21,6 +21,12 @@ const realFactory: ExecFactory = (o) => {
 
 /** Seconds of token life a held token must keep beyond what the connection asks (spec §6.5). */
 const MIN_LEFT_S = 60;
+/**
+ * A first token shorter than this (the smallest lifetime `deploy/sbx/setup.sh` allows, 5 min) is
+ * most likely cut by the sandbox's own expiry: the sandbox is looked up, so the connection can
+ * tell the two apart and say "the sandbox expires in N s" (final review M1).
+ */
+const SHORT_TOKEN_S = 300;
 
 /**
  * `iat` and `exp` from a JWT's payload, read WITHOUT verifying it: only to learn the token's
@@ -101,10 +107,21 @@ export async function openExec(
   o: {
     /** The client-side backstop beyond each Exec's timeout (sandbox-client's default: 90 s). */
     backstopMarginS?: number;
+    /** The sandbox's expiresAt, when the caller already has it; else looked up if need be. */
+    sandboxExpiresAt?: number;
   } = {},
 ): Promise<OpenedExec> {
   const t = sandboxTokenFn(api, id);
   const first = await t.first();
+  let sandboxExpiresAt = o.sandboxExpiresAt;
+  const life = grantOf(first).lifetimeS;
+  if (sandboxExpiresAt === undefined && life > 0 && life < SHORT_TOKEN_S) {
+    // Best effort: without it, a short token is only reported as a short lifetime.
+    sandboxExpiresAt = await api.getSandbox(id).then(
+      (s) => s.expiresAt,
+      () => undefined,
+    );
+  }
   const c = factory({
     addr: first.execEndpoint,
     tls: true,
@@ -113,6 +130,7 @@ export async function openExec(
     workspaceKey: first.wsk,
     token: t.token,
     ...(o.backstopMarginS !== undefined ? { backstopMarginS: o.backstopMarginS } : {}),
+    ...(sandboxExpiresAt ? { sandboxExpiresAt } : {}),
   });
   return { exec: c.exec, close: c.close, token: first, lifetimeS: grantOf(first).lifetimeS };
 }

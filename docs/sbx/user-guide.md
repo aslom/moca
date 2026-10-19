@@ -327,6 +327,9 @@ Other messages:
 - **"template busy; retry later"**: too many users on that template at once. Retry in a while.
 - **"sandbox busy: …"**: another call on your sandbox is still running (another terminal, or a
   parallel agent). Wait for it, or retry.
+- **"the sandbox expires in N s; pull your work now"**: the sandbox is in its last minute, too
+  short for a command to run, so even a pull can no longer reach it. In the minutes before, commands
+  still run, with their timeout cut to what is left: pull then.
 - **"sandbox has expired"** or **"sandbox was deleted"** (the agent sees "sandbox expired on …; run
   `mocactl sbx up` for a new one"): the sandbox is gone; `up` makes a new one and pushes your
   tree.

@@ -561,6 +561,56 @@ describe('SandboxExecConn token freshness (SBX0 §6.5)', () => {
     },
   );
 
+  it('runs with a cut timeout when the sandbox expiry capped the token, so a pull still works (final review M1)', async () => {
+    const r = await fakeRelay(ok);
+    // The control plane caps exp at the sandbox's expiresAt: 100 s left of a 900 s TTL. Without
+    // the sandbox's expiry this would be refused as a misconfigured lifetime.
+    const { c } = conn(r.addr, { sandboxExpiresAt: NOW_S + 100 }, { lifetimeS: 100 });
+    const res = await c.exec('git diff', { timeoutS: 300 });
+    expect(r.seen[0]!.req.exec!.timeoutS).toBe(40);
+    expect(res.capped).toBe(true);
+  });
+
+  it('says the sandbox expires soon, not "lifetime too short", once nothing can run (final review M1)', async () => {
+    const r = await fakeRelay(ok);
+    const { c } = conn(r.addr, { sandboxExpiresAt: NOW_S + 50 }, { lifetimeS: 50 });
+    const e = await c.exec('x').catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(ExecMachineryError);
+    expect((e as Error).message).toBe(
+      'the sandbox expires in 50 s; pull your work now: `mocactl sbx pull --apply`',
+    );
+    expect(r.seen).toHaveLength(0);
+    // A short token that ends before the sandbox does is still the configuration's fault.
+    const early = conn(r.addr, { sandboxExpiresAt: NOW_S + 5000 }, { lifetimeS: 100 });
+    await expect(early.c.exec('x')).rejects.toThrow(/lifetime 100s is too short/);
+    // And with no sandbox expiry known, as before.
+    const unknown = conn(r.addr, {}, { lifetimeS: 100 });
+    await expect(unknown.c.exec('x')).rejects.toThrow(/lifetime 100s is too short/);
+  });
+
+  it('keeps the learnt lifetime when a later token is capped by the sandbox expiry (final review M1)', async () => {
+    const r = await fakeRelay(ok);
+    let nowS = NOW_S;
+    const sandboxExpiresAt = NOW_S + 1000;
+    const grant = () => {
+      const exp = Math.min(nowS + 900, sandboxExpiresAt);
+      return { token: 't', expiresAt: exp, lifetimeS: exp - nowS };
+    };
+    const { c } = conn(r.addr, {
+      sandboxExpiresAt,
+      now: () => nowS * 1000,
+      token: async () => grant(),
+    });
+    await c.exec('x');
+    nowS = sandboxExpiresAt - 90; // the next mint is cut to the sandbox's end: 90 s
+    expect((await c.exec('y')).capped).toBe(true);
+    nowS = sandboxExpiresAt - 30;
+    await expect(c.exec('z')).rejects.toThrow(
+      'the sandbox expires in 30 s; pull your work now: `mocactl sbx pull --apply`',
+    );
+    expect(r.seen.map((s) => s.req.exec!.timeoutS)).toEqual([840, 30]);
+  });
+
   it('accepts the shortest usable lifetime, 121 s, with a 61 s default timeout', async () => {
     const r = await fakeRelay(ok);
     const { c } = conn(r.addr, {}, { lifetimeS: 121 });
