@@ -19,6 +19,7 @@ import { promisify } from 'node:util';
 import { gzipSync } from 'node:zlib';
 import { MAX_STDIN_BYTES, q, WORKSPACE, type Exec, type ExecResult } from '@moca/sandbox-client';
 import { sanitizeRemote } from '../core/sanitize.js';
+import { MARK_BEGIN, MARK_END } from './agent-config.js';
 import { BINDING_URL_RE, SANDBOX_ID_RE } from './state.js';
 import { PY_TAR_EXTRACT, tarEntries, type TarEntry } from './tar.js';
 
@@ -138,6 +139,76 @@ export function isBindingPath(p: string): boolean {
 /** Whether any component of a path folds to `.git` (git refuses most of these itself). */
 export function isGitPath(p: string): boolean {
   return p.split('/').some((seg) => folds(seg).includes('.git'));
+}
+
+/**
+ * The local agent configuration and the local hooks a pulled patch must never write (final review
+ * C1): each makes this machine run a command or start a program the next time an agent, an editor,
+ * git or direnv starts here, outside the sandbox. A directory entry matches at any depth (Claude
+ * Code reads `.claude/` only at the root, but refusing everywhere is simpler and safe), and a file
+ * entry matches by its last component; `.vscode/` only for the two files named. Folded as
+ * `isBindingPath` folds, so `.CLAUDE/` and `.ｍｃｐ.json` match too.
+ */
+const AGENT_DIRS: Record<string, string> = {
+  '.claude': 'Claude Code settings, hooks and commands',
+  '.opencode': 'OpenCode configuration and plugins',
+  '.husky': 'git hooks',
+};
+const AGENT_FILES: Record<string, string> = {
+  '.mcp.json': 'MCP servers Claude Code starts',
+  'opencode.json': 'OpenCode configuration, which can start MCP servers',
+  'opencode.jsonc': 'OpenCode configuration, which can start MCP servers',
+  '.envrc': 'a direnv script, run on cd',
+};
+const VSCODE_FILES: Record<string, string> = {
+  'tasks.json': 'VS Code tasks, which can run when the folder opens',
+  'settings.json': 'VS Code settings, which can name programs to run',
+};
+/** The prompt files an agent reads: warned about, not refused (they are text, not executables). */
+const PROMPT_FILES = new Set(['claude.md', 'agents.md']);
+
+const foldedIn = (seg: string, names: Record<string, string>): string | undefined =>
+  folds(seg)
+    .map((f) => names[f])
+    .find((w) => w !== undefined);
+
+/** Why a path is local agent configuration or a local hook; undefined when it is neither. */
+function agentConfigWhy(p: string): string | undefined {
+  const segs = p.split('/');
+  for (let i = 0; i < segs.length; i++) {
+    const dir = foldedIn(segs[i]!, AGENT_DIRS);
+    if (dir) return dir;
+    if (i === segs.length - 1) return foldedIn(segs[i]!, AGENT_FILES);
+    if (i === segs.length - 2 && folds(segs[i]!).includes('.vscode')) {
+      return foldedIn(segs[i + 1]!, VSCODE_FILES);
+    }
+  }
+  return undefined;
+}
+
+/** Whether a path is local agent configuration or a local hook, which a pull never writes. */
+export function isAgentConfigPath(p: string): boolean {
+  return agentConfigWhy(p) !== undefined;
+}
+
+const isPromptPath = (p: string) => folds(p.split('/').at(-1)!).some((f) => PROMPT_FILES.has(f));
+
+/** A prompt file's text without the block `sbx up` keeps between its markers (when one pair). */
+function outsideBlock(text: string | undefined): string {
+  if (text === undefined) return '';
+  const b = text.indexOf(MARK_BEGIN);
+  const e = text.indexOf(MARK_END);
+  const one =
+    b >= 0 && e > b && text.indexOf(MARK_BEGIN, b + 1) < 0 && text.indexOf(MARK_END, e + 1) < 0;
+  return one ? text.slice(0, b) + text.slice(e + MARK_END.length) : text;
+}
+
+function readOrGone(p: string): string | undefined {
+  try {
+    return readFileSync(p, 'utf8');
+  } catch {
+    return undefined;
+  }
 }
 
 const run = promisify(execFile);
@@ -750,7 +821,9 @@ async function dryRun3way(root: string, dir: string, patch: string): Promise<str
 }
 
 /**
- * Applies a pulled patch in the local repository (R6c):
+ * Applies a pulled patch in the local repository (R6c). First, a patch that writes `.git`, the
+ * `.sbx/` binding, or local agent configuration or hooks (`isAgentConfigPath`) is refused whole,
+ * before git is asked to apply anything. Then:
  * 1. a plain `git apply`, which changes only the working tree and is all or nothing;
  * 2. if that fails because a file it touches has uncommitted local changes, it is refused with
  *    those files named, and nothing is changed;
@@ -758,9 +831,17 @@ async function dryRun3way(root: string, dir: string, patch: string): Promise<str
  *    throwaway index: a conflict is refused, naming the files, with nothing applied, staged or
  *    marked. Only a clean merge is applied for real, and the touched paths' index entries go back
  *    to what they were (their HEAD), so the index is as before.
- * Returns the paths the patch touched.
+ * Returns the paths the patch touched. A `CLAUDE.md` or `AGENTS.md` it changed outside the sbx
+ * block is applied, with `o.warn` told.
  */
-export async function applyPatch(root: string, patch: Buffer): Promise<string[]> {
+export async function applyPatch(
+  root: string,
+  patch: Buffer,
+  o: {
+    /** A warning for the user (stderr): a prompt file changed outside the sbx block. */
+    warn?: (s: string) => void;
+  } = {},
+): Promise<string[]> {
   if (patch.length === 0) return [];
   const dir = mkdtempSync(join(tmpdir(), 'sbx-pull-'));
   const f = join(dir, 'sbx.patch');
@@ -783,10 +864,37 @@ export async function applyPatch(root: string, patch: Buffer): Promise<string[]>
           'changes; nothing was changed. Look at it with mocactl sbx pull -o FILE',
       );
     }
+    // The sandbox cannot be trusted with what runs on this machine: a patch that rewrites the
+    // agent's settings (a hook, an emptied deny list) or adds an MCP server would run here at the
+    // next agent start, and these files are often uncommitted, so `git diff` would not show it.
+    const config = touched.filter(isAgentConfigPath);
+    if (config.length) {
+      throw new PushError(
+        `the patch writes ${list(config.map((p) => `${p} (${agentConfigWhy(p)})`))}: local ` +
+          'agent configuration or hooks, which could run commands on this machine, outside the ' +
+          'sandbox, so a pull never writes them; nothing was changed. Save the patch with ' +
+          'mocactl sbx pull -o FILE, review it, and apply what you want by hand ' +
+          '(git apply --exclude=PATH FILE leaves a file out)',
+      );
+    }
+    const prompts = touched.filter(isPromptPath);
+    const before = new Map(prompts.map((p) => [p, outsideBlock(readOrGone(join(root, p)))]));
+    const applied = () => {
+      const changed = prompts.filter(
+        (p) => outsideBlock(readOrGone(join(root, p))) !== before.get(p),
+      );
+      if (changed.length && o.warn) {
+        o.warn(
+          `the patch changes ${list(changed)} outside the sbx block: agent instructions, which ` +
+            'your next agent session reads, so review them (git diff, or git status for a new file)',
+        );
+      }
+      return touched;
+    };
     let plainErr: unknown;
     try {
       await git(root, ['apply', '--whitespace=nowarn', f]);
-      return touched;
+      return applied();
     } catch (err) {
       plainErr = err;
     }
@@ -828,7 +936,7 @@ export async function applyPatch(root: string, patch: Buffer): Promise<string[]>
         Buffer.from(touched.join('\0') + '\0', 'utf8'),
       );
     }
-    return touched;
+    return applied();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

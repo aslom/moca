@@ -164,7 +164,7 @@ export async function cmdPull(
       else c.io.out(patch.toString());
     }
     if (!f.apply) return SBX_EXIT.ok;
-    const touched = await applyPatch(f.root!, patch);
+    const touched = await applyPatch(f.root!, patch, { warn: (w) => say(c, w) });
     try {
       await advanceBaseline(x.exec, undefined, tree, { signal: c.signal });
     } catch (err) {

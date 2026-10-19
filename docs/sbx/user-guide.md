@@ -118,6 +118,17 @@ applied the sandbox's changes to 3 files (2814 bytes of patch)
 then commit as usual) and records in the sandbox that you have it, so the next pull shows only newer
 changes. When there is nothing new it says `nothing to pull`.
 
+`pull --apply` never writes your local agent configuration or hooks: a patch that touches
+`.mcp.json`, anything under `.claude/`, `opencode.json`, `opencode.jsonc`, `.opencode/`,
+`.vscode/tasks.json`, `.vscode/settings.json`, `.husky/` or `.envrc` (at any depth, in any case),
+or `.git` and `.sbx/`, is refused whole, naming each file and why, and nothing is applied. These
+files can make your laptop run a command the next time an agent, an editor, git or direnv starts,
+and they are often uncommitted, so `git diff` would not show the change. To take such a change,
+save the patch with `mocactl sbx pull -o FILE`, read it, and apply what you want by hand
+(`git apply --exclude=.claude/settings.json FILE` leaves a file out). A change to `CLAUDE.md` or
+`AGENTS.md` outside the `sbx` block is applied, with a warning on stderr: review it before your
+next agent session.
+
 ## 4. What `sbx up` changed in your repository
 
 `up` **merges** into these files and never overwrites what you have. If a value already there
