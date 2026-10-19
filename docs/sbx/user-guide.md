@@ -215,10 +215,13 @@ the sandbox's files go with it.
   tree over 256 MiB is refused (`--max-push` sets another cap). A pull larger than 8 MiB as a
   patch is refused, never cut.
 - **What a pull does not bring back:**
-  - new files the agent creates in a top-level `build/`, `dist/`, `target/` or `node_modules/`
-    directory (and in a `node_modules/` at any depth): these count as build output. Its edits to
-    files you pushed there do come back. A rename inside such a directory comes back as a bare
-    delete;
+  - new files the agent creates in build output, at any depth: `node_modules/`, `.venv/`,
+    `venv/`, `__pycache__/`, `.pytest_cache/`, `.mypy_cache/`, `*.pyc`, and any `build/`,
+    `dist/` or `target/` directory. A `build/`, `dist/` or `target/` below the top level is pulled
+    in full only if you pushed a file inside it (a source directory that happens to have such a
+    name). The agent's edits to files you pushed in any of these do come back. A rename inside an
+    excluded directory comes back as a bare delete, and a `push` replaces the agent's new files
+    there without warning, since they never count as unpulled;
   - new files under a directory your own `.gitignore` ignores are not protected: they may not come
     back, and a `push` can replace them.
 - **Pull --apply needs a recent git.** When your files have moved on since the push, the patch is

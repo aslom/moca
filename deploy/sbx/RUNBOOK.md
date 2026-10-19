@@ -197,7 +197,7 @@ warns when a host's installed bundle predates a lifetime raise.
 Each run logs one JSON line, `summary` or `skipped`:
 
 ```bash
-ssh <host> journalctl -u sbx-janitor -o cat | grep '"janitor":"summary"' | tail -1
+ssh <host> sudo journalctl -u sbx-janitor -o cat | grep '"janitor":"summary"' | tail -1
 ```
 
 ```json
@@ -222,7 +222,9 @@ Uninstalling the last worker leaves the janitor. Remove it with
 
 ## 8. Status and the audit lines
 
-`deploy/sbx/status.sh` is read-only. From a machine with `kubectl` access to the namespace:
+`deploy/sbx/status.sh` is read-only. It reads the audit lines of the relay's current pod only, so
+right after the relay rolls (any `setup.sh` change that alters its settings or keys) the "last
+hour" figures cover less than an hour. From a machine with `kubectl` access to the namespace:
 
 ```bash
 deploy/sbx/status.sh --env-file <env file>
@@ -293,7 +295,8 @@ adds each command's first 200 bytes as `cmd`.
   never answers holds that slot until its attach stream drops: SBX0 has no bound on that drain, so
   with the default cap of 2, one wedged Exec halves the sandbox's concurrency until the worker
   disconnects. Restarting the worker (`systemctl restart sbx-worker@<id>`) drops the stream and
-  frees every slot it held.
+  frees every slot it held, and also ends every running Exec on that worker, for every user of the
+  template.
 - **Delete is not immediate.** A deleted sandbox (or a removed user) stays reachable for up to one
   token lifetime plus 30 s. Raising `SBX_TOKEN_TTL_MINUTES` allows longer commands at the cost of a
   slower delete, and needs a janitor reinstall (§2).
