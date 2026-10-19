@@ -204,6 +204,8 @@ M="$SBX_ENV_DIR/manifest"
 
 # Refusals, before anything is written or systemd is touched.
 for bad in 'SBX_API_URL=http://sbx-api.example.invalid' 'SBX_API_URL=https://x/../y' 'SBX_JANITOR_AGE=1h' \
+  $'SBX_API_URL=https://sbx-api.example.invalid\nSBX_JANITOR_AGE=03600' $'SBX_API_URL=https://sbx-api.example.invalid\nSBX_JANITOR_AGE=0900' \
+  $'SBX_API_URL=https://sbx-api.example.invalid\nSBX_JANITOR_AGE=60' $'SBX_API_URL=https://sbx-api.example.invalid\nSBX_JANITOR_AGE=0' \
   $'SBX_API_URL=https://sbx-api.example.invalid\nSBX_JANITOR_AGE=3900\nSBX_JANITOR_TOKEN=leaked'; do
   : >"$MOCK_LOG"
   ! bash "$INSTALL" --janitor "$(jbundle "$bad"$'\n')" >"$TMP/out" 2>&1 || fail "installed a janitor bundle with: $bad"
@@ -220,7 +222,7 @@ for t in bash cat grep sed install mkdir chmod rm mv id tail cut touch dirname; 
 ln -sf "$TMP/bin/systemctl" "$TMP/nojq/systemctl"
 ! PATH="$TMP/nojq" "$TMP/nojq/bash" "$INSTALL" --janitor "$(jbundle)" >"$TMP/out" 2>&1 || fail 'installed the janitor on a host without jq and curl'
 grep -q 'needs jq' "$TMP/out" || fail 'the missing-jq refusal does not say so'
-pass '--janitor refuses a bad URL, wait, a token in janitor.env, a short token, a bad CA, and a host without jq/curl'
+pass '--janitor refuses a bad URL, a wait with a leading zero or of 60 s or less, a token in janitor.env, a short token, a bad CA, and a host without jq/curl'
 
 : >"$MOCK_LOG"
 d="$(jbundle)"

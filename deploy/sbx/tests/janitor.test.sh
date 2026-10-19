@@ -41,6 +41,7 @@ export MOCK_URL="$SBX_API_URL/v1/janitor/sandboxes"
 export SBX_JANITOR_TOKEN_FILE="$TMP/janitor.token" MOCK_TOKEN_FILE="$TMP/janitor.token" SBX_JANITOR_AGE=3600
 TOKEN="$(printf 'j%.0s' {1..40})"
 printf '%s' "$TOKEN" >"$SBX_JANITOR_TOKEN_FILE"
+chmod 600 "$SBX_JANITOR_TOKEN_FILE"
 
 NOW="$(date +%s)"
 OLD=$((NOW - 7200))   # terminated two hours ago: past the one-hour wait
@@ -110,8 +111,8 @@ FS_LOG="$TMP/fs.log" bash "$J" >"$TMP/out" 2>&1 || fail 'janitor failed'
 grep -q "\"janitor\":\"reclaimed\".*\"wsk\":\"$TERM_OLD\".*\"why\":\"terminated\"" "$TMP/out" || fail 'no reclaimed line for the terminated sandbox'
 [[ ! -e "$P/$PY_TERM" ]] || fail "another installed worker's terminated workspace was kept"
 # Tombstones, then removes: the key's directory is only ever renamed; rm acts on the tombstone alone.
-grep -Eq "^mv -- [^ ]*/sbx_default/$TERM_OLD [^ ]*/sbx_default/\\.reclaiming-$TERM_OLD-[0-9]+\$" "$TMP/fs.log" ||
-  fail "the workspace was not renamed to .reclaiming-<wsk>-<ts> in its own root: $(cat "$TMP/fs.log")"
+grep -Eq "^mv -(T|h) -- [^ ]*/sbx_default/$TERM_OLD [^ ]*/sbx_default/\\.reclaiming-$TERM_OLD-[0-9]+\$" "$TMP/fs.log" ||
+  fail "the workspace was not renamed (mv -T/-h: never into a planted symlink) to .reclaiming-<wsk>-<ts> in its own root: $(cat "$TMP/fs.log")"
 grep -Eq "^rm -rf(x| --one-file-system) -- [^ ]*/sbx_default/\\.reclaiming-$TERM_OLD-[0-9]+\$" "$TMP/fs.log" ||
   fail "the tombstone was not removed (one file system): $(cat "$TMP/fs.log")"
 ! grep -E '^rm -r' "$TMP/fs.log" | grep -v '/\.reclaiming-' | grep -q . || fail "a recursive rm named something other than a tombstone: $(cat "$TMP/fs.log")"
@@ -154,7 +155,7 @@ summary | jq -e 'keys == (["bytes_freed","errors","examined","janitor","removed"
 [[ "$(field removed)" == 3 ]] || fail "removed: want 3 (two terminated, one idle unknown): $(summary)"
 [[ "$(field unknown)" == 3 ]] || fail "unknown: want 3 (idle, newer, uninstalled worker's): $(summary)"
 [[ "$(field examined)" == 12 ]] || fail "examined: want the 12 key-named entries: $(summary)"
-[[ "$(field errors)" == 3 ]] || fail "errors: want 3 (the uninstalled worker's unknown dir, the symlink, the file): $(summary)"
+[[ "$(field errors)" == 4 ]] || fail "errors: want 4 (the uninstalled worker's unknown dir, the symlink, the file, the ../../etc wrk record): $(summary)"
 (($(field bytes_freed) >= 3 * 8192)) || fail "bytes_freed below three 8 KiB images: $(summary)"
 [[ "$(field ts)" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || fail "ts: $(field ts)"
 grep -q -- "-fsS --max-time 20 " "$MOCK_LOG" || fail 'curl is not bounded (-fsS --max-time 20)'
@@ -163,23 +164,29 @@ pass 'one JSON summary line {ts, examined, removed, unknown, bytes_freed, errors
 
 # 7. Tolerates missing directories: a second run over the same list finds nothing more to free.
 bash "$J" >"$TMP/out" 2>&1 || fail 'the second run failed'
-[[ "$(field removed)" == 0 && "$(field errors)" == 3 ]] || fail "a re-run over vanished directories: $(summary)"
+[[ "$(field removed)" == 0 && "$(field errors)" == 4 ]] || fail "a re-run over vanished directories: $(summary)"
 pass 'tolerates directories already gone'
 
 # 8. Tombstones: older than an hour removed (in any root), newer kept; a symlinked one is not followed.
+# The age is the time in the name -- the janitor's .reclaiming-<wsk>-<s>, the worker's
+# .reclaiming-<key>-<ns>-<seq> -- never the mtime, which a rename keeps; without one, the ctime.
 setup_dirs
 echo '{"live":[],"terminated":[]}' >"$MOCK_JSON"
-mkdir -p "$D/.reclaiming-$TERM_OLD-1" "$U/.reclaiming-x-2-3" "$D/.reclaiming-fresh"
-head -c 4096 /dev/zero >"$D/.reclaiming-$TERM_OLD-1/workspace.img"
-old "$D/.reclaiming-$TERM_OLD-1" "$U/.reclaiming-x-2-3"
+J_OLD=".reclaiming-$TERM_OLD-$((NOW - 7200))" J_NEW=".reclaiming-$UNK_OLD-$((NOW - 600))"
+W_OLD=".reclaiming-x.y-$((NOW - 7200))123456789-3" W_NEW=".reclaiming-$LIVE-$((NOW - 600))123456789-4"
+mkdir -p "$D/$J_OLD" "$U/$W_OLD" "$D/$J_NEW" "$D/$W_NEW" "$D/.reclaiming-fresh"
+head -c 4096 /dev/zero >"$D/$J_OLD/workspace.img"
+touch "$D/$J_OLD" "$U/$W_OLD"                         # renamed just now from... (mtime is no age)
+old "$D/$J_NEW" "$D/$W_NEW" "$D/.reclaiming-fresh"    # ...trees idle for years: still fresh tombstones
 ln -s "$TMP/outside" "$D/.reclaiming-link"
 old -h "$D/.reclaiming-link" 2>/dev/null || true
 bash "$J" >"$TMP/out" 2>&1 || fail 'janitor failed'
-[[ ! -e "$D/.reclaiming-$TERM_OLD-1" && ! -e "$U/.reclaiming-x-2-3" ]] || fail 'a tombstone older than an hour was kept'
-[[ -d "$D/.reclaiming-fresh" ]] || fail 'a tombstone younger than an hour was removed (a worker may still be removing it)'
+[[ ! -e "$D/$J_OLD" && ! -e "$U/$W_OLD" ]] || fail 'a tombstone named over an hour ago was kept (aged by its mtime?)'
+[[ -d "$D/$J_NEW" && -d "$D/$W_NEW" ]] || fail 'a tombstone named ten minutes ago was removed because its tree is old (aged by mtime)'
+[[ -d "$D/.reclaiming-fresh" ]] || fail 'a tombstone with no time in its name and a new ctime was removed (a worker may still be removing it)'
 [[ -f "$TMP/outside/precious" && -L "$D/.reclaiming-link" ]] || fail 'followed or removed a symlinked tombstone'
 grep -q '"why":".reclaiming-link is not a directory; left alone"' "$TMP/out" || fail 'the symlinked tombstone is not reported as left alone'
-pass 'removes tombstones older than an hour, keeps newer ones, never follows a symlinked one'
+pass 'removes tombstones older than an hour by the time in their name (janitor or worker format; else ctime), never follows a symlinked one'
 
 # 9. Unreachable, refused or malformed: nothing at all is touched.
 for mode in unreachable refused malformed shape; do
@@ -214,7 +221,8 @@ list
 before="$(snapshot)"
 : >"$MOCK_LOG"
 for bad in 'SBX_SRV=/' 'SBX_SRV=' 'SBX_SRV=//' 'SBX_SRV=/srv/..' 'SBX_SRV=relative/srv' 'SBX_ENV_DIR=' \
-  'SBX_JANITOR_AGE=1h' 'SBX_API_URL=http://sbx-api.example.invalid' "SBX_JANITOR_TOKEN_FILE=$TMP/missing" \
+  'SBX_JANITOR_AGE=1h' 'SBX_JANITOR_AGE=03600' 'SBX_JANITOR_AGE=0900' 'SBX_JANITOR_AGE=-1' \
+  'SBX_API_URL=http://sbx-api.example.invalid' "SBX_JANITOR_TOKEN_FILE=$TMP/missing" \
   "SBX_API_CA_FILE=$TMP/missing.crt"; do
   ! env "$bad" bash "$J" >"$TMP/out" 2>&1 || fail "ran with $bad"
   grep -q 'sbx-janitor: ' "$TMP/out" || fail "the $bad refusal does not say why"
@@ -222,7 +230,21 @@ done
 ln -s / "$TMP/rootlink"
 ! SBX_SRV="$TMP/rootlink" bash "$J" >"$TMP/out" 2>&1 || fail 'ran with an SBX_SRV that resolves to /'
 grep -q "resolves to '/'" "$TMP/out" || fail 'the SBX_SRV -> / refusal does not say why'
+for m in 640 604 644 400; do
+  cp "$SBX_JANITOR_TOKEN_FILE" "$TMP/mode.token" && chmod "$m" "$TMP/mode.token"
+  rc=0
+  # Unreachable, so an accepted file gets only as far as the `skipped` line and touches nothing.
+  MOCK_CURL_FAIL=1 SBX_JANITOR_TOKEN_FILE="$TMP/mode.token" bash "$J" >"$TMP/out" 2>&1 || rc=$?
+  if [[ "$m" == 400 ]]; then
+    ((rc == 0)) && grep -q '"janitor":"skipped"' "$TMP/out" || fail 'refused a 0400 token file (owner read only)'
+    continue
+  fi
+  ((rc == 2)) || fail "ran with a token file of mode $m"
+  grep -q 'chmod 600' "$TMP/out" || fail "the mode-$m refusal does not say what to do"
+done
+: >"$MOCK_LOG"
 printf 'tooShortSecret' >"$TMP/small.token"
+chmod 600 "$TMP/small.token"
 ! SBX_JANITOR_TOKEN_FILE="$TMP/small.token" bash "$J" >"$TMP/out" 2>&1 || fail 'ran with a token under 32 characters'
 ! grep -q tooShortSecret "$TMP/out" || fail 'the short-token refusal printed the token'
 mkdir -p "$TMP/notools"
@@ -231,7 +253,7 @@ for t in bash date cat; do ln -sf "$(command -v "$t")" "$TMP/notools/$t"; done
 grep -q 'needs jq' "$TMP/out" || fail 'the missing-tool refusal does not name jq'
 [[ ! -s "$MOCK_LOG" ]] || fail 'asked the control plane before refusing its own settings'
 [[ "$before" == "$(snapshot)" ]] || fail 'a refused run touched the disk'
-pass 'refuses a workspace root that is / or empty (or relative, or a link to /), a bad token, URL, wait or CA, and missing tools'
+pass 'refuses a root that is / or empty (or relative, or a link to /), a wait with a leading zero (octal), a token file others can read, a bad token, URL or CA, and missing tools'
 
 # 11. A worker whose root is a symlink, or whose env names a different root, is skipped, as an error.
 setup_dirs
@@ -289,3 +311,19 @@ printf -- '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n' >"$TM
 SBX_API_CA_FILE="$TMP/api-ca.crt" bash "$J" >"$TMP/out" 2>&1 || fail 'janitor failed with an API CA'
 grep -qF -- "--cacert $TMP/api-ca.crt" "$MOCK_LOG" || fail 'SBX_API_CA_FILE is not passed as --cacert'
 pass 'SBX_API_CA_FILE is passed to curl as --cacert'
+
+# 15. The wait is decimal: a sandbox terminated 2000 s ago survives a 3600 s wait (bash would read
+# 03600 as octal 1920, which the janitor refuses), and records it cannot read count as errors.
+setup_dirs
+cat >"$MOCK_JSON" <<JSON
+{"live":[],"terminated":[{"wsk":"$TERM_OLD","wrk":"sbx_default","terminatedAt":$((NOW - 2000))},
+ {"wsk":"$TERM_RECENT","wrk":"sbx_default","terminatedAt":"0900"},
+ {"wsk":"$LIVE","wrk":"sbx_default","terminatedAt":$((NOW - 7200))000},
+ {"wsk":"$UNK_OLD","wrk":["sbx_default"],"terminatedAt":$OLD}]}
+JSON
+bash "$J" >"$TMP/out" 2>&1 || fail 'janitor failed'
+for k in "$TERM_OLD" "$TERM_RECENT" "$LIVE" "$UNK_OLD"; do [[ -d "$D/$k" ]] || fail "removed $k"; done
+(($(field errors) >= 3)) || fail "records with an unreadable terminatedAt or wrk are not counted as errors: $(summary)"
+grep -q "\"janitor\":\"error\".*\"wsk\":\"$TERM_RECENT\".*bad wrk or terminatedAt" "$TMP/out" || fail 'the bad terminatedAt is not reported'
+! grep -qi 'value too great\|syntax error' "$TMP/out" || fail "an arithmetic error leaked: $(cat "$TMP/out")"
+pass 'the wait is decimal (03600 refused; a 2000 s old termination survives 3600 s); unreadable records are errors, kept'

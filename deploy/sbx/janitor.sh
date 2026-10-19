@@ -6,7 +6,8 @@
 # Environment (the unit sets it from /etc/sbx/janitor.env):
 #   SBX_API_URL             https://<api host>, the control plane
 #   SBX_JANITOR_TOKEN_FILE  default $SBX_ENV_DIR/janitor.token: the bearer, SH_JANITOR_TOKEN (32+
-#                           characters), alone in a 0600 file
+#                           characters), alone in a file owned by the running user, no group or
+#                           other permission bits (0600)
 #   SBX_JANITOR_AGE         seconds after a sandbox ends before its workspace is freed (setup.sh
 #                           makes it exceed the token lifetime plus the 30 s leeway)
 #   SBX_API_CA_FILE         optional; the CA to verify the API Route with
@@ -21,7 +22,13 @@
 #   - an UNKNOWN directory (named as a workspace key, in neither list) whose newest mtime (the
 #     directory's or its workspace.img's) is older than that worker's SH_WORKSPACE_IDLE: no live
 #     sandbox can be that stale (spec §5.4.1), even if the control plane lost its records;
-#   - .reclaiming-* trees older than one hour, left by a crashed worker or janitor.
+#   - .reclaiming-* trees older than one hour, left by a crashed worker or janitor. The age is the
+#     time in the name (the janitor's .reclaiming-<wsk>-<s>, the worker's .reclaiming-<key>-<ns>-<n>),
+#     never the mtime, which a rename keeps; a name without one falls back to the ctime.
+#
+# Every number read (the wait, terminatedAt, SH_WORKSPACE_IDLE, stat and date output) is matched
+# as decimal digits without a leading zero, or forced to base 10, before any arithmetic: bash reads
+# 03600 as octal.
 # Everything else stays: a live sandbox (live wins over any terminated record), a recent
 # termination, a newer unknown directory (reported), a known one in another worker's root, the
 # worker's _probe key and any other name that is not a workspace key, symlinks and what they point
@@ -66,7 +73,16 @@ env_value() { # env_value KEY FILE: the last KEY=... line's value, without grep
 
 check_settings() {
   local t
-  for t in jq curl realpath stat du mktemp mv rm date; do command -v "$t" >/dev/null || refuse "needs $t on PATH"; done
+  for t in jq curl realpath stat du mktemp mv rm date id; do command -v "$t" >/dev/null || refuse "needs $t on PATH"; done
+  # The flavour of stat, mv and rm, once: GNU (the host) or BSD (a developer's Mac running the tests).
+  # mv -T (GNU) / -h (BSD): a symlink planted at the tombstone path is never followed into.
+  if stat -c %Y / >/dev/null 2>&1; then
+    STAT=(stat -c %Y) STAT_CTIME=(stat -c %Z) STAT_MODE=(stat -c '%a %u')
+  else
+    STAT=(stat -f %m) STAT_CTIME=(stat -f %c) STAT_MODE=(stat -f '%Lp %u')
+  fi
+  if mv --version >/dev/null 2>&1; then MV=(mv -T --); else MV=(mv -h --); fi
+  if rm --version >/dev/null 2>&1; then RM=(rm -rf --one-file-system); else RM=(rm -rfx); fi
   # `-`, not `:-`: an EMPTY SBX_SRV is refused, not silently replaced by the default.
   SBX_SRV="${SBX_SRV-/srv/sbx}"
   SBX_ENV_DIR="${SBX_ENV_DIR-/etc/sbx}"
@@ -84,18 +100,27 @@ check_settings() {
   [[ "$SBX_ENV_DIR" == /* && "$SBX_ENV_DIR" != / ]] || refuse "SBX_ENV_DIR='$SBX_ENV_DIR' must be an absolute directory"
   [[ "${SBX_API_URL:-}" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || refuse 'SBX_API_URL must be https://<api host>'
   : "${SBX_JANITOR_AGE:=3600}"
-  [[ "$SBX_JANITOR_AGE" =~ ^[0-9]{1,9}$ ]] || refuse 'SBX_JANITOR_AGE must be whole seconds'
+  # No leading zero: (( )) would read 03600 as octal (1920 s), and 0900 not at all.
+  [[ "$SBX_JANITOR_AGE" =~ ^(0|[1-9][0-9]{0,8})$ ]] ||
+    refuse "SBX_JANITOR_AGE='$SBX_JANITOR_AGE' must be whole seconds, in decimal without a leading zero"
+  AGE_S=$((10#$SBX_JANITOR_AGE))
   : "${SBX_JANITOR_TOKEN_FILE:=$SBX_ENV_DIR/janitor.token}"
   [[ -f "$SBX_JANITOR_TOKEN_FILE" && -r "$SBX_JANITOR_TOKEN_FILE" ]] || refuse 'SBX_JANITOR_TOKEN_FILE must name a readable file'
+  local mode_owner
+  mode_owner="$("${STAT_MODE[@]}" "$SBX_JANITOR_TOKEN_FILE" 2>/dev/null)" || refuse "cannot stat $SBX_JANITOR_TOKEN_FILE"
+  [[ "$mode_owner" =~ ^[0-7]*[0-7]00\ ([0-9]+)$ && "${BASH_REMATCH[1]}" == "$(id -u)" ]] ||
+    refuse "$SBX_JANITOR_TOKEN_FILE must be owned by uid $(id -u) with no group or other access (chmod 600); it is: mode/uid $mode_owner"
   [[ "$(<"$SBX_JANITOR_TOKEN_FILE")" =~ ^[!-~]{32,}$ ]] ||
     refuse "$SBX_JANITOR_TOKEN_FILE does not hold a token of 32+ printable characters"
   [[ -z "${SBX_API_CA_FILE:-}" || (-f "$SBX_API_CA_FILE" && -r "$SBX_API_CA_FILE") ]] ||
     refuse 'SBX_API_CA_FILE must name a readable file'
-  # The flavour of stat and rm, once: GNU (the host) or BSD (a developer's Mac running the tests).
-  if stat -c %Y / >/dev/null 2>&1; then STAT=(stat -c %Y); else STAT=(stat -f %m); fi
-  if rm --version >/dev/null 2>&1; then RM=(rm -rf --one-file-system); else RM=(rm -rfx); fi
   NOW="$(date +%s)"
+  [[ "$NOW" =~ ^[1-9][0-9]{0,11}$ ]] || refuse "date +%s gave '$NOW'"
 }
+
+# dec VALUE: VALUE when it is a decimal count without a leading zero (12 digits at most), else fail.
+# Every number the janitor reads passes here (or an equivalent match) before it is used.
+dec() { [[ "$1" =~ ^(0|[1-9][0-9]{0,11})$ ]]; }
 
 # fetch: the control plane's lists into KNOWN, LIVE and RECLAIM. Returns 1, having set SKIP_WHY,
 # when it cannot be asked or the answer is not the expected shape.
@@ -115,15 +140,17 @@ fetch() {
     SKIP_WHY='the control plane answer is not {live: [...], terminated: [...]}'
     return 1
   fi
-  # Only well-formed keys are emitted, so no value can carry a tab, a newline or a path. A record
-  # with a valid key but a bad worker or time still makes the key KNOWN: it keeps, never frees.
+  # Only well-formed keys are emitted, so no value can carry a tab, a newline or a path; a bad
+  # worker or time is emitted as '-' and counted as an error below. A record with a valid key still
+  # makes the key KNOWN whatever else is wrong with it: it keeps, never frees.
   rows="$(jq -r --arg re "$KEY_RE" --arg wre "$WORKER_RE" '
     def key: (.wsk | type) == "string" and (.wsk | test($re));
     (.live[] | select(key) | "L\t\(.wsk)"),
     (.terminated[] | select(key) | "K\t\(.wsk)"),
-    (.terminated[] | select(key and (.wrk | type) == "string" and (.wrk | test($wre))
-        and (.terminatedAt | type) == "number" and .terminatedAt >= 0)
-      | "T\t\(.wsk)\t\(.wrk)\t\(.terminatedAt | floor)")' <<<"$body")" || {
+    (.terminated[] | select(key)
+      | "T\t\(.wsk)\t\(if (.wrk | type) == "string" and (.wrk | test($wre)) then .wrk else "-" end)\t\(
+          if (.terminatedAt | type) == "number" and .terminatedAt >= 0 and .terminatedAt < 1e12
+          then (.terminatedAt | floor | tostring) else "-" end)")' <<<"$body")" || {
     SKIP_WHY='the control plane answer could not be read'
     return 1
   }
@@ -133,8 +160,11 @@ fetch() {
     case "$kind" in
     L) LIVE[$wsk]=1 ;;
     T)
-      [[ "$wrk" =~ $WORKER_RE && "$at" =~ ^[0-9]{1,12}$ ]] || continue
-      if ((at + SBX_JANITOR_AGE < NOW)); then RECLAIM["$wrk/$wsk"]=1; fi
+      if [[ ! "$wrk" =~ $WORKER_RE ]] || ! dec "$at"; then
+        error "${wrk//[^A-Za-z0-9_-]/?}" "$wsk" 'terminated record with a bad wrk or terminatedAt; kept'
+        continue
+      fi
+      if ((10#$at + AGE_S < NOW)); then RECLAIM["$wrk/$wsk"]=1; fi
       ;;
     esac
   done <<<"$rows"
@@ -162,7 +192,7 @@ validate_root() {
   fi
   INSTALLED[$wrk]=1
   idle="$(env_value SH_WORKSPACE_IDLE "$env")"
-  [[ ! "$idle" =~ ^[1-9][0-9]{0,5}h$ ]] || IDLE_S[$wrk]=$((${idle%h} * 3600))
+  [[ ! "$idle" =~ ^[1-9][0-9]{0,5}h$ ]] || IDLE_S[$wrk]=$((10#${idle%h} * 3600))
 }
 
 # remove_tree WRK NAME: THE ONE DELETION. Only a .reclaiming-* real directory directly inside the
@@ -190,7 +220,7 @@ reclaim() {
   tomb=".reclaiming-$wsk-$NOW"
   [[ ! -e "$root/$tomb" && ! -L "$root/$tomb" ]] || { error "$wrk" "$wsk" 'tombstone name taken'; return 0; }
   kb="$(kb_of "$src")"
-  mv -- "$src" "$root/$tomb" || { error "$wrk" "$wsk" 'rename failed'; return 0; }
+  "${MV[@]}" "$src" "$root/$tomb" || { error "$wrk" "$wsk" 'rename failed'; return 0; }
   if remove_tree "$wrk" "$tomb"; then
     REMOVED=$((REMOVED + 1)) FREED=$((FREED + kb * 1024))
     say "{\"janitor\":\"reclaimed\",\"wrk\":\"$wrk\",\"wsk\":\"$wsk\",\"why\":\"$why\",\"bytes\":$((kb * 1024))}"
@@ -202,12 +232,27 @@ reclaim() {
 newest_mtime() { # newest_mtime DIR: the newer of DIR's and DIR/workspace.img's, or nothing
   local m n
   m="$("${STAT[@]}" "$1" 2>/dev/null)" || return 0
+  dec "$m" || return 0
   if [[ -e "$1/workspace.img" || -L "$1/workspace.img" ]]; then
     n="$("${STAT[@]}" "$1/workspace.img" 2>/dev/null)" || return 0
-    [[ "$n" =~ ^[0-9]+$ ]] || return 0
-    ((n <= m)) || m="$n"
+    dec "$n" || return 0
+    ((10#$n <= 10#$m)) || m="$n"
   fi
-  [[ ! "$m" =~ ^[0-9]+$ ]] || printf '%s' "$m"
+  printf '%s' "$m"
+}
+
+# tomb_time NAME PATH: when the tombstone was made, in seconds: the time in its name, or its ctime
+# (which a rename sets) when the name carries none. Nothing when neither can be read.
+tomb_time() {
+  local name="$1" t
+  if [[ "$name" =~ ^\.reclaiming-sbx-[0123456789abcdef]{26}-([1-9][0-9]{0,11})$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}" # the janitor's own: .reclaiming-<wsk>-<unix s>
+  elif [[ "$name" =~ ^\.reclaiming-.+-([1-9][0-9]{18})-[0-9]+$ ]]; then
+    printf '%s' "$((10#${BASH_REMATCH[1]} / 1000000000))" # the worker's: .reclaiming-<key>-<unix ns>-<seq>
+  else
+    t="$("${STAT_CTIME[@]}" "$2" 2>/dev/null)" || return 0
+    ! dec "$t" || printf '%s' "$t"
+  fi
 }
 
 sweep_root() { # sweep_root WRK: every workspace-key entry of a validated root
@@ -230,10 +275,10 @@ sweep_root() { # sweep_root WRK: every workspace-key entry of a validated root
     fi
     m="$(newest_mtime "$path")"
     if [[ -z "$m" ]]; then error "$wrk" "$wsk" 'unknown, and its mtime cannot be read; kept'; continue; fi
-    if ((m + IDLE_S[$wrk] < NOW)); then
+    if ((10#$m + IDLE_S[$wrk] < NOW)); then
       reclaim "$wrk" "$wsk" unknown_idle
     else
-      say "{\"janitor\":\"unknown_kept\",\"wrk\":\"$wrk\",\"wsk\":\"$wsk\",\"idle_s\":$((NOW - m)),\"reclaim_after_s\":${IDLE_S[$wrk]}}"
+      say "{\"janitor\":\"unknown_kept\",\"wrk\":\"$wrk\",\"wsk\":\"$wsk\",\"idle_s\":$((NOW - 10#$m)),\"reclaim_after_s\":${IDLE_S[$wrk]}}"
     fi
   done
 }
@@ -244,8 +289,9 @@ sweep_tombstones() { # sweep_tombstones WRK: .reclaiming-* trees older than an h
     name="${path##*/}"
     [[ "$name" =~ $TOMB_RE ]] || continue
     if [[ -L "$path" || ! -d "$path" ]]; then error "$wrk" '' "$name is not a directory; left alone"; continue; fi
-    m="$("${STAT[@]}" "$path" 2>/dev/null)" || continue
-    [[ "$m" =~ ^[0-9]+$ ]] && ((m + TOMB_AGE_S < NOW)) || continue
+    m="$(tomb_time "$name" "$path")"
+    if [[ -z "$m" ]]; then error "$wrk" '' "$name: its age cannot be read; left alone"; continue; fi
+    ((10#$m + TOMB_AGE_S < NOW)) || continue
     kb="$(kb_of "$path")"
     if remove_tree "$wrk" "$name"; then
       FREED=$((FREED + kb * 1024))

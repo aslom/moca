@@ -219,7 +219,11 @@ install_janitor() {
   url="$(env_value SBX_API_URL "$b/janitor.env")"
   [[ "$url" =~ $JANITOR_URL_RE ]] || die "SBX_API_URL in $b/janitor.env must be https://<api host>"
   age="$(env_value SBX_JANITOR_AGE "$b/janitor.env")"
-  [[ "$age" =~ ^[0-9]{1,9}$ ]] || die "SBX_JANITOR_AGE in $b/janitor.env must be whole seconds"
+  # Decimal without a leading zero (the janitor's own rule: bash reads 03600 as octal), and above a
+  # floor of 60 s. setup.sh's own minimum is 60 minutes; the real check against the token lifetime
+  # stays there (spec §8.1), where the lifetime is known.
+  [[ "$age" =~ ^(0|[1-9][0-9]{0,8})$ ]] || die "SBX_JANITOR_AGE in $b/janitor.env must be whole seconds, in decimal without a leading zero"
+  ((10#$age > 60)) || die "SBX_JANITOR_AGE in $b/janitor.env is ${age} s: it must exceed 60 s (re-run deploy/sbx/setup.sh and copy the new bundle)"
   [[ "$(<"$b/janitor.token")" =~ ^[!-~]{32,}$ ]] || die "$b/janitor.token does not hold a token of 32+ printable characters: copy the bundle again"
   if [[ -f "$b/api-ca.crt" ]]; then
     grep -q -- '-----BEGIN CERTIFICATE-----' "$b/api-ca.crt" || die "$b/api-ca.crt holds no PEM certificate"
