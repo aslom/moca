@@ -278,6 +278,7 @@ These specs predate their registration. The status shown is copied from each spe
 | Re-attach to a running turn (ADR-0040)                        | [`2026-10-09-turn-reattach-design.md`](2026-10-09-turn-reattach-design.md)                                     | Proposed                                                |
 | `mocactl` subagent commands — spawn, subagents, get (#381)    | [`2026-10-12-mocactl-subagent-commands-design.md`](2026-10-12-mocactl-subagent-commands-design.md)             | Proposed                                                |
 | Per-subject claim names for `/workloads` (#358)               | [`2026-10-15-per-subject-claim-names-design.md`](2026-10-15-per-subject-claim-names-design.md)                 | Proposed                                                |
+| Per-workload sandboxes, `/workloads` phase 2 (#476, ADR-0043) | [`2026-10-16-workload-sandboxes-design.md`](2026-10-16-workload-sandboxes-design.md)                           | Proposed                                                |
 
 ## Lineage & supersessions (explicit)
 
