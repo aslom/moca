@@ -609,7 +609,8 @@ Nothing else is promised.
 
 - one bundle per template worker, in P6.2's format (`worker.env`, `relay-ca.crt`, mode 0600 in a
   0700 directory);
-- one janitor bundle (`janitor.env`).
+- one janitor bundle: `janitor.env` (the API URL and the wait), `janitor.token` (the token, kept
+  out of the env file) and, optionally, `api-ca.crt`, all mode 0600 in a 0700 directory.
 
 **Refuses** to apply if:
 
