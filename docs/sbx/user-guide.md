@@ -175,7 +175,22 @@ removed .sbx/ (the binding)
 
 `rm` takes back exactly what `up` added (a value you had before stays), then removes `.sbx/`.
 `mocactl sbx rm --keep-config` deletes the sandbox and leaves the configuration. **Pull first:**
-the sandbox's files go with it.
+the sandbox's files go with it. `rm` checks, and refuses to delete a sandbox that holds work you
+have not pulled:
+
+```
+sbx: the sandbox has changes not yet pulled, so sbx-0f3a9c2e7b1d4a5f6e8c0b2d4a was not deleted: run mocactl sbx pull --apply to keep them, or mocactl sbx rm --force to delete it with them
+```
+
+When it cannot check (the sandbox has expired, or its template's worker is down), it says so,
+deletes nothing, and needs `--force`:
+
+```
+sbx: cannot check sbx-0f3a9c2e7b1d4a5f6e8c0b2d4a for changes not yet pulled: sandbox expired; nothing was deleted. Pull them first if you can, or delete it anyway with mocactl sbx rm --force
+```
+
+`mocactl sbx rm --force` deletes without checking. The same check applies to `rm ID` for a sandbox
+that is not bound here.
 
 ## 5. Working with it
 
@@ -228,7 +243,8 @@ the sandbox's files go with it.
 - **Sandboxes expire after 7 days** by default (your operator may set another lifetime). Then the
   sandbox and its files are gone: pull before. `mocactl sbx ls` shows each sandbox's expiry, and
   `mocactl sbx doctor` fails its sandbox check in the last 24 hours. A sandbox's lifetime cannot be
-  extended; for a fresh one, pull, `mocactl sbx rm`, then `mocactl sbx up`.
+  extended; for a fresh one, pull, `mocactl sbx rm`, then `mocactl sbx up` (an expired one is
+  removed with `mocactl sbx rm --force`, as its files can no longer be checked).
 - **3 sandboxes per person** by default, and a total for the whole service. Each worktree or clone
   you run `up` in uses one.
 - **Delete and de-enrollment take effect within one token lifetime plus 30 s** (15 minutes by

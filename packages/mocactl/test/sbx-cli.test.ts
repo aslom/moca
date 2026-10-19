@@ -315,7 +315,10 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
         body: { id: SBX, state: 'terminated', reason: 'deleted' },
       }),
     });
-    expect(await sbxMain(['rm', SBX], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
+    // --force: this control plane mints no token, so the unpulled check (sbx-up.test.ts) is skipped.
+    expect(await sbxMain(['rm', '--force', SBX], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(
+      0,
+    );
     // Delete is not immediate (SBX0 §5.4): the line says how long issued tokens keep working.
     expect(io.errs.join('\n')).toBe(
       `deleted ${SBX}; tokens already issued stop working within one token lifetime plus 30 s ` +

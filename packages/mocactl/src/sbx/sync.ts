@@ -1,17 +1,25 @@
 import { rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { ApiError } from '../api/errors.js';
+import { ApiError, TOKEN_CODES } from '../api/errors.js';
+import { describeError } from '../core/messages.js';
 import { sanitizeRemote } from '../core/sanitize.js';
 import { ConfigConflict, takeBackAgentConfig, writeAgentConfig } from './agent-config.js';
 import type { SbxSandbox } from './api.js';
 import { failed, SBX_EXIT, type SbxCtx } from './commands.js';
-import { execFailed, openExec, type ExecFactory, type OpenedExec } from './exec.js';
+import {
+  execFailed,
+  openExec,
+  sandboxFailureText,
+  type ExecFactory,
+  type OpenedExec,
+} from './exec.js';
 import {
   PushError,
   advanceBaseline,
   applyPatch,
   bindingUrl,
   capture,
+  hasUnpulled,
   planPush,
   pushTree,
   repoId,
@@ -328,6 +336,62 @@ export async function cmdUp(
     `sandbox ${s.id} (${sanitizeRemote(s.template)}), expires ${when(s.expiresAt)}; bound in .sbx/sandbox.json`,
   );
   return SBX_EXIT.ok;
+}
+
+/**
+ * Before `sbx rm` deletes a sandbox (final review I3): undefined when it holds nothing a delete
+ * would lose, else the exit code after saying why it was not deleted. Work not yet pulled refuses;
+ * so does a check that cannot run (an expired or purged sandbox mints no token, a worker that is
+ * down runs no Exec), since silence is not "clean"; a sandbox already deleted has nothing left to
+ * lose. `--force` skips this. A login or network
+ * failure keeps its own exit (3 or 4): the delete could not have been made either.
+ */
+export async function checkBeforeRm(
+  c: SbxCtx,
+  id: string,
+  bound: boolean,
+  factory?: ExecFactory,
+): Promise<number | undefined> {
+  const force = `mocactl sbx rm --force${bound ? '' : ` ${id}`}`;
+  const cannot = (why: string) => {
+    say(
+      c,
+      `cannot check ${id} for changes not yet pulled: ${why}; nothing was deleted. Pull them ` +
+        `first if you can, or delete it anyway with ${force}`,
+    );
+    return SBX_EXIT.failed;
+  };
+  let x: OpenedExec;
+  try {
+    x = await openExec(c.api, id, factory);
+  } catch (err) {
+    if (c.signal?.aborted) return 130;
+    if (err instanceof ApiError) {
+      if (err.status === 0 || err.code === 'not_enrolled' || TOKEN_CODES.has(err.code)) {
+        return failed(c, err);
+      }
+      // Already deleted (an earlier rm whose clean-up then failed): deleting it again loses
+      // nothing, and lets that rm finish. An expired or purged one still needs --force.
+      if (err.code === 'sandbox_terminated' && err.reason === 'deleted') return undefined;
+      return cannot(describeError(err));
+    }
+    return cannot(sandboxFailureText(err));
+  }
+  try {
+    if (!(await hasUnpulled(x.exec, undefined, { signal: c.signal }))) return undefined;
+  } catch (err) {
+    if (c.signal?.aborted) return 130;
+    return cannot(err instanceof PushError ? err.message : sandboxFailureText(err));
+  } finally {
+    x.close();
+  }
+  const pull = bound ? 'mocactl sbx pull --apply' : `mocactl sbx pull --sandbox ${id} --apply`;
+  say(
+    c,
+    `${UNPULLED_TEXT}, so ${id} was not deleted: run ${pull} to keep them, or ${force} to ` +
+      'delete it with them',
+  );
+  return SBX_EXIT.failed;
 }
 
 /**

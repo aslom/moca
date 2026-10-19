@@ -132,7 +132,9 @@ Edit the list and re-run `setup.sh`. The control plane rolls with the new list:
   its next refresh. A sandbox token already issued keeps working until it expires: **within one
   token lifetime plus 30 s** (`SBX_TOKEN_TTL_MINUTES`, 15 minutes by default), and a command still
   running then is cancelled. The user's sandboxes are not deleted; delete them as an admin
-  (`mocactl sbx ls --all`, `mocactl sbx rm <sandbox id>`) if their work must go.
+  (`mocactl sbx ls --all`, `mocactl sbx rm --force <sandbox id>`) if their work must go. The
+  `--force` is needed: `rm` first checks a sandbox for work not yet pulled, which takes a sandbox
+  token, and an admin is never minted one for another user's sandbox.
 
 Admins (`SBX_ADMIN_SUBJECTS`) may list, read and delete every sandbox, but never mint a token for
 another user's: they cannot run commands in another user's code.
@@ -327,8 +329,9 @@ control plane runs in the cluster; a new sandbox fails the same way until the ho
 **What to tell them.** The service is best effort, business hours. Their laptops keep the original
 trees, and anything not yet pulled is on the host. If the host comes back with its disk, every
 sandbox and its files are as they were (a worker restart keeps workspaces). If the disk is lost,
-every sandbox on it is gone: they run `mocactl sbx rm`, then `mocactl sbx up`, and redo the work
-not pulled.
+every sandbox on it is gone: they run `mocactl sbx rm --force` (`rm` cannot check a lost sandbox
+for unpulled work, so it refuses without `--force`), then `mocactl sbx up`, and redo the work not
+pulled.
 
 **What to check.** `status.sh` (`workers not attached`), then on the host `status.sh --host` and
 `journalctl -u sbx-worker@<id>`. A worker that crash-looped into `failed` is brought back by

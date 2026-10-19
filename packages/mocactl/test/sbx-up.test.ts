@@ -10,6 +10,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { ExecMachineryError } from '@moca/sandbox-client';
 import { afterEach, describe, expect, it } from 'vitest';
 import { saveAuth } from '../src/config.js';
 import { SBX_USAGE, sbxMain, sbxPaths } from '../src/sbx/cli.js';
@@ -470,11 +471,126 @@ describe('mocactl sbx up and rm: the agent configuration (SBX0 §6.3, plan Revie
     expect(git(h.r, 'status', '--porcelain', '--ignored')).toBe(status);
   });
 
+  const deletes = (h: ReturnType<typeof harness>) =>
+    h.cp.calls.filter((c) => c.method === 'DELETE').map((c) => c.path);
+
+  it('rm refuses while the sandbox has changes not yet pulled, deleting nothing (final review I3)', async () => {
+    const h = harness({ boxes: [sandbox({ id: OTHER })] });
+    expect(await h.run(['up'])).toBe(0);
+    writeFileSync(join(h.ws.get(NEW).ws, 'src/app.py'), 'print("agent")\n');
+    expect(await h.run(['rm'])).toBe(1);
+    expect(h.err()).toContain(
+      `sbx: the sandbox has changes not yet pulled, so ${NEW} was not deleted`,
+    );
+    expect(h.err()).toContain('mocactl sbx pull --apply');
+    expect(h.err()).toContain('mocactl sbx rm --force');
+    expect(deletes(h)).toEqual([]);
+    expect(existsSync(join(h.r, '.sbx/sandbox.json'))).toBe(true);
+    expect(checkAgentConfig(h.r)).toEqual([]); // the configuration stays too
+    // An explicit id is checked the same way: files with no baseline are work too.
+    writeFileSync(join(h.ws.get(OTHER).ws, 'agent-work.txt'), 'x\n');
+    expect(await h.run(['rm', OTHER])).toBe(1);
+    expect(h.err()).toContain(`so ${OTHER} was not deleted`);
+    expect(deletes(h)).toEqual([]);
+  });
+
+  it('rm deletes a sandbox with nothing to pull, after checking (final review I3)', async () => {
+    const h = harness();
+    expect(await h.run(['up'])).toBe(0);
+    writeFileSync(join(h.ws.get(NEW).ws, 'src/app.py'), 'print(2)\n');
+    expect(await h.run(['pull', '--apply'])).toBe(0);
+    const opened = h.ws.counts().opened;
+    expect(await h.run(['rm'])).toBe(0);
+    expect(h.ws.counts().opened).toBe(opened + 1); // it looked
+    expect(deletes(h)).toEqual([`/v1/sandboxes/${NEW}`]);
+    expect(existsSync(join(h.r, '.sbx'))).toBe(false);
+  });
+
+  it('rm --force deletes without the check, unpulled work and all (final review I3)', async () => {
+    const h = harness();
+    expect(await h.run(['up'])).toBe(0);
+    writeFileSync(join(h.ws.get(NEW).ws, 'src/app.py'), 'print("agent")\n');
+    const opened = h.ws.counts().opened;
+    expect(await h.run(['rm', '--force'])).toBe(0);
+    expect(h.ws.counts().opened).toBe(opened); // no Exec at all
+    expect(deletes(h)).toEqual([`/v1/sandboxes/${NEW}`]);
+    expect(existsSync(join(h.r, '.sbx'))).toBe(false);
+    expect(await h.run(['rm', '--force', '--keep-config', OTHER])).toBe(1); // still a real 404
+  });
+
+  it('rm refuses without --force when the check cannot run, saying why (final review I3)', async () => {
+    const h = harness();
+    expect(await h.run(['up'])).toBe(0);
+    // The Exec path is down: the template's worker is not attached.
+    const down = () => ({
+      exec: async () => {
+        throw new ExecMachineryError(
+          'sandbox failure: UNKNOWN: no live worker for sandbox sbx_node22',
+        );
+      },
+      close: () => {},
+    });
+    const run = (argv: string[]) =>
+      sbxMain(argv, h.env, h.io, {
+        home: h.home,
+        fetchImpl: h.cp.fetchImpl,
+        cwd: h.r,
+        execFactory: down,
+      });
+    expect(await run(['rm'])).toBe(1);
+    expect(h.err()).toContain(`sbx: cannot check ${NEW} for changes not yet pulled`);
+    expect(h.err()).toContain('no live worker for sandbox sbx_node22');
+    expect(h.err()).toContain('nothing was deleted');
+    expect(h.err()).toContain('mocactl sbx rm --force');
+    expect(deletes(h)).toEqual([]);
+    expect(existsSync(join(h.r, '.sbx/sandbox.json'))).toBe(true);
+    // Expired: no token, so no check either.
+    h.cp.boxes.set(NEW, sandbox({ id: NEW, state: 'terminated', reason: 'expired' }));
+    h.io.errs.length = 0;
+    expect(await h.run(['rm'])).toBe(1);
+    expect(h.err()).toMatch(/cannot check .*: .*expired.*; nothing was deleted/);
+    expect(deletes(h)).toEqual([]);
+    expect(await run(['rm', '--force'])).toBe(0);
+    expect(deletes(h)).toEqual([`/v1/sandboxes/${NEW}`]);
+    expect(existsSync(join(h.r, '.sbx'))).toBe(false);
+  });
+
+  it('rm of a sandbox already deleted needs no --force: there is nothing left to lose', async () => {
+    const h = harness({ boxes: [sandbox({ id: OTHER, state: 'terminated', reason: 'deleted' })] });
+    expect(await h.run(['rm', OTHER])).toBe(0);
+    expect(h.err()).toContain(`deleted ${OTHER}`);
+  });
+
+  it('rm keeps the login and unreachable exits when the check cannot reach the control plane', async () => {
+    const h = harness();
+    expect(await h.run(['up'])).toBe(0);
+    const down = (async () => {
+      throw new TypeError('fetch failed');
+    }) as unknown as typeof fetch;
+    const r = await sbxMain(['rm'], h.env, h.io, {
+      home: h.home,
+      fetchImpl: down,
+      cwd: h.r,
+      execFactory: h.ws.factory,
+    });
+    expect(r).toBe(4);
+    expect(existsSync(join(h.r, '.sbx/sandbox.json'))).toBe(true);
+  });
+
+  it('says in its usage that rm refuses while changes are not yet pulled, and takes --force', () => {
+    const u = SBX_USAGE.replace(/\s+/g, ' ');
+    expect(u).toContain('mocactl sbx rm [ID] [--keep-config] [--force] [--json]');
+    expect(u).toContain('refused while the sandbox has changes not yet pulled, unless --force');
+  });
+
   it('rm of a bound sandbox the control plane has purged still takes the config back (review I3)', async () => {
     const h = harness();
     expect(await h.run(['up'])).toBe(0);
     h.cp.boxes.delete(NEW); // past retention: the record is gone, so DELETE answers 404
-    expect(await h.run(['rm'])).toBe(0);
+    // No token, so no unpulled check: refused without --force (final review I3).
+    expect(await h.run(['rm'])).toBe(1);
+    expect(h.err()).toMatch(/cannot check .*no such sandbox.*; nothing was deleted/);
+    expect(await h.run(['rm', '--force'])).toBe(0);
     expect(h.err()).toContain(`${NEW} is already gone`);
     for (const f of [...CFG, '.claude', '.sbx']) expect(existsSync(join(h.r, f)), f).toBe(false);
     // Not the bound sandbox: a 404 is still the failure it was.
@@ -502,7 +618,9 @@ describe('mocactl sbx up and rm: the agent configuration (SBX0 §6.3, plan Revie
     }
     // The binding's own, spelled with a trailing slash: the same control plane.
     saveAuth(sbxPaths(h.paths), LOGIN);
-    expect(await h.run(['rm'], { env: { HOME: h.home, MOCACTL_SBX_URL: `${URL_}/` } })).toBe(0);
+    expect(
+      await h.run(['rm', '--force'], { env: { HOME: h.home, MOCACTL_SBX_URL: `${URL_}/` } }),
+    ).toBe(0);
     expect(h.err()).toContain('already gone');
     expect(existsSync(join(h.r, '.sbx'))).toBe(false);
   });
@@ -539,7 +657,8 @@ describe('mocactl sbx up and rm: the agent configuration (SBX0 §6.3, plan Revie
     expect(await h.run(['up'])).toBe(0);
     expect(await h.run(['rm'])).toBe(0);
     expect(readFileSync(join(h.r, 'opencode.json'), 'utf8')).toBe(oc);
-    expect(await h.run(['rm', NEW])).toBe(0); // again: nothing left to take back, no crash
+    // Again (--force: a deleted sandbox cannot be checked): nothing left to take back, no crash.
+    expect(await h.run(['rm', '--force', NEW])).toBe(0);
   });
 
   it('rm keeps a file up created once the developer has commented in it, and says so (review round 4)', async () => {

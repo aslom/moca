@@ -26,7 +26,7 @@ import { type ExecFactory } from './exec.js';
 import { cmdMcp, cmdPut, cmdRun, parseTimeout, workspacePath } from './run.js';
 import { PushError, repoRoot } from './push.js';
 import { findSandboxFile, readBinding, readBoundSandbox, SANDBOX_ID_RE } from './state.js';
-import { cmdPull, cmdPush, cmdUp, DEFAULT_TEMPLATE, unbind } from './sync.js';
+import { checkBeforeRm, cmdPull, cmdPush, cmdUp, DEFAULT_TEMPLATE, unbind } from './sync.js';
 
 export const SBX_USAGE = `usage (the sandbox service, SBX0):
   mocactl sbx login [--control-plane-url URL]    log in with the GitHub device flow (the URL is remembered)
@@ -35,9 +35,12 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
   mocactl sbx create [--template ID] [--name N] [--label k=v ...] [--json]
                                                  create a sandbox (template: default); prints its id
   mocactl sbx ls [--all] [--json]                your sandboxes (--all: everyone's; admins only)
-  mocactl sbx rm [ID] [--keep-config] [--json]   delete a sandbox; for the bound one, also take
+  mocactl sbx rm [ID] [--keep-config] [--force] [--json]
+                                                 delete a sandbox; for the bound one, also take
                                                  back the agent configuration sbx up added, and
-                                                 .sbx/ (unless --keep-config)
+                                                 .sbx/ (unless --keep-config) (refused while the
+                                                 sandbox has changes not yet pulled, unless --force,
+                                                 or when that cannot be checked)
   mocactl sbx token [ID] [--json]                print a fresh sandbox token (15 minutes by default)
   mocactl sbx env [ID]                           shell exports for a direct sandbox/v1 client
   mocactl sbx run [--sandbox ID] [--timeout S] [-- CMD ...]   run CMD (or the script on stdin) in /workspace
@@ -205,7 +208,7 @@ const SYNC_FLAGS: [
   'force' | 'include-secrets' | 'max-push' | 'apply' | 'out' | 'no-agent-config' | 'keep-config',
   string[],
 ][] = [
-  ['force', ['push']],
+  ['force', ['push', 'rm']],
   ['include-secrets', ['up', 'push']],
   ['max-push', ['up', 'push']],
   ['apply', ['pull']],
@@ -489,6 +492,11 @@ export async function sbxMain(
       const bindingUrl =
         bindingRoot !== undefined ? readBinding(bindingRoot)?.controlPlaneUrl : undefined;
       const sameCp = bindingUrl !== undefined && normalizeUrl(bindingUrl) === normalizeUrl(ctx.url);
+      // Never delete unpulled work unasked: checked first, unless --force (final review I3).
+      if (!values.force) {
+        const refused = await checkBeforeRm(ctx, id!, bound, deps.execFactory);
+        if (refused !== undefined) return refused;
+      }
       const code = await cmdRm(ctx, id!, { goneOk: bound && sameCp });
       if (code !== SBX_EXIT.ok || values['keep-config'] || !bound) return code;
       return unbind(ctx, bindingRoot!);
