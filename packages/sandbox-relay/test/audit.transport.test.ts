@@ -1,5 +1,5 @@
 import { Metadata, credentials, status } from '@grpc/grpc-js';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SandboxExecClient, Stream } from '@moca/k8s-sandbox';
 import { makeExecAuth, startRelay } from '../src/main.js';
 import { commandPreview, type AuditLine } from '../src/sandbox-caller.js';
@@ -383,6 +383,29 @@ describe('the command in the audit line (SBX0 §3.5)', () => {
       makeExecAuth({ MOCA_RELAY_EXEC_TOKEN: HARNESS, SH_SANDBOX_AUDIT_COMMANDS: '1' })
         .sandboxAuditCommands,
     ).toBeUndefined();
+  });
+});
+
+describe('an audit sink that throws (SBX0 §3.5)', () => {
+  it('never stops enforcement: the slot is released and the next Exec is admitted', async () => {
+    const r = await relay(
+      { SH_SANDBOX_MAX_INFLIGHT: '1' },
+      {
+        log: () => {
+          throw new Error('disk full');
+        },
+      },
+    );
+    await worker(r.attach, 'sbx_default', 'auto', 0, () => [{ end: { exitCode: 0 } }]);
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect((await exec(r.exec, { token: token(), reqId: 1 }).done).code).toBe(status.OK);
+      // With the in-flight cap at 1, a slot leaked by a throwing write would refuse this one.
+      expect((await exec(r.exec, { token: token(), reqId: 2 }).done).code).toBe(status.OK);
+      expect(quiet.mock.calls.join(' ')).toContain('audit line not written: disk full');
+    } finally {
+      quiet.mockRestore();
+    }
   });
 });
 

@@ -203,7 +203,8 @@ One JSON line per `Exec`, to stdout:
   timer fires, not when the worker lets go, so a worker that never answers still leaves one.
 - `busy`: the sandbox's in-flight cap refused it (§3.6).
 - `error`: any other `ExecError`, or the Exec could not be routed (no live worker, a disconnect).
-- `cancelled`: the client cancelled the call, or aborted the Exec. The line is written at the cancel.
+- `cancelled`: the client cancelled the call, or aborted the Exec. The line is written at a client
+  cancel; for an `Abort`, when the worker acknowledges it.
 - `refused`: `UNAUTHENTICATED`, `PERMISSION_DENIED`, `ALREADY_EXISTS` (`reason: "req_id_in_flight"`,
   §3.6) or `INVALID_ARGUMENT`, with a fixed `reason`.
 

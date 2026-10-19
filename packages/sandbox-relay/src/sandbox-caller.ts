@@ -73,7 +73,17 @@ export function commandPreview(command: string): string {
 
 /** Writes the audit lines. Built only on a relay with sandbox keys; `write` absent writes nothing. */
 export function makeAudit(write: ((line: string) => void) | undefined, withCommands: boolean) {
-  const emit = (o: Record<string, unknown>) => write?.(JSON.stringify(o));
+  // An audit write must never stop enforcement: it runs before the expiry abort and the slot's
+  // release, so a sink that throws is reported and swallowed.
+  const emit = (o: Record<string, unknown>) => {
+    try {
+      write?.(JSON.stringify(o));
+    } catch (err) {
+      console.error(
+        `[sandbox-relay] audit line not written: ${(err as Error)?.message ?? String(err)}`,
+      );
+    }
+  };
   return {
     /**
      * One Exec's line. `t0` is when the relay received it; `command` is dropped unless the flag.
