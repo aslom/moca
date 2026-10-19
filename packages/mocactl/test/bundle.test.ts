@@ -20,6 +20,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 // signal-exit), fails here rather than on a user's machine. Spec §4 and §7.
 const pkg = fileURLToPath(new URL('..', import.meta.url));
 const VERSION = 'v9.9.9-bundle-test';
+// Measured 2026-10-19 at 6 916 540 bytes (SBX0 1c, Task 9); about 11 % headroom, in whole 100 kB.
+const BUNDLE_BUDGET_BYTES = 7_700_000;
 let dir: string;
 let bundle: string;
 
@@ -60,12 +62,18 @@ describe('the bundle', () => {
     expect(r.stdout).toBe(`${VERSION}\n`);
   });
 
-  // A generous ceiling, so a dependency that drags in far more than it should is caught; Task 9
-  // sets the real CI budget. The size is printed so a reviewer sees it move.
-  it('stays under 8 MiB', () => {
+  // SBX0 §6.4: mocactl ships as one file, and @moca/sandbox-client (grpc-js, protobuf, the MCP SDK)
+  // went into it. The budget makes growth a decision: raise BUNDLE_BUDGET_BYTES deliberately, in
+  // the change that needs it, with the new measured size. The size is printed so a reviewer sees it
+  // move. CI runs this in the `check` job (`pnpm -r test`).
+  it('stays within its size budget', () => {
     const size = statSync(bundle).size;
-    console.log(`mocactl bundle: ${size} bytes (${(size / 2 ** 20).toFixed(2)} MiB)`);
-    expect(size).toBeLessThan(8 * 2 ** 20);
+    console.log(
+      `mocactl bundle: ${size} bytes (${(size / 2 ** 20).toFixed(2)} MiB), ` +
+        `budget ${BUNDLE_BUDGET_BYTES} bytes`,
+    );
+    expect(Number.isSafeInteger(BUNDLE_BUDGET_BYTES)).toBe(true);
+    expect(size).toBeLessThanOrEqual(BUNDLE_BUDGET_BYTES);
   });
 
   // ADR-0036/0042: Pi stays out of mocactl. sandbox-client's contract test links Pi as a dev
