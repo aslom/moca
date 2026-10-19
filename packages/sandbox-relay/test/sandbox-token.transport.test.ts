@@ -122,7 +122,10 @@ describe('the relay sandbox caller (SBX0 §3.2)', () => {
       expect(res.details).toBe('exec authentication failed');
       const refused = reasons(r.lines).filter((l) => l.outcome === 'refused');
       expect(refused).toHaveLength(1);
-      expect(refused[0]).toMatchObject({ call: 'exec' });
+      expect(refused[0]).toMatchObject({ audit: 'sandbox_exec' });
+      // Nothing about the token verified, so its sub and sbx are not the caller's to claim.
+      expect(refused[0]).not.toHaveProperty('sub');
+      expect(refused[0]).not.toHaveProperty('sbx');
       expect(refused[0]!.reason).toMatch(why);
       if (t)
         for (const part of t.split('.'))
@@ -157,7 +160,7 @@ describe('the relay sandbox caller (SBX0 §3.2)', () => {
       expect(reasons(r.lines)).toEqual([
         expect.objectContaining({
           outcome: 'refused',
-          call: 'exec',
+          audit: 'sandbox_exec',
           sbx: 'sbx-aaaa',
           reason: expect.stringMatching(why),
         }),
@@ -213,7 +216,7 @@ describe('the relay sandbox caller (SBX0 §3.2)', () => {
     const res = await abort(r.exec, token({ iss: 'mallory' }), 66);
     expect(res.code).toBe(status.UNAUTHENTICATED);
     expect(reasons(r.lines)).toEqual([
-      expect.objectContaining({ call: 'abort', reason: 'wrong token issuer' }),
+      expect.objectContaining({ audit: 'sandbox_abort', reason: 'wrong token issuer' }),
     ]);
     expect(w.aborts).toHaveLength(0);
     w.release(workerReqId('sbx-aaaa', 66));

@@ -40,7 +40,7 @@ import {
   type SandboxVerifier,
 } from './sandbox-auth.js';
 import { failExecStream, grpcError, pumpExec } from './exec-stream.js';
-import { makeSandboxCaller } from './sandbox-caller.js';
+import { makeAudit, makeSandboxCaller } from './sandbox-caller.js';
 
 export { grpcError } from './exec-stream.js';
 export { armDeadline } from './sandbox-caller.js';
@@ -54,8 +54,10 @@ export interface RelayServerDeps extends RelayDeps {
   sandboxMaxInflight?: number;
   /** Seconds past a token's `exp` at which its running Exec is cancelled. Defaults to 30; tests set 0. */
   sandboxLeewayS?: number;
-  /** Where sandbox-caller refusal lines go (SBX0 §3.5). Defaults to stdout. */
+  /** Where the sandbox Exec audit lines go (SBX0 §3.5). Defaults to stdout. */
   log?: (line: string) => void;
+  /** SH_SANDBOX_AUDIT_COMMANDS=1: audit lines carry the command's first 200 bytes (SBX0 §3.5). */
+  sandboxAuditCommands?: boolean;
 }
 
 /**
@@ -122,7 +124,10 @@ function unauthenticated(): Error & { code: number; details: string } {
  */
 export function makeExecAuth(
   env: NodeJS.ProcessEnv,
-): Pick<RelayServerDeps, 'validateExecToken' | 'verifySandboxToken' | 'sandboxMaxInflight'> {
+): Pick<
+  RelayServerDeps,
+  'validateExecToken' | 'verifySandboxToken' | 'sandboxMaxInflight' | 'sandboxAuditCommands'
+> {
   const verifySandboxToken = makeSandboxTokenVerifier(env);
   const maxInflight = sandboxMaxInflight(env);
   if (!env.MOCA_RELAY_EXEC_TOKEN && !verifySandboxToken) {
@@ -133,7 +138,14 @@ export function makeExecAuth(
   const validateExecToken = env.MOCA_RELAY_EXEC_TOKEN ? makeExecTokenValidator(env) : () => false;
   return {
     validateExecToken,
-    ...(verifySandboxToken ? { verifySandboxToken, sandboxMaxInflight: maxInflight } : {}),
+    ...(verifySandboxToken
+      ? {
+          verifySandboxToken,
+          sandboxMaxInflight: maxInflight,
+          // Exactly "1": an operator debug flag, so anything else is off.
+          ...(env.SH_SANDBOX_AUDIT_COMMANDS === '1' ? { sandboxAuditCommands: true } : {}),
+        }
+      : {}),
   };
 }
 
@@ -144,6 +156,7 @@ type ExecAuth = Pick<
   | 'sandboxMaxInflight'
   | 'sandboxLeewayS'
   | 'log'
+  | 'sandboxAuditCommands'
   | 'timers'
 >;
 
@@ -209,44 +222,57 @@ function addWorkerService(server: Server, relay: ReturnType<typeof createRelay>)
 }
 
 function addExecService(server: Server, relay: Relay, auth: ExecAuth): void {
-  // Refusal lines (SBX0 §3.5) only on a relay with sandbox keys, so a MOCA relay's output is
-  // unchanged. Fixed reasons, the token's sub and sbx when it verified; never the token itself.
-  const write = auth.verifySandboxToken ? (auth.log ?? ((l: string) => console.log(l))) : undefined;
-  const refused = (call: 'exec' | 'abort', reason: string, claims?: SandboxTokenClaims) =>
-    write?.(
-      JSON.stringify({
-        ts: new Date().toISOString(),
-        outcome: 'refused',
-        call,
-        reason,
-        ...(claims ? { sub: claims.sub, sbx: claims.sbx } : {}),
-      }),
-    );
+  // Audit lines (SBX0 §3.5) only on a relay with sandbox keys, so a MOCA relay's output is
+  // unchanged. Fixed reasons, the token's sub and sbx only when it verified; never the token.
+  const audit = makeAudit(
+    auth.verifySandboxToken ? (auth.log ?? ((l: string) => console.log(l))) : undefined,
+    auth.sandboxAuditCommands === true,
+  );
   const sandbox = makeSandboxCaller(relay, {
     maxInflight: auth.sandboxMaxInflight ?? DEFAULT_SANDBOX_MAX_INFLIGHT,
     leewayS: auth.sandboxLeewayS ?? SANDBOX_CLOCK_LEEWAY_S,
     timers: auth.timers,
-    refused,
+    audit,
   });
 
   const execImpl: SandboxExecServer = {
     // Server-streaming: one ExecRequest in, a stream of ExecEvents out.
     exec: async (call: ServerWritableStream<ExecRequest, ExecEvent>) => {
+      const t0 = Date.now();
       const caller = execCaller(call.metadata, auth);
+      // Already decoded; read before the caller check so a refusal's line can name the request.
+      const req = call.request;
+      const e = req.exec;
       if (caller.kind === 'none') {
-        if (caller.reason) refused('exec', caller.reason);
+        // No claims and no command: nothing about this token verified, so both are its say-so.
+        if (caller.reason)
+          audit.exec(t0, {
+            wrk: req.sandboxId,
+            req_id: e?.reqId ?? 0,
+            outcome: 'refused',
+            reason: caller.reason,
+            out_bytes: 0,
+          });
         failExecStream(call, unauthenticated());
         return;
       }
-      const req = call.request;
-      const e = req.exec;
       if (!e) {
         // The request itself is malformed, so this one IS the caller's fault.
-        failExecStream(call, grpcError(status.INVALID_ARGUMENT, 'ExecRequest missing exec field'));
+        const why = 'ExecRequest missing exec field';
+        if (caller.kind === 'sandbox')
+          audit.exec(t0, {
+            wrk: req.sandboxId,
+            req_id: 0,
+            claims: caller.claims,
+            outcome: 'refused',
+            reason: why,
+            out_bytes: 0,
+          });
+        failExecStream(call, grpcError(status.INVALID_ARGUMENT, why));
         return;
       }
       if (caller.kind === 'sandbox') {
-        await sandbox.exec(call, caller.claims, req.sandboxId, e);
+        await sandbox.exec(call, caller.claims, req.sandboxId, e, t0);
         return;
       }
       await pumpExec(call, relay, req.sandboxId, e);
@@ -257,7 +283,8 @@ function addExecService(server: Server, relay: Relay, auth: ExecAuth): void {
     ) => {
       const caller = execCaller(call.metadata, auth);
       if (caller.kind === 'none') {
-        if (caller.reason) refused('abort', caller.reason);
+        if (caller.reason)
+          audit.abortRefused(call.request.sandboxId, call.request.reqId, caller.reason);
         cb(unauthenticated(), null);
         return;
       }

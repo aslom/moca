@@ -185,20 +185,35 @@ attach side already heartbeats.
 
 ### 3.5 Audit
 
-One JSON line per `Exec` on completion, to stdout:
-`{ts, sub, sbx, wrk, req_id, ms, exit_code, truncated, out_bytes, outcome}`, where `req_id` is the
-caller's (§3.6) and `outcome` is `end | timeout | expired | busy | error | cancelled | refused`.
+One JSON line per `Exec`, to stdout:
+`{audit, ts, sub, sbx, wrk, req_id, ms, outcome, exit_code, truncated, out_bytes, reason, cmd}`.
 
+- `audit` is `"sandbox_exec"`, the marker a log reader selects on.
+- `ts` is when the relay received the Exec. `ms` is the time from then until the line was written.
+- `req_id` is the caller's (§3.6), and `wrk` is the `sandbox_id` the caller asked for.
+- `out_bytes` counts stdout only. `exit_code` and `truncated` appear only when the worker sent
+  `End`, and `reason` only on `refused`.
+
+`outcome` is `end | timeout | expired | busy | error | cancelled | refused`:
+
+- `end`: the worker sent `End`, with any exit code.
 - `timeout`: the worker timed the command out. That arrives as `ExecError{"timeout:<n>"}` (the
   worker's form, byte-identical across transports), not as an exit code.
-- `expired`: the relay cancelled the Exec at its token's expiry (§3.6).
+- `expired`: the relay cancelled the Exec at its token's expiry (§3.6). The line is written when the
+  timer fires, not when the worker lets go, so a worker that never answers still leaves one.
 - `busy`: the sandbox's in-flight cap refused it (§3.6).
+- `error`: any other `ExecError`, or the Exec could not be routed (no live worker, a disconnect).
+- `cancelled`: the client cancelled the call, or aborted the Exec. The line is written at the cancel.
+- `refused`: `UNAUTHENTICATED`, `PERMISSION_DENIED`, `ALREADY_EXISTS` (`reason: "req_id_in_flight"`,
+  §3.6) or `INVALID_ARGUMENT`, with a fixed `reason`.
 
 The lines are written only when the relay has sandbox keys configured, so a MOCA relay's output is
-unchanged. Command text and output are never logged; an
-operator debug flag (`SH_SANDBOX_AUDIT_COMMANDS=1`) adds the command's first 200 bytes. Refusals
-(`UNAUTHENTICATED`, `PERMISSION_DENIED`) are logged with the reason and, when the token parsed, its
-`sub` and `sbx`.
+unchanged. Harness callers' Execs write no line. Command text and output are never logged, and
+neither is the token. An operator debug flag (`SH_SANDBOX_AUDIT_COMMANDS=1`, exactly `1`) adds the
+command's first 200 bytes as `cmd`, cut at a UTF-8 character boundary, and only for a token that
+verified. Every line carries the token's `sub` and `sbx` only when it verified. An `UNAUTHENTICATED`
+line has neither, because an unverified token's claims are the caller's own say-so. A refused
+`Abort` is logged on the same channel with `audit: "sandbox_abort"`, so Exec statistics skip it.
 
 ### 3.6 Sandbox Execs: request ids, expiry and the in-flight cap
 
@@ -217,6 +232,9 @@ Harness callers are unchanged, and the worker is not changed.
   - The mapping is deterministic, so a client that retries its own `req_id` still reaches the
     worker's dedup for its own sandbox. Two sandboxes share a worker id only through a hash
     collision, which is negligible (2^-53 per pair).
+  - A second Exec with a `req_id` the same sandbox already has in flight is refused with
+    `ALREADY_EXISTS`, before routing. The worker would otherwise attach it to the first Exec, and the
+    second Exec's cleanup would drop the first one's `Abort` ownership.
 - **No Exec outlives its token.**
   - The relay checks `exp` only when it accepts an Exec, and the worker allows `timeout_s` up to 2 h
     (`MaxExecTimeoutS`).
@@ -227,6 +245,11 @@ Harness callers are unchanged, and the worker is not changed.
     fingerprint.
   - If the relay dies first, the worker's attach stream drops and the worker kills that stream's
     Execs, so the bound still holds.
+  - The relay then drains the worker's acknowledgement without writing it. Until that arrives, the
+    Exec keeps its in-flight slot and its `Abort` ownership. A worker that never acknowledges (a
+    wedged one) therefore holds the sandbox's slot until its attach stream drops. SBX0 has no drain
+    bound: with the default cap of 2, one wedged Exec halves the sandbox's concurrency until the
+    worker disconnects.
   - The longest single command is therefore one token lifetime (`SH_SANDBOX_TOKEN_TTL_SECONDS`,
     default 15 min). The client side of this rule is §6.5.
 - **An in-flight cap per sandbox.**

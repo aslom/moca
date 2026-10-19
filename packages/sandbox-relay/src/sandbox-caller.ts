@@ -3,7 +3,134 @@ import type { Exec, ExecEvent, ExecRequest } from '@moca/k8s-sandbox';
 import type { SandboxTokenClaims } from '@moca/control-plane';
 import type { Relay, RelayTimers } from './relay.js';
 import { workerReqId } from './sandbox-auth.js';
-import { failExecStream, grpcError, pumpExec, withReqId } from './exec-stream.js';
+import {
+  failExecStream,
+  grpcError,
+  newPumpResult,
+  pumpExec,
+  withReqId,
+  type PumpResult,
+} from './exec-stream.js';
+
+/**
+ * One audit line per sandbox Exec (SBX0 §3.5), on the relay's refusal channel. Who (`sub`, `sbx`,
+ * only from a token that VERIFIED), where (`wrk`, the sandbox_id asked for), which (`req_id`, the
+ * caller's), how long, how it ended and how much stdout. Never the output, never the token, and the
+ * command only as `cmd`, its first 200 bytes, with the operator's SH_SANDBOX_AUDIT_COMMANDS=1.
+ * `audit` is the marker a log reader selects on (deploy/sbx/status.sh).
+ */
+export interface AuditLine {
+  audit: 'sandbox_exec';
+  /** When the relay received the Exec. */
+  ts: string;
+  sub?: string;
+  sbx?: string;
+  wrk: string;
+  req_id: number;
+  ms: number;
+  outcome: AuditOutcome;
+  exit_code?: number;
+  truncated?: boolean;
+  out_bytes: number;
+  reason?: string;
+  cmd?: string;
+}
+
+/**
+ * - `end`: the worker sent End (any exit code);
+ * - `timeout`: the worker timed the command out (ExecError `timeout:<n>`);
+ * - `expired`: the relay cancelled it at its token's exp plus leeway;
+ * - `busy`: the sandbox's in-flight cap refused it;
+ * - `error`: any other ExecError, or routing failed (no live worker, a disconnect);
+ * - `cancelled`: the client cancelled the call, or Aborted it;
+ * - `refused`: UNAUTHENTICATED, PERMISSION_DENIED, ALREADY_EXISTS or INVALID_ARGUMENT, with `reason`.
+ */
+export type AuditOutcome =
+  'end' | 'timeout' | 'expired' | 'busy' | 'error' | 'cancelled' | 'refused';
+
+/** The worker's timeout form, byte-identical across transports (remote-worker session/loop.go). */
+const WORKER_TIMEOUT_RE = /^timeout:\d+$/;
+
+/** The most of a command an audit line carries (SBX0 §3.5). */
+export const AUDIT_COMMAND_BYTES = 200;
+/** The most of a caller-chosen sandbox_id an audit line carries: one request, one bounded line. */
+const AUDIT_WRK_BYTES = 128;
+
+/** The first `max` bytes of `s` in UTF-8, cut back to a character boundary. */
+function utf8Prefix(s: string, max: number): string {
+  const b = Buffer.from(s, 'utf8');
+  if (b.length <= max) return s;
+  let end = max;
+  // Back off continuation bytes (10xxxxxx) so the cut never lands inside a sequence.
+  while (end > 0 && (b[end]! & 0xc0) === 0x80) end--;
+  return b.subarray(0, end).toString('utf8');
+}
+
+/** A command's first 200 bytes, cut on a character boundary. */
+export function commandPreview(command: string): string {
+  return utf8Prefix(command, AUDIT_COMMAND_BYTES);
+}
+
+/** Writes the audit lines. Built only on a relay with sandbox keys; `write` absent writes nothing. */
+export function makeAudit(write: ((line: string) => void) | undefined, withCommands: boolean) {
+  const emit = (o: Record<string, unknown>) => write?.(JSON.stringify(o));
+  return {
+    /**
+     * One Exec's line. `t0` is when the relay received it; `command` is dropped unless the flag.
+     * Pass `claims` and `command` only for a token that verified: an unverified one's are its own.
+     */
+    exec(
+      t0: number,
+      l: Omit<AuditLine, 'audit' | 'ts' | 'ms' | 'cmd' | 'sub' | 'sbx' | 'wrk'> & {
+        wrk: string;
+        claims?: SandboxTokenClaims;
+        command?: string;
+      },
+    ): void {
+      const { claims, command } = l;
+      // A fixed key order (SBX0 §3.5), whatever order the caller built `l` in; absent, never null.
+      emit({
+        audit: 'sandbox_exec',
+        ts: new Date(t0).toISOString(),
+        ...(claims ? { sub: claims.sub, sbx: claims.sbx } : {}),
+        wrk: utf8Prefix(l.wrk, AUDIT_WRK_BYTES),
+        req_id: l.req_id,
+        ms: Math.max(0, Date.now() - t0),
+        outcome: l.outcome,
+        ...(l.exit_code !== undefined ? { exit_code: l.exit_code } : {}),
+        ...(l.truncated !== undefined ? { truncated: l.truncated } : {}),
+        out_bytes: l.out_bytes,
+        ...(l.reason !== undefined ? { reason: l.reason } : {}),
+        ...(withCommands && command !== undefined ? { cmd: commandPreview(command) } : {}),
+      });
+    },
+    /** A refused Abort (not an Exec, so a separate marker that Exec statistics skip). */
+    abortRefused(wrk: string, reqId: number, reason: string, claims?: SandboxTokenClaims): void {
+      emit({
+        audit: 'sandbox_abort',
+        ts: new Date().toISOString(),
+        ...(claims ? { sub: claims.sub, sbx: claims.sbx } : {}),
+        wrk: utf8Prefix(wrk, AUDIT_WRK_BYTES),
+        req_id: reqId,
+        outcome: 'refused',
+        reason,
+      });
+    },
+  };
+}
+export type Audit = ReturnType<typeof makeAudit>;
+
+/** The outcome of an Exec that ran to its end (not expired, not cancelled at the call). */
+function finished(
+  r: PumpResult,
+  aborted: boolean,
+): Pick<AuditLine, 'outcome' | 'exit_code' | 'truncated'> {
+  if (r.cancelled || aborted) return { outcome: 'cancelled' };
+  if (r.end) return { outcome: 'end', exit_code: r.end.exitCode, truncated: r.end.truncated };
+  if (r.execError !== undefined)
+    return { outcome: WORKER_TIMEOUT_RE.test(r.execError) ? 'timeout' : 'error' };
+  return { outcome: 'error' };
+}
 
 /** setTimeout's delay is a signed 32-bit ms count; a longer one fires at once (Node clamps to 1). */
 const MAX_TIMER_MS = 2 ** 31 - 1;
@@ -35,8 +162,8 @@ export interface SandboxCallerOpts {
   /** Seconds past a token's `exp` at which its running Exec is cancelled. */
   leewayS: number;
   timers?: RelayTimers;
-  /** Writes one refusal line (SBX0 §3.5). */
-  refused: (call: 'exec' | 'abort', reason: string, claims?: SandboxTokenClaims) => void;
+  /** Where the audit lines go (SBX0 §3.5). */
+  audit: Audit;
 }
 
 /**
@@ -45,11 +172,12 @@ export interface SandboxCallerOpts {
  * and Abort only of the caller's own in-flight Exec. One per Exec server.
  */
 export function makeSandboxCaller(relay: Relay, opts: SandboxCallerOpts) {
-  const { maxInflight, leewayS, refused } = opts;
+  const { maxInflight, leewayS, audit } = opts;
   // A sandbox caller may abort only an Exec its own sandbox started and that is still in flight:
   // req_ids are not secret, so without this one sandbox could kill another's command. Keyed by the
   // token's sbx and the CALLER's req_id; the entry holds where the Exec actually runs.
-  const owned = new Map<string, { wrk: string; wid: number }>();
+  // `aborted`: the owner's Abort reached it, so however the worker acknowledges, it was cancelled.
+  const owned = new Map<string, { wrk: string; wid: number; aborted?: boolean }>();
   const ownKey = (sbx: string, reqId: number) => `${sbx}\0${reqId}`;
   // Accepted, unfinished sandbox Execs per sbx (SBX0 §3.6).
   const inflight = new Map<string, number>();
@@ -59,7 +187,25 @@ export function makeSandboxCaller(relay: Relay, opts: SandboxCallerOpts) {
     claims: SandboxTokenClaims,
     sandboxId: string,
     e: Exec,
+    t0: number,
   ): Promise<void> {
+    // Exactly one line per Exec, whichever path ends it first.
+    let logged = false;
+    const log = (
+      l: Pick<AuditLine, 'outcome' | 'exit_code' | 'truncated' | 'reason'>,
+      outBytes = 0,
+    ) => {
+      if (logged) return;
+      logged = true;
+      audit.exec(t0, {
+        wrk: sandboxId,
+        req_id: e.reqId,
+        claims,
+        command: e.command,
+        out_bytes: outBytes,
+        ...l,
+      });
+    };
     // Exact equality on both (SBX0 §3.2): never a prefix, so sbx-a cannot reach sbx-ab.
     const denied =
       sandboxId !== claims.wrk
@@ -68,7 +214,7 @@ export function makeSandboxCaller(relay: Relay, opts: SandboxCallerOpts) {
           ? "exec not permitted: workspace_key is not this token's workspace"
           : undefined;
     if (denied) {
-      refused('exec', denied, claims);
+      log({ outcome: 'refused', reason: denied });
       failExecStream(call, grpcError(status.PERMISSION_DENIED, denied));
       return;
     }
@@ -76,6 +222,7 @@ export function makeSandboxCaller(relay: Relay, opts: SandboxCallerOpts) {
     if (owned.has(key)) {
       // Refused here, not left to routeExec's collision: that would name the worker's id, and
       // this Exec's cleanup must never drop the first one's ownership entry.
+      log({ outcome: 'refused', reason: 'req_id_in_flight' });
       failExecStream(
         call,
         grpcError(status.ALREADY_EXISTS, `req_id ${e.reqId} already in flight for this sandbox`),
@@ -84,6 +231,7 @@ export function makeSandboxCaller(relay: Relay, opts: SandboxCallerOpts) {
     }
     const n = inflight.get(claims.sbx) ?? 0;
     if (n >= maxInflight) {
+      log({ outcome: 'busy' });
       failExecStream(
         call,
         grpcError(status.RESOURCE_EXHAUSTED, `sandbox busy: ${n} Execs already in flight`),
@@ -94,10 +242,13 @@ export function makeSandboxCaller(relay: Relay, opts: SandboxCallerOpts) {
     try {
       wid = workerReqId(claims.sbx, e.reqId);
     } catch {
+      log({ outcome: 'refused', reason: 'req_id out of range' });
       failExecStream(call, grpcError(status.INVALID_ARGUMENT, 'req_id out of range'));
       return;
     }
-    const entry = { wrk: sandboxId, wid };
+    const entry: { wrk: string; wid: number; aborted?: boolean } = { wrk: sandboxId, wid };
+    // Read by the expiry and cancel lines before the drain ends, so they carry the bytes so far.
+    const result = newPumpResult();
     // No Exec outlives its token (SBX0 §3.6): at exp + leeway the worker is told to abort and
     // the call ends at once. The handler then drains the worker's acknowledgement without
     // writing it, so the slot and the ownership entry are held until the worker lets go.
@@ -111,6 +262,8 @@ export function makeSandboxCaller(relay: Relay, opts: SandboxCallerOpts) {
         () => {
           if (call.cancelled) return;
           expired = true;
+          // Now, not after the drain: a worker that never acknowledges must still leave a line.
+          log({ outcome: 'expired' }, result.outBytes);
           relay.routeAbort(sandboxId, wid);
           failExecStream(
             call,
@@ -135,9 +288,15 @@ export function makeSandboxCaller(relay: Relay, opts: SandboxCallerOpts) {
             return typeof code === 'number' ? grpcError(code, m) : new Error(m);
           },
           over: () => expired,
+          // Now, for the same reason as expiry.
+          onCancelled: () => log({ outcome: 'cancelled' }, result.outBytes),
+          result,
         },
       );
     } finally {
+      // After the drain; a no-op when expiry or a cancel already wrote this Exec's line. Here, so a
+      // throw out of the pump still leaves one (as `error`: it has no End).
+      log(finished(result, entry.aborted === true), result.outBytes);
       if (disarm) disarm();
       if (owned.get(key) === entry) owned.delete(key);
       const left = (inflight.get(claims.sbx) ?? 1) - 1;
@@ -158,9 +317,10 @@ export function makeSandboxCaller(relay: Relay, opts: SandboxCallerOpts) {
     const entry = owned.get(ownKey(claims.sbx, reqId));
     if (!entry || entry.wrk !== sandboxId) {
       const why = 'abort not permitted: not an in-flight Exec of this sandbox';
-      refused('abort', why, claims);
+      audit.abortRefused(sandboxId, reqId, why, claims);
       return { refusal: grpcError(status.PERMISSION_DENIED, why) };
     }
+    entry.aborted = true;
     return entry;
   }
 

@@ -87,16 +87,25 @@ export const b64u = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('bas
 
 const WorkerClient = makeGenericClientConstructor(SandboxWorkerService, 'SandboxWorker');
 
+/** The frames a fake worker answers one Exec with, each without its req_id. */
+export type Reply = Array<
+  | { chunk: { data: string; stream?: Stream } }
+  | { end: { exitCode: number; truncated?: boolean } }
+  | { error: { message: string } }
+>;
+
 /**
  * A fake worker. `auto`: answers each Exec with a chunk (its workspace key, so each caller's frames
- * are recognisable) and an End after `delayMs`. `hold`: answers only when released, or with an
- * ExecError when aborted (the Go worker's behaviour). `deaf`: never answers anything.
+ * are recognisable) and an End after `delayMs`, or with `reply(exec)` when given. `hold`: answers
+ * only when released, or with an ExecError when aborted (the Go worker's behaviour). `deaf`: never
+ * answers anything.
  */
 export async function worker(
   addr: string,
   sandboxId: string,
   mode: 'auto' | 'hold' | 'deaf' = 'auto',
   delayMs = 0,
+  reply?: (e: Exec) => Reply,
 ) {
   const execs: Exec[] = [];
   const aborts: number[] = [];
@@ -106,6 +115,25 @@ export async function worker(
   const stream = client.attach();
   stream.on('error', () => {});
   const answer = (e: Exec) => {
+    if (reply) {
+      for (const f of reply(e)) {
+        const reqId = e.reqId;
+        if ('chunk' in f)
+          stream.write({
+            chunk: {
+              reqId,
+              data: Buffer.from(f.chunk.data),
+              stream: f.chunk.stream ?? Stream.STREAM_STDOUT,
+            },
+          } as WorkerFrame);
+        else if ('end' in f)
+          stream.write({
+            end: { reqId, exitCode: f.end.exitCode, truncated: f.end.truncated ?? false },
+          } as WorkerFrame);
+        else stream.write({ error: { reqId, message: f.error.message } } as WorkerFrame);
+      }
+      return;
+    }
     stream.write({
       chunk: { reqId: e.reqId, data: Buffer.from(e.workspaceKey), stream: Stream.STREAM_STDOUT },
     } as WorkerFrame);
@@ -177,7 +205,7 @@ export async function relay(env: NodeJS.ProcessEnv = {}, over: Partial<RelayServ
 /** The refusal-log reasons, parsed from the relay's JSON lines. */
 export const reasons = (lines: string[]) =>
   lines.map(
-    (l) => JSON.parse(l) as { outcome: string; reason: string; call: string; sbx?: string },
+    (l) => JSON.parse(l) as { outcome: string; reason: string; audit: string; sbx?: string },
   );
 
 let req = 100;

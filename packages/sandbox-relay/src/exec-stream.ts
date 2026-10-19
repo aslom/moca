@@ -1,5 +1,5 @@
 import { status, type ServerWritableStream } from '@grpc/grpc-js';
-import type { Exec, ExecEvent, ExecRequest } from '@moca/k8s-sandbox';
+import { Stream, type End, type Exec, type ExecEvent, type ExecRequest } from '@moca/k8s-sandbox';
 import type { Relay } from './relay.js';
 
 // The Exec stream primitives every caller kind shares: how a call ends non-OK, and how one Exec is
@@ -66,6 +66,32 @@ export interface PumpOpts {
   mapError?: (err: Error) => Error;
   /** True once the call was already ended (a sandbox token expiring): drain, write nothing. */
   over?: () => boolean;
+  /** Runs when the client cancels the call, at once: the worker may never acknowledge the Abort. */
+  onCancelled?: () => void;
+  /**
+   * Filled in as the Exec runs and returned at the end. Passed in by a caller that must read it
+   * before the drain finishes (a sandbox Exec's expiry line).
+   */
+  result?: PumpResult;
+}
+
+/**
+ * How a pumped Exec went, for its audit line (SBX0 §3.5). Never the output itself.
+ * None of `end`, `execError` and `cancelled` set means routing threw (no live worker, a collision).
+ */
+export interface PumpResult {
+  /** Stdout bytes written to the caller (stderr is not counted). */
+  outBytes: number;
+  /** The worker's End, when it sent one. */
+  end?: End;
+  /** The worker's in-stream ExecError message, when it sent one (it may be empty). */
+  execError?: string;
+  /** The client cancelled the call. */
+  cancelled: boolean;
+}
+
+export function newPumpResult(): PumpResult {
+  return { outBytes: 0, cancelled: false };
 }
 
 /**
@@ -85,7 +111,8 @@ export async function pumpExec(
   sandboxId: string,
   exec: Exec,
   opts: PumpOpts = {},
-): Promise<void> {
+): Promise<PumpResult> {
+  const result = opts.result ?? newPumpResult();
   const toCaller = opts.toCaller ?? ((ev: ExecEvent) => ev);
   const over = opts.over ?? (() => false);
   // Registered synchronously (before the loop's first await) so a
@@ -99,7 +126,9 @@ export async function pumpExec(
     // torn-down call as cancelled, which must not send the worker a second one.
     if (over()) return;
     cancelled = true;
+    result.cancelled = true;
     relay.routeAbort(sandboxId, exec.reqId);
+    opts.onCancelled?.();
   };
   call.on('cancelled', onCancelled);
 
@@ -113,23 +142,27 @@ export async function pumpExec(
     for await (const ev of relay.routeExec(sandboxId, exec)) {
       if (over()) continue;
       call.write(toCaller(ev));
+      if (ev.chunk && ev.chunk.stream !== Stream.STREAM_STDERR)
+        result.outBytes += ev.chunk.data.length;
+      if (ev.end) result.end = ev.end;
       if (ev.error) {
         sawExecError = true;
         execErrorMessage = ev.error.message ?? '';
+        result.execError = execErrorMessage;
       }
     }
-    if (over()) return;
+    if (over()) return result;
     // A failed Exec must not terminate OK (#295). routeExec returns normally after
     // yielding an error event, so ending here would report success for a command that
     // never ran: it would count toward throughput, enter p95, and never be classified
     // as an error by a client that reads only the terminal status.
     if (sawExecError && !cancelled) {
       failExecStream(call, execStreamError(execErrorMessage));
-      return;
+      return result;
     }
     call.end();
   } catch (err) {
-    if (over()) return;
+    if (over()) return result;
     // Reached by every throw out of routeExec -- including `no live worker for sandbox`
     // (an ordinary state: the worker died, or has not attached yet) and the reqId
     // in-flight collision. Codes are left to grpc-js rather than classified here: an
@@ -141,6 +174,7 @@ export async function pumpExec(
   } finally {
     call.removeListener('cancelled', onCancelled);
   }
+  return result;
 }
 
 /** The same event with its req_id replaced, whichever oneof it carries. */

@@ -30,6 +30,9 @@ const NOT_ENV_ON_K8S: Record<string, string> = {
     'SBX0 only: set by overlays/ocp-sbx (the sandbox front door); a MOCA relay has no sandbox callers',
   SH_SANDBOX_MAX_INFLIGHT:
     'SBX0 only: set by overlays/ocp-sbx (the sandbox front door); a MOCA relay has no sandbox callers',
+  // An operator's debug switch, off unless set by hand; no manifest sets it, ocp-sbx included.
+  SH_SANDBOX_AUDIT_COMMANDS:
+    'SBX0 only: an operator debug flag (commands in audit lines), off unless set by hand; no manifest sets it',
 };
 
 describe.skipIf(NO_KUBECTL)('deploy/k8s env parity with deploy/vm/env', () => {
