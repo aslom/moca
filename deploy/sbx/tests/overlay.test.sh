@@ -129,10 +129,10 @@ for k in SH_ALLOWED_SUBJECTS SH_SANDBOX_TEMPLATES SH_SANDBOX_EXEC_ENDPOINT SH_SA
 done
 [[ "$(cp_env SH_SANDBOX_EXEC_CA | jq -r .valueFrom.configMapKeyRef.optional)" == true ]] ||
   fail 'SH_SANDBOX_EXEC_CA must be optional (absent when the exec certificate is issued)'
-[[ "$(jq -c '[.spec.template.spec.volumes[] | select(.secret) | {s: .secret.secretName, k: [.secret.items[]?.key]}]' <<<"$CP")" == '[{"s":"moca-mu1","k":["SH_SESSION_TOKEN_PRIVATE_KEY"]}]' ]] ||
-  fail "the control plane mounts more than its signing key: $(jq -c '[.spec.template.spec.volumes[] | select(.secret)]' <<<"$CP")"
+[[ "$(jq -c '[.spec.template.spec.volumes[] | select(.secret) | {s: .secret.secretName, k: [.secret.items[]?.key]}]' <<<"$CP")" == '[{"s":"moca-mu1","k":["SH_SESSION_TOKEN_PRIVATE_KEY","SH_JANITOR_TOKEN"]}]' ]] ||
+  fail "the control plane mounts more or less than its signing key and the janitor token: $(jq -c '[.spec.template.spec.volumes[] | select(.secret)]' <<<"$CP")"
 [[ "$(jq -r .spec.template.spec.automountServiceAccountToken <<<"$CP")" == false ]] || fail 'the control plane still mounts a service account token'
-pass 'the control plane runs the sandbox profile with only its signing key mounted'
+pass 'the control plane runs the sandbox profile with only its signing key and the janitor token mounted'
 
 # The control plane's own policy admits nothing (the base's supervisor ingress is reset).
 [[ "$(obj NetworkPolicy moca-control-plane | jq -c '.spec.ingress')" == '[]' ]] ||

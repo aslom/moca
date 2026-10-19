@@ -53,6 +53,9 @@ case "$1 $2" in
   kind="$(printf '%s' "$doc" | jq -r '.kind | ascii_downcase')"
   name="$(printf '%s' "$doc" | jq -r .metadata.name)"
   f="$MOCK_STATE/$kind-$name.json"
+  # Every apply's key list (names only), so a test can prove a Secret's keys all ride in each apply:
+  # real server-side apply prunes the keys its field manager omits; this mock merges and would not.
+  printf '%s %s %s\n' "$kind" "$name" "$(printf '%s' "$doc" | jq -r '(.stringData // .data // {}) | keys | join(",")')" >>"$MOCK_STATE/applies.log"
   # A ConfigMap is stored as given: every key it holds is this field manager's.
   [[ "$kind" != configmap ]] || { printf '%s' "$doc" >"$f"; exit 0; }
   # Merge stringData into existing .data (the way real server-side apply keeps foreign keys).
@@ -194,6 +197,12 @@ refusals=(
   'export SBX_TEMPLATES_FILE=$TMP/bad-empty.json => is not a non-empty list'
   'export SBX_TEMPLATES_FILE=$TMP/bad-json.json => is not a non-empty list'
   'export SBX_API_TLS_CERT=$TMP/templates.json => SBX_API_TLS_CERT and SBX_API_TLS_KEY must both'
+  'export SBX_JANITOR_WAIT_MINUTES=x => SBX_JANITOR_WAIT_MINUTES must be a positive whole number of minutes'
+  'export SBX_JANITOR_WAIT_MINUTES=0 => SBX_JANITOR_WAIT_MINUTES must be a positive whole number of minutes'
+  'export SBX_JANITOR_WAIT_MINUTES=15 => SBX_JANITOR_WAIT_MINUTES \(900 s\) must exceed the token lifetime plus the 30 s leeway \(930 s\)'
+  'export SBX_TOKEN_TTL_MINUTES=60 SBX_JANITOR_WAIT_MINUTES=60 => SBX_JANITOR_WAIT_MINUTES \(3600 s\) must exceed the token lifetime plus the 30 s leeway \(3630 s\)'
+  'export SBX_API_CA_FILE=$TMP/nonexistent.crt => SBX_API_CA_FILE must name a readable PEM certificate'
+  'export SBX_API_CA_FILE=$TMP/templates.json => SBX_API_CA_FILE must name a readable PEM certificate'
 )
 for r in "${refusals[@]}"; do
   bad="${r%% => *}" want="${r#* => }"
@@ -327,9 +336,31 @@ grep -qx 'SH_WORKSPACE_IMAGE_MB=2048' "$W/worker.env" || fail 'worker bundle ima
 [[ "$(stat -c %a "$W/worker.env" 2>/dev/null || stat -f %Lp "$W/worker.env")" == 600 ]] || fail 'worker.env is not 0600'
 pass 'writes 0600 worker bundles in the P6.2 format, with the idle derived from the lifetime and the image size'
 
+# 2a. The janitor's token (spec §8.1): in moca-mu1 beside the signing key, in EVERY apply of that
+# Secret (one field manager: an apply that omitted it would prune it), and bundled for the host in
+# its own 0600 file -- never in janitor.env.
+jtok="$(secret_val moca-mu1 SH_JANITOR_TOKEN)"
+[[ "$jtok" =~ ^[0-9a-f]{64}$ ]] || fail 'no 64-hex SH_JANITOR_TOKEN in moca-mu1'
+mu1_applies="$(grep '^secret moca-mu1 ' "$MOCK_STATE/applies.log")"
+[[ -n "$mu1_applies" ]] || fail 'moca-mu1 was never applied'
+! grep -vx 'secret moca-mu1 SH_JANITOR_TOKEN,SH_SESSION_TOKEN_PRIVATE_KEY' <<<"$mu1_applies" ||
+  fail "an apply of moca-mu1 omits a key (server-side apply would prune it): $(sort -u <<<"$mu1_applies")"
+JB="$GEN/janitor"
+mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
+[[ -f "$JB/janitor.env" && -f "$JB/janitor.token" ]] || fail 'no janitor bundle (janitor.env + janitor.token)'
+[[ "$(mode "$JB/janitor.env")" == 600 && "$(mode "$JB/janitor.token")" == 600 && "$(mode "$JB")" == 700 ]] ||
+  fail "janitor bundle modes: dir $(mode "$JB"), env $(mode "$JB/janitor.env"), token $(mode "$JB/janitor.token")"
+[[ "$(cat "$JB/janitor.token")" == "$jtok" && "$(wc -c <"$JB/janitor.token" | tr -d ' ')" == 64 ]] ||
+  fail 'janitor.token is not exactly the Secret value (no newline)'
+[[ "$(cat "$JB/janitor.env")" == $'SBX_API_URL=https://sbx-api.apps.example.invalid\nSBX_JANITOR_AGE=3600' ]] ||
+  fail "janitor.env is not the API URL and the default wait (60 min at a 15 min TTL): $(cat "$JB/janitor.env")"
+! grep -qF "$jtok" "$JB/janitor.env" || fail 'the janitor token is in janitor.env'
+[[ ! -e "$JB/api-ca.crt" ]] || fail 'an API CA was bundled although SBX_API_CA_FILE is unset'
+pass 'generates the janitor token in every moca-mu1 apply, and a 0600 janitor bundle with the token in its own file'
+
 # 3. No token or key value ever reached argv or the log.
 for v in "$(secret_val moca-relay-sandbox-tokens sbx_default)" "$(secret_val moca-relay SH_RELAY_TOKEN)" \
-  "$(secret_val moca-redis REDIS_PASSWORD)" "$priv"; do
+  "$(secret_val moca-redis REDIS_PASSWORD)" "$priv" "$jtok"; do
   ! grep -qF "$v" "$MOCK_LOG" || fail 'a token value appears in kubectl argv'
   ! grep -qF "$v" "$TMP/out" || fail 'a token value appears in the log'
 done
@@ -340,6 +371,8 @@ before="$(state_hash)"
 run_setup true || fail 'second run failed'
 [[ "$before" == "$(state_hash)" ]] || fail 'a re-run changed a Secret value'
 [[ "$(secret_val moca-mu1 SH_SESSION_TOKEN_PRIVATE_KEY)" == "$priv" ]] || fail 'a re-run rotated the signing key'
+[[ "$(secret_val moca-mu1 SH_JANITOR_TOKEN)" == "$jtok" && "$(cat "$GEN/janitor/janitor.token")" == "$jtok" ]] ||
+  fail 'a re-run rotated the janitor token'
 render
 [[ "$(pod_hash moca-control-plane)" == "$cp_hash" ]] || fail 'the settings hash moved on a re-run with the same inputs'
 pass 'a re-run keeps every token, password, key and certificate, and the settings hash'
@@ -416,6 +449,25 @@ run_setup true || fail 'the run back to the defaults failed'
 render
 [[ "$(pod_hash moca-control-plane)" == "$cp_hash" ]] || fail 'the hash did not return with the defaults'
 pass 'SBX_TOKEN_TTL_MINUTES and SBX_RETENTION_DAYS reach sbx-settings in seconds, and move the hash'
+
+# 4d. The janitor's wait (spec §8.1, §8.3): default max(60, TTL + 5) minutes, so the default at the
+# longest token lifetime (60 min) is 65 min, not the refused 60; an explicit one must exceed TTL + 30 s.
+run_setup export SBX_TOKEN_TTL_MINUTES=60 || fail 'the default janitor wait was refused at a 60 min token lifetime'
+grep -qx 'SBX_JANITOR_AGE=3900' "$GEN/janitor/janitor.env" || fail "default wait at TTL 60 is not 65 min: $(cat "$GEN/janitor/janitor.env")"
+run_setup export SBX_TOKEN_TTL_MINUTES=60 SBX_JANITOR_WAIT_MINUTES=61 || fail 'a 61 min wait was refused at a 60 min token lifetime'
+grep -qx 'SBX_JANITOR_AGE=3660' "$GEN/janitor/janitor.env" || fail 'SBX_JANITOR_WAIT_MINUTES=61 is not 3660 s'
+run_setup export SBX_JANITOR_WAIT_MINUTES=120 || fail 'a 120 min wait was refused'
+grep -qx 'SBX_JANITOR_AGE=7200' "$GEN/janitor/janitor.env" || fail 'SBX_JANITOR_WAIT_MINUTES=120 is not 7200 s'
+pass 'the janitor wait defaults to max(60, TTL + 5) min (65 at TTL 60), and an explicit one is written in seconds'
+
+# 4e. An API CA (SBX_API_CA_FILE) for a Route certificate the host does not trust: bundled, then
+# dropped from the bundle when unset again.
+run_setup export SBX_API_CA_FILE="$GEN/attach-ca.crt" || fail 'a run with SBX_API_CA_FILE failed'
+cmp -s "$GEN/attach-ca.crt" "$GEN/janitor/api-ca.crt" || fail 'SBX_API_CA_FILE is not bundled as api-ca.crt'
+[[ "$(mode "$GEN/janitor/api-ca.crt")" == 600 ]] || fail 'api-ca.crt is not 0600'
+run_setup true || fail 'the run without SBX_API_CA_FILE failed'
+[[ ! -e "$GEN/janitor/api-ca.crt" ]] || fail 'a dropped SBX_API_CA_FILE leaves api-ca.crt in the bundle'
+pass 'SBX_API_CA_FILE is bundled as api-ca.crt, and removed when unset'
 
 # 5. Removing a worker revokes exactly it (with an explicit null patch, not apply pruning: the mock
 # merges, as server-side apply keeps keys it did not set).
