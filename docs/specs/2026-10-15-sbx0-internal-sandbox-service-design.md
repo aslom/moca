@@ -418,24 +418,27 @@ persistence follows the existing `base/redis.yaml`.
 
 ### 6.1 Commands
 
-| Command                                                                    | Does                                                                                                                                                                                                                          |
-| -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sbx login`                                                                | Device flow against the sbx control plane (config key `sbxControlPlaneUrl`, or `--control-plane-url`). Auth is cached per URL, so it coexists with a MOCA login                                                               |
-| `sbx templates`                                                            | Lists templates                                                                                                                                                                                                               |
-| `sbx create [--template T] [--name N] [--label K=V]…`                      | Creates a sandbox and prints its id and expiry, with no push and no agent configuration. This is the HTTP-only form of `up` (1b)                                                                                              |
-| `sbx up [--template T] [--name N] [--no-agent-config] [--include-secrets]` | Inside a git repository: reuse the user's live sandbox labelled `project=<repo id>`, or create one. Push the working tree (§6.2). Write `.sbx/sandbox.json` and the agent configuration (§6.3). Print id, template and expiry |
-| `sbx push [--force]`                                                       | Push again. Refuses if the sandbox holds changes not yet pulled, unless `--force`                                                                                                                                             |
-| `sbx pull [--apply] [-o FILE]`                                             | Capture the patch (§6.2). `--apply` runs `git apply --3way` locally, then advances the sandbox's baseline                                                                                                                     |
-| `sbx run [-- CMD…]`                                                        | Runs `CMD`, or the script on stdin, in `/workspace`. Exits with the command's code. 124 means the command timed out (`ExecError{"timeout:<n>"}`), and 125 means the sandbox failed                                            |
-| `sbx put PATH`                                                             | Writes stdin to `PATH` under `/workspace`, creating parent directories                                                                                                                                                        |
-| `sbx ls`, `sbx rm [ID]`                                                    | The user's sandboxes, with state, reason, template and expiry; delete                                                                                                                                                         |
-| `sbx token [ID]`                                                           | Prints a fresh sandbox token                                                                                                                                                                                                  |
-| `sbx env [ID]`                                                             | Prints `export` lines: `SBX_ADDR`, `SBX_SANDBOX_ID` (`wrk`), `SBX_WORKSPACE_KEY` (`wsk`), `SBX_TOKEN_CMD="mocactl sbx token ID"`, and `SBX_CA_FILE` if the endpoint's certificate is self-issued                              |
-| `sbx mcp [--sandbox ID]`                                                   | A stdio MCP server bound to one sandbox (§6.4)                                                                                                                                                                                |
-| `sbx doctor`                                                               | Checks login; that the sandbox is live and its expiry; that the agent config denies every local tool; one `true` Exec and its latency; work not yet pulled                                                                    |
+| Command                                                                    | Does                                                                                                                                                                                                                                                                         |
+| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sbx login`                                                                | Device flow against the sbx control plane (config key `sbxControlPlaneUrl`, or `--control-plane-url`). Auth is cached per URL, so it coexists with a MOCA login                                                                                                              |
+| `sbx logout`                                                               | Revoke and delete the sbx login                                                                                                                                                                                                                                              |
+| `sbx templates`                                                            | Lists templates                                                                                                                                                                                                                                                              |
+| `sbx create [--template T] [--name N] [--label K=V]…`                      | Creates a sandbox and prints its id and expiry, with no push and no agent configuration. This is the HTTP-only form of `up` (1b)                                                                                                                                             |
+| `sbx up [--template T] [--name N] [--no-agent-config] [--include-secrets]` | Inside a git repository: reuse the user's live sandbox labelled `project=<repo id>`, or create one. Push the working tree (§6.2). Write `.sbx/sandbox.json` and the agent configuration (§6.3). Print id, template and expiry                                                |
+| `sbx push [--force]`                                                       | Push again. Refuses if the sandbox holds changes not yet pulled, unless `--force`                                                                                                                                                                                            |
+| `sbx pull [--apply] [-o FILE]`                                             | Capture the patch (§6.2). `--apply` runs `git apply --3way` locally, then advances the sandbox's baseline                                                                                                                                                                    |
+| `sbx run [--timeout S] [-- CMD…]`                                          | Runs `CMD`, or the script on stdin, in `/workspace`. CMD's words are quoted (shell syntax via stdin or `-- sh -c`). Exits with the command's code. 124 means the command timed out or was killed (`ExecError{"timeout:<n>"}`, or a signal), and 125 means the sandbox failed |
+| `sbx put PATH`                                                             | Writes stdin to `PATH` under `/workspace`, creating parent directories                                                                                                                                                                                                       |
+| `sbx ls`                                                                   | The user's sandboxes, with state, reason, template and expiry                                                                                                                                                                                                                |
+| `sbx rm [ID] [--keep-config] [--force]`                                    | Delete a sandbox; for the bound one, also take back the agent configuration `up` added, and `.sbx/` (unless `--keep-config`). Refuses while the sandbox has changes not yet pulled (or when that cannot be checked), unless `--force`                                        |
+| `sbx token [ID]`                                                           | Prints a fresh sandbox token                                                                                                                                                                                                                                                 |
+| `sbx env [ID]`                                                             | Prints `export` lines: `SBX_ADDR`, `SBX_SANDBOX_ID` (`wrk`), `SBX_WORKSPACE_KEY` (`wsk`), `SBX_TOKEN_CMD="mocactl sbx token ID"`, and `SBX_CA_FILE` if the endpoint's certificate is self-issued                                                                             |
+| `sbx mcp [--sandbox ID]`                                                   | A stdio MCP server bound to one sandbox (§6.4)                                                                                                                                                                                                                               |
+| `sbx doctor`                                                               | Checks login; that the sandbox is live and its expiry; that the agent config denies every local tool; one `true` Exec and its latency; work not yet pulled                                                                                                                   |
 
 `ID` defaults to the sandbox in `./.sbx/sandbox.json`, searched upward to the repository root.
-`.sbx/` is added to `.git/info/exclude`, never to `.gitignore`.
+`.sbx/` is added to `.git/info/exclude`, never to `.gitignore`. The control plane is taken from
+`--control-plane-url`, `MOCACTL_SBX_URL`, the binding's `controlPlaneUrl`, then the login's.
 
 ### 6.2 Push and pull
 
@@ -444,16 +447,24 @@ persistence follows the existing `base/redis.yaml`.
   The files are packed as a gzip tar (with no macOS `._*` entries) and sent as one Exec's stdin.
 - **In the sandbox**, that Exec empties `/workspace`, extracts, writes a `.git/info/exclude` for
   common build output (`__pycache__/`, `*.pyc`, `node_modules/`, `.venv/`, `venv/`, `.pytest_cache/`,
-  `.mypy_cache/`, `dist/`, `build/`, `target/`), and commits a baseline with a fixed identity.
+  `.mypy_cache/`, `dist/`, `build/`, `target/`), and commits a baseline with a fixed identity. The
+  baseline is recorded at `refs/sbx/baseline` (not `HEAD`), forcing the pushed list in.
 - **Push chunks at 8 MiB**, half of the 16 MiB gRPC message ceiling (`MAX_EXEC_MESSAGE_BYTES`). A
   larger tree is split into several Execs, each appending to the extraction; the baseline commit
   runs after the last. A tree over a hard cap (`--max-push`, default 256 MiB uncompressed) is
   refused, naming the largest directories.
-- **Pull** runs `git add -A -N . && git diff --binary HEAD` in the sandbox. Output over the worker's
-  8 MiB output cap is refused with a message, never truncated silently.
-- **`pull --apply`**, after a clean local apply, runs `git add -A && git commit` in the sandbox, so
-  the next pull contains only newer changes.
-- **"Changes not yet pulled"** is a non-empty `git status --porcelain` in the sandbox.
+- **Pull** diffs `refs/sbx/baseline` against the workspace's current tree in the sandbox. Output over
+  the worker's 8 MiB output cap is refused with a message, never truncated silently.
+- **`pull --apply`** is a plain apply, else a 3-way dry run in a scratch index, refused on conflict
+  or on uncommitted local edits to touched files. It advances `refs/sbx/baseline` to the pulled
+  tree, so the next pull contains only newer changes.
+- **`pull --apply` refuses a patch that writes `.git`, `.sbx/` or the agent-configuration and
+  local-hook files** (`.mcp.json`, `.claude/`, `opencode.json(c)`, `.opencode/`,
+  `.vscode/tasks.json`, `.vscode/settings.json`, `.husky/`, `.envrc`).
+- **"Changes not yet pulled"** means the tree differs from `refs/sbx/baseline` (a superset of a
+  non-empty porcelain status that also counts the agent's own commits), or the workspace holds files
+  with no baseline.
+- **Each worktree gets its own sandbox** (the project label hashes the origin and the worktree path).
 
 The extraction uses `tar` if the template has it, and falls back to `python3 -m tarfile` otherwise.
 Every curated template ships `tar` and `git` (§8.2).
@@ -466,10 +477,11 @@ Every curated template ships `tar` and `git` (§8.2).
   - `.mcp.json` gets `mcpServers.sandbox = { "command": "mocactl", "args": ["sbx", "mcp"] }`;
   - `.claude/settings.json` gets `permissions.allow` `mcp__sandbox__*`, and `permissions.deny` for
     `Bash`, `Read`, `Edit`, `Write`, `Glob`, `Grep`, `NotebookEdit`, `WebFetch`, `WebSearch`,
-    `Agent`, `Task`, `EnterWorktree`, `ExitWorktree`, `Workflow`.
-- **OpenCode:** `opencode.json` gets `mcp.sandbox = { "type": "local", "command": ["mocactl", "sbx", "mcp"] }`,
-  and `tools` set to `false` for `bash`, `read`, `edit`, `write`, `patch`, `glob`, `grep`, `list`,
-  `lsp`, `webfetch`, `websearch`, `task`.
+    `Agent`, `Task`, `EnterWorktree`, `ExitWorktree`, `Workflow`, and `enabledMcpjsonServers` gets
+    `sandbox`.
+- **OpenCode:** `opencode.json` gets `mcp.sandbox = { "type": "local", "command": ["mocactl", "sbx", "mcp"], "enabled": true }`,
+  and `tools` set to `false` for `bash`, `read`, `edit`, `write`, `patch`, `apply_patch`
+  (`patch`'s newer name), `glob`, `grep`, `list`, `lsp`, `webfetch`, `websearch`, `task`.
 - **`CLAUDE.md` and `AGENTS.md`:** a block between `<!-- sbx:begin -->` and `<!-- sbx:end -->`
   stating that:
   - the code lives in a remote sandbox at `/workspace`;
@@ -506,7 +518,8 @@ state checkable (`doctor`) instead of assumed.
     them with a readable tool error ("sandbox busy: `npm test` has been running for 3m12s; retry
     later"), instead of queueing.
   - Calls from other clients (another terminal's `sbx run`) queue at the worker, up to the relay's
-    per-sandbox cap (§3.6), whose `RESOURCE_EXHAUSTED` is reported the same way.
+    per-sandbox cap (§3.6), whose `RESOURCE_EXHAUSTED` "sandbox busy" is reported as "sandbox busy:
+    another client of this sandbox has Execs in flight; retry later".
   - A template whose worker is saturated by many users returns the worker's `busy: queue full`
     `ExecError` or a memory-budget refusal. Both come back as "template busy; retry later".
   - A terminated sandbox returns "sandbox expired on … / was deleted; run `mocactl sbx up`".
@@ -529,8 +542,10 @@ state checkable (`doctor`) instead of assumed.
   one (SBX0), until a shared transport-neutral tool layer is extracted. A contract test pins this
   package's tool names and input schemas to Pi's, so the two cannot drift silently (§10.4).
 - **Bundle size:** CI records the size of `mocactl.mjs` and fails on growth over a set budget.
-- **Flight recorder:** one JSON line per tool call (`ts, tool, ms, execs, exit`) to
-  `<mocactl state dir>/sbx/<id>.log`. `doctor` summarizes it.
+- **Flight recorder:** one JSON line per tool call (`ts, tool, ms, execs, ok, error?`) to
+  `<mocactl state dir>/sbx/<id>.log`. `ok` is false for any tool error, the command's own non-zero
+  exit included. `error` is set only when the failure was not the command's, and never carries
+  command text or output. `doctor` summarizes it.
 
 ### 6.5 The gRPC client
 
@@ -663,7 +678,8 @@ A systemd timer on the KVM host (default every 15 min) that:
 
 1. reads the live and terminated sandboxes through `GET /v1/janitor/sandboxes` with its token
    (§8.1), keeping only those whose `wrk` is one of this host's template workers;
-2. reclaims the workspace of every sandbox terminated more than the wait ago (default 1 h). It
+2. reclaims the workspace of every sandbox terminated more than the wait ago (default max(60 min,
+   the token lifetime + 5 min)). It
    renames `<workspace root of wrk>/<wsk>` to `.reclaiming-<wsk>-<ts>` (the worker's own
    detach-then-remove pattern, so no key can reach the tree), then removes it;
 3. reclaims an **unknown** directory (one with neither a live nor a terminated record) the same way,
@@ -674,7 +690,8 @@ A systemd timer on the KVM host (default every 15 min) that:
    - This is the same bound as the worker's own idle sweep, which a restarted worker no longer
      applies to the workspaces it stopped tracking;
 4. removes `.reclaiming-*` trees older than 1 h left by crashed workers;
-5. prints one JSON summary line (`ts, examined, removed, unknown, bytes_freed, errors`).
+5. prints one JSON summary line (`ts, examined, removed, unknown, bytes_freed, errors`), or, when it
+   did nothing, one `{"janitor":"skipped","why"}` line.
 
 It does nothing when the control plane is unreachable, and never removes a live sandbox's
 directory.
@@ -695,7 +712,9 @@ can still be using a tree the janitor removes. The worker's own sweep tolerates 
 - Exec p50, p95 and error rate over the last hour, from the relay's audit lines.
 
 Support is **best effort, business hours.** A KVM-host outage ends every sandbox on the host.
-`mocactl` reports it as "template unavailable", and the user guide says so.
+`mocactl` reports the relay's `no live worker for sandbox '<wrk>'` as a sandbox failure: exit 125
+from the CLI, a tool error for the agent. The user guide documents that text as what a template
+outage looks like. A dedicated "template unavailable" text is a later increment.
 
 ## 9. Security
 
@@ -844,7 +863,8 @@ code only and no secrets, and `sbx up` excludes common secret files by default (
 - p50 and p95 per MCP tool and per `sbx run`, from flight recorders (opt-in upload) and relay audit
   lines;
 - Exec error rate;
-- busy-message frequency.
+- busy-message frequency;
+- token mints per agent call (`bash` with no timeout mints one each time).
 
 They are reported after two weeks, and they set the read-latency threshold that later work is held
 to.
