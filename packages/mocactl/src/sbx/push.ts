@@ -179,7 +179,11 @@ function agentConfigWhy(p: string): string | undefined {
   for (let i = 0; i < segs.length; i++) {
     const dir = foldedIn(segs[i]!, AGENT_DIRS);
     if (dir) return dir;
-    if (i === segs.length - 1) return foldedIn(segs[i]!, AGENT_FILES);
+    if (i === segs.length - 1) {
+      // .vscode itself (a patch that makes it a symlink to a directory holding tasks.json).
+      if (folds(segs[i]!).includes('.vscode')) return 'VS Code configuration, as a link';
+      return foldedIn(segs[i]!, AGENT_FILES);
+    }
     if (i === segs.length - 2 && folds(segs[i]!).includes('.vscode')) {
       return foldedIn(segs[i + 1]!, VSCODE_FILES);
     }
@@ -755,7 +759,54 @@ async function patchPaths(root: string, file: string): Promise<string[]> {
     if (m[1]) out.push(m[1]);
     else out.push(t[++i]!, t[++i]!); // a rename: the old path, then the new
   }
-  return out.filter(Boolean);
+  // --numstat names only a rename's or copy's NEW path, so a patch that renames a guarded file
+  // away (deleting it here) would pass unseen: add every source path from the patch's own headers.
+  out.push(...patchSourcePaths(readFileSync(file, 'utf8')));
+  return [...new Set(out.filter(Boolean))];
+}
+
+/** A path as git writes it in a patch header: bare, or C-quoted ("…" with \-escapes and octal). */
+function headerPath(s: string): string {
+  if (!s.startsWith('"')) return s;
+  const bytes: number[] = [];
+  const body = s.slice(1, s.endsWith('"') ? -1 : undefined);
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i]!;
+    if (c !== '\\') {
+      bytes.push(...Buffer.from(c, 'utf8'));
+      continue;
+    }
+    const n = body[++i] ?? '';
+    const oct = /^[0-7]{3}/.exec(body.slice(i));
+    if (oct) {
+      bytes.push(parseInt(oct[0], 8));
+      i += 2;
+    } else {
+      const esc: Record<string, number> = {
+        n: 10,
+        t: 9,
+        r: 13,
+        '"': 34,
+        '\\': 92,
+        a: 7,
+        b: 8,
+        f: 12,
+        v: 11,
+      };
+      bytes.push(esc[n] ?? n.charCodeAt(0));
+    }
+  }
+  return Buffer.from(bytes).toString('utf8');
+}
+
+/** The source paths of a patch's renames and copies, and every `diff --git a/<old>` side. */
+export function patchSourcePaths(patch: string): string[] {
+  const out: string[] = [];
+  for (const line of patch.split('\n')) {
+    const m = /^(?:rename|copy) from (.+)$/.exec(line);
+    if (m) out.push(headerPath(m[1]!));
+  }
+  return out;
 }
 
 /**

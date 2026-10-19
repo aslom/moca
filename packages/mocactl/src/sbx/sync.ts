@@ -341,9 +341,9 @@ export async function cmdUp(
 /**
  * Before `sbx rm` deletes a sandbox (final review I3): undefined when it holds nothing a delete
  * would lose, else the exit code after saying why it was not deleted. Work not yet pulled refuses;
- * so does a check that cannot run (an expired or purged sandbox mints no token, a worker that is
- * down runs no Exec), since silence is not "clean"; a sandbox already deleted has nothing left to
- * lose. `--force` skips this. A login or network
+ * so does a check that cannot run (a worker that is down runs no Exec), since silence is not
+ * "clean". A terminated sandbox (deleted or expired) or a purged one mints no token ever again, so
+ * no command can reach its workspace: nothing a delete could lose. `--force` skips this. A login or network
  * failure keeps its own exit (3 or 4): the delete could not have been made either.
  */
 export async function checkBeforeRm(
@@ -370,9 +370,9 @@ export async function checkBeforeRm(
       if (err.status === 0 || err.code === 'not_enrolled' || TOKEN_CODES.has(err.code)) {
         return failed(c, err);
       }
-      // Already deleted (an earlier rm whose clean-up then failed): deleting it again loses
-      // nothing, and lets that rm finish. An expired or purged one still needs --force.
-      if (err.code === 'sandbox_terminated' && err.reason === 'deleted') return undefined;
+      // Terminated (deleted or expired) or purged: no token is ever minted for it again, so no
+      // command can reach its workspace, and a delete loses nothing it could have pulled.
+      if (err.code === 'sandbox_terminated' || err.code === 'sandbox_not_found') return undefined;
       return cannot(describeError(err));
     }
     return cannot(sandboxFailureText(err));

@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { MAX_STDIN_BYTES } from '@moca/sandbox-client';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -34,6 +34,7 @@ import {
   capturePatch,
   hasUnpulled,
   isAgentConfigPath,
+  patchSourcePaths,
   isBindingPath,
   isGitPath,
   normalizeOrigin,
@@ -1011,6 +1012,7 @@ describe('pull --apply never writes local agent configuration or hooks (final re
       'docs/claude/x.md',
       '.claudex/x',
       'opencode.json5',
+      '.vscode',
       '.vscode/extensions.json',
       '.vscode/launch.json',
       'tasks.json',
@@ -1020,9 +1022,39 @@ describe('pull --apply never writes local agent configuration or hooks (final re
       'AGENTS.md',
     ]) {
       // A bare directory name is matched too (a file or link where the directory goes).
-      const want = ['.claude', '.opencode', '.husky'].includes(p);
+      const want = ['.claude', '.opencode', '.husky', '.vscode'].includes(p);
       expect(isAgentConfigPath(p), p).toBe(want);
     }
+  });
+
+  // --numstat names only a rename's new path: the source is read from the patch's headers.
+  for (const from of [
+    '.claude/settings.json',
+    '.claude/settings.local.json',
+    '.sbx/sandbox.json',
+    '.mcp.json',
+  ]) {
+    it(`refuses a patch that renames ${from} away (final re-review)`, async () => {
+      const r = repo();
+      mkdirSync(join(r, dirname(from)), { recursive: true });
+      writeFileSync(join(r, from), '{"a": 1}\n');
+      const tree = snapshot(r);
+      const index = readFileSync(join(r, '.git/index'));
+      const patch = Buffer.from(
+        `diff --git a/${from} b/moved.json\nsimilarity index 100%\nrename from ${from}\nrename to moved.json\n`,
+      );
+      const err = await applyPatch(r, patch).catch((e: unknown) => e);
+      expect(err, from).toBeInstanceOf(PushError);
+      expect((err as Error).message).toContain(from);
+      expect(snapshot(r)).toEqual(tree);
+      expect(readFileSync(join(r, '.git/index'))).toEqual(index);
+      expect(existsSync(join(r, from))).toBe(true);
+    });
+  }
+
+  it('reads a C-quoted rename source as git writes it', () => {
+    expect(patchSourcePaths('rename from "\\303\\251.claude/x"\n')).toEqual(['é.claude/x']);
+    expect(patchSourcePaths('copy from a b\nrename from "q\\"t"\n')).toEqual(['a b', 'q"t']);
   });
 
   it('still applies a normal source patch', async () => {

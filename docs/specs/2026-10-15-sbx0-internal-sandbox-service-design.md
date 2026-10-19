@@ -426,7 +426,7 @@ persistence follows the existing `base/redis.yaml`.
 | `sbx create [--template T] [--name N] [--label K=V]…`                      | Creates a sandbox and prints its id and expiry, with no push and no agent configuration. This is the HTTP-only form of `up` (1b)                                                                                                                                             |
 | `sbx up [--template T] [--name N] [--no-agent-config] [--include-secrets]` | Inside a git repository: reuse the user's live sandbox labelled `project=<repo id>`, or create one. Push the working tree (§6.2). Write `.sbx/sandbox.json` and the agent configuration (§6.3). Print id, template and expiry                                                |
 | `sbx push [--force]`                                                       | Push again. Refuses if the sandbox holds changes not yet pulled, unless `--force`                                                                                                                                                                                            |
-| `sbx pull [--apply] [-o FILE]`                                             | Capture the patch (§6.2). `--apply` runs `git apply --3way` locally, then advances the sandbox's baseline                                                                                                                                                                    |
+| `sbx pull [--apply] [-o FILE]`                                             | Capture the patch (§6.2). `--apply` applies it locally (plain, else a checked 3-way merge; refused for agent-config files), then advances the sandbox's baseline                                                                                                             |
 | `sbx run [--timeout S] [-- CMD…]`                                          | Runs `CMD`, or the script on stdin, in `/workspace`. CMD's words are quoted (shell syntax via stdin or `-- sh -c`). Exits with the command's code. 124 means the command timed out or was killed (`ExecError{"timeout:<n>"}`, or a signal), and 125 means the sandbox failed |
 | `sbx put PATH`                                                             | Writes stdin to `PATH` under `/workspace`, creating parent directories                                                                                                                                                                                                       |
 | `sbx ls`                                                                   | The user's sandboxes, with state, reason, template and expiry                                                                                                                                                                                                                |
@@ -460,7 +460,9 @@ persistence follows the existing `base/redis.yaml`.
   tree, so the next pull contains only newer changes.
 - **`pull --apply` refuses a patch that writes `.git`, `.sbx/` or the agent-configuration and
   local-hook files** (`.mcp.json`, `.claude/`, `opencode.json(c)`, `.opencode/`,
-  `.vscode/tasks.json`, `.vscode/settings.json`, `.husky/`, `.envrc`).
+  `.vscode/tasks.json`, `.vscode/settings.json`, `.husky/`, `.envrc`, or `.vscode` itself), on either
+  side of a rename or copy, at any depth and under case and Unicode folding. A change to
+  `CLAUDE.md` or `AGENTS.md` outside the `sbx up` block is applied with a warning.
 - **"Changes not yet pulled"** means the tree differs from `refs/sbx/baseline` (a superset of a
   non-empty porcelain status that also counts the agent's own commits), or the workspace holds files
   with no baseline.

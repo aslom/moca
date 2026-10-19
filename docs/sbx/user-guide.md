@@ -182,11 +182,12 @@ have not pulled:
 sbx: the sandbox has changes not yet pulled, so sbx-0f3a9c2e7b1d4a5f6e8c0b2d4a was not deleted: run mocactl sbx pull --apply to keep them, or mocactl sbx rm --force to delete it with them
 ```
 
-When it cannot check (the sandbox has expired, or its template's worker is down), it says so,
-deletes nothing, and needs `--force`:
+An expired sandbox is deleted without the check: no command can reach its files any more, so
+there is nothing left to pull. When the check cannot run for another reason (its template's
+worker is down), `rm` says so, deletes nothing, and needs `--force`:
 
 ```
-sbx: cannot check sbx-0f3a9c2e7b1d4a5f6e8c0b2d4a for changes not yet pulled: sandbox expired; nothing was deleted. Pull them first if you can, or delete it anyway with mocactl sbx rm --force
+sbx: cannot check sbx-0f3a9c2e7b1d4a5f6e8c0b2d4a for changes not yet pulled: sandbox failure: UNKNOWN: no live worker for sandbox 'sbx_default'; nothing was deleted. Pull them first if you can, or delete it anyway with mocactl sbx rm --force
 ```
 
 `mocactl sbx rm --force` deletes without checking. The same check applies to `rm ID` for a sandbox

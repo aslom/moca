@@ -544,13 +544,18 @@ describe('mocactl sbx up and rm: the agent configuration (SBX0 §6.3, plan Revie
     expect(h.err()).toContain('mocactl sbx rm --force');
     expect(deletes(h)).toEqual([]);
     expect(existsSync(join(h.r, '.sbx/sandbox.json'))).toBe(true);
-    // Expired: no token, so no check either.
+    expect(await run(['rm', '--force'])).toBe(0);
+    expect(deletes(h)).toEqual([`/v1/sandboxes/${NEW}`]);
+    expect(existsSync(join(h.r, '.sbx'))).toBe(false);
+  });
+
+  it('rm of an expired sandbox needs no --force: no command can reach its files any more', async () => {
+    const h = harness();
+    expect(await h.run(['up'])).toBe(0);
     h.cp.boxes.set(NEW, sandbox({ id: NEW, state: 'terminated', reason: 'expired' }));
     h.io.errs.length = 0;
-    expect(await h.run(['rm'])).toBe(1);
-    expect(h.err()).toMatch(/cannot check .*: .*expired.*; nothing was deleted/);
-    expect(deletes(h)).toEqual([]);
-    expect(await run(['rm', '--force'])).toBe(0);
+    expect(await h.run(['rm'])).toBe(0);
+    expect(h.err()).not.toContain('cannot check');
     expect(deletes(h)).toEqual([`/v1/sandboxes/${NEW}`]);
     expect(existsSync(join(h.r, '.sbx'))).toBe(false);
   });
@@ -587,10 +592,9 @@ describe('mocactl sbx up and rm: the agent configuration (SBX0 §6.3, plan Revie
     const h = harness();
     expect(await h.run(['up'])).toBe(0);
     h.cp.boxes.delete(NEW); // past retention: the record is gone, so DELETE answers 404
-    // No token, so no unpulled check: refused without --force (final review I3).
-    expect(await h.run(['rm'])).toBe(1);
-    expect(h.err()).toMatch(/cannot check .*no such sandbox.*; nothing was deleted/);
-    expect(await h.run(['rm', '--force'])).toBe(0);
+    // Purged: nothing can reach its workspace, so no check and no --force (final re-review).
+    expect(await h.run(['rm'])).toBe(0);
+    expect(h.err()).not.toContain('cannot check');
     expect(h.err()).toContain(`${NEW} is already gone`);
     for (const f of [...CFG, '.claude', '.sbx']) expect(existsSync(join(h.r, f)), f).toBe(false);
     // Not the bound sandbox: a 404 is still the failure it was.

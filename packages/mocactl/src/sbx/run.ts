@@ -56,7 +56,9 @@ export async function cmdRun(
     return execFailed(c, err);
   }
   try {
-    const cap = x.lifetimeS > 0 ? x.lifetimeS - TOKEN_MARGIN_S : undefined;
+    // A token near the sandbox's end leaves no positive cap: send no timeout, so the exec client
+    // says why ("the sandbox expires in N s; pull your work now") instead of a range error.
+    const cap = x.lifetimeS - TOKEN_MARGIN_S > 0 ? x.lifetimeS - TOKEN_MARGIN_S : undefined;
     let timeoutS = timeout ?? cap;
     if (timeout !== undefined && cap !== undefined && timeout > cap) {
       c.io.err(

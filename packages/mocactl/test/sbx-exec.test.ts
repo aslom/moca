@@ -157,6 +157,23 @@ describe('mocactl sbx run (SBX0 §6.1, §6.5)', () => {
     expect(x.sent[0]).toEqual({ command: 'set -e\nmake\n', stdin: undefined, timeoutS: 30 });
   });
 
+  it('near the sandbox end sends no negative timeout, leaving the exec client to say why (final re-review)', async () => {
+    // A token cut to the sandbox's end: 50 s of life leaves no positive cap (life - 60).
+    const short = { ...TOKEN, token: jwt({ iat: TOKEN_IAT, exp: TOKEN_IAT + 50 }) };
+    const cp = fakeCp({
+      [`POST /v1/sandboxes/${SBX}/token`]: () => ({ status: 200, body: short }),
+    });
+    const { home, env, io } = setup();
+    const x = fakeExec();
+    await sbxMain(['run', '--sandbox', SBX, '--', 'make'], env, io, {
+      home,
+      fetchImpl: cp.fetchImpl,
+      execFactory: x.factory,
+    });
+    expect(x.sent[0]!.timeoutS).toBeUndefined();
+    expect(io.errs.join('\n')).not.toMatch(/positive number of seconds/);
+  });
+
   it('clamps a --timeout over the cap to the cap, saying so on stderr', async () => {
     const { home, env, io } = setup();
     const x = fakeExec();
