@@ -88,6 +88,11 @@ Without `--template`, `up` uses the `default` template; `mocactl sbx templates` 
 and `mocactl sbx up --template <id>` picks one. Run `up` again at any time: it reuses this
 repository's sandbox while it is live.
 
+**Each worktree gets its own sandbox.** A sandbox belongs to one working tree: another clone, or
+another `git worktree` of the same repository, gets a sandbox of its own at its first `up`, so
+two agents in two worktrees never share, or overwrite, one tree. Each counts toward your quota
+of sandboxes ([Limits](#6-limits)): `mocactl sbx rm` the ones you are done with.
+
 **Run your agent** in the repository, as you normally do:
 
 ```bash
@@ -224,7 +229,8 @@ the sandbox's files go with it.
   sandbox and its files are gone: pull before. `mocactl sbx ls` shows each sandbox's expiry, and
   `mocactl sbx doctor` fails its sandbox check in the last 24 hours. A sandbox's lifetime cannot be
   extended; for a fresh one, pull, `mocactl sbx rm`, then `mocactl sbx up`.
-- **3 sandboxes per person** by default, and a total for the whole service.
+- **3 sandboxes per person** by default, and a total for the whole service. Each worktree or clone
+  you run `up` in uses one.
 - **Delete and de-enrollment take effect within one token lifetime plus 30 s** (15 minutes by
   default, so 15.5 minutes). A sandbox token already issued keeps working until it expires. A
   command still running at that point is cancelled.

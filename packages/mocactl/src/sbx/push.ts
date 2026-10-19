@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -259,8 +260,12 @@ export function normalizeOrigin(url: string): string {
 }
 
 /**
- * sha256(the normalized origin URL, else the root path)[:16]: the `project` label `sbx up` finds
- * sandboxes by, the same for every clone of one repository.
+ * sha256(the normalized origin URL and the worktree's real path)[:16]: the `project` label
+ * `sbx up` finds sandboxes by. Each worktree (and each clone) is its own project, so two worktrees
+ * of one repository never share, and silently re-push, one sandbox (final review I2). The path is
+ * the realpath of `git rev-parse --show-toplevel`, so a symlinked or relative path is the same
+ * worktree. A binding written when the label hashed the origin alone still works: `up` prefers the
+ * bound id over the label.
  */
 export async function repoId(root: string): Promise<string> {
   let origin = '';
@@ -269,8 +274,9 @@ export async function repoId(root: string): Promise<string> {
   } catch {
     origin = '';
   }
+  const top = realpathSync(await repoRoot(root));
   return createHash('sha256')
-    .update(origin ? normalizeOrigin(origin) : root)
+    .update(origin ? `${normalizeOrigin(origin)}\n${top}` : top)
     .digest('hex')
     .slice(0, 16);
 }

@@ -4,14 +4,17 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { MAX_STDIN_BYTES } from '@moca/sandbox-client';
@@ -1170,15 +1173,13 @@ describe('the repository and its binding (SBX0 §6.1)', () => {
       'example.invalid/team/other',
     );
     expect(normalizeOrigin('/srv/git/app.git')).toBe('/srv/git/app.git');
+    // One worktree, its origin written two ways: one id.
     const ids = new Set<string>();
-    for (const u of [
-      'https://u:tok@example.invalid/team/app.git',
-      'git@example.invalid:team/app.git',
-    ]) {
-      const r = repo();
-      git(r, 'remote', 'add', 'origin', u);
-      ids.add(await repoId(r));
-    }
+    const r = repo();
+    git(r, 'remote', 'add', 'origin', 'https://u:tok@example.invalid/team/app.git');
+    ids.add(await repoId(r));
+    git(r, 'remote', 'set-url', 'origin', 'git@example.invalid:team/app.git');
+    ids.add(await repoId(r));
     expect(ids.size).toBe(1);
   });
 
@@ -1191,9 +1192,30 @@ describe('the repository and its binding (SBX0 §6.1)', () => {
     expect(withOrigin).toMatch(/^[0-9a-f]{16}$/);
     expect(withOrigin).not.toBe(bare);
     expect(await repoId(r)).toBe(withOrigin);
+    // Another clone, or another worktree, of the same project is another sandbox (final review I2).
     const other = repo();
     git(other, 'remote', 'add', 'origin', 'https://example.invalid/team/app.git');
-    expect(await repoId(other)).toBe(withOrigin); // the same project in another clone
+    expect(await repoId(other)).toMatch(/^[0-9a-f]{16}$/);
+    expect(await repoId(other)).not.toBe(withOrigin);
+  });
+
+  it('hashes the worktree too: two worktrees of one repository, two ids; a symlinked path, one (final review I2)', async () => {
+    const r = repo();
+    git(r, 'remote', 'add', 'origin', 'https://example.invalid/team/app.git');
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'sbx-wt-')));
+    try {
+      const wt = join(base, 'second');
+      git(r, 'worktree', 'add', '-q', '-b', 'second', wt);
+      const a = await repoId(r);
+      const b = await repoId(wt);
+      expect(b).toMatch(/^[0-9a-f]{16}$/);
+      expect(b).not.toBe(a);
+      expect(await repoId(join(wt, 'src'))).toBe(b); // from a subdirectory: the same worktree
+      symlinkSync(wt, join(base, 'link'));
+      expect(await repoId(join(base, 'link'))).toBe(b); // the realpath, not the path typed
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 
   it('finds the repository root from a subdirectory, and refuses outside a repository', async () => {

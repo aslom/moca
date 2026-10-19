@@ -100,6 +100,43 @@ describe('mocactl sbx up (SBX0 §6.1)', () => {
     expect(h.err()).toContain(`reusing ${SBX}`);
   });
 
+  it('gives each worktree of one repository its own sandbox (final review I2)', async () => {
+    const h = harness();
+    git(h.r, 'remote', 'add', 'origin', 'https://example.invalid/team/app.git');
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'sbx-wt-')));
+    try {
+      const wt = join(base, 'second');
+      git(h.r, 'worktree', 'add', '-q', '-b', 'second', wt);
+      expect(await h.run(['up'])).toBe(0);
+      expect(binding(h.r).id).toBe(NEW);
+      expect(await h.run(['up'], { cwd: wt })).toBe(0);
+      const posts = h.cp.posts();
+      expect(posts).toHaveLength(2); // the second up created its own; it did not reuse the first
+      const [p1, p2] = posts.map((p) => (p.body as { labels: { project: string } }).labels.project);
+      expect(p1).not.toBe(p2);
+      expect(binding(wt).id).not.toBe(NEW);
+      expect(h.err()).not.toContain(`reusing ${NEW}`);
+      // The first worktree's sandbox kept its tree: the second push went elsewhere.
+      expect(existsSync(join(h.ws.get(NEW).ws, 'notes.md'))).toBe(true);
+      expect(existsSync(join(h.ws.get(binding(wt).id).ws, 'notes.md'))).toBe(false);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps using a sandbox bound before the worktree joined the label (migration, final review I2)', async () => {
+    // Bound by an older mocactl, whose project label hashed only the origin.
+    const h = harness({ boxes: [sandbox({ id: SBX, labels: { project: 'origin-only-hash' } })] });
+    mkdirSync(join(h.r, '.sbx'));
+    writeFileSync(
+      join(h.r, '.sbx/sandbox.json'),
+      JSON.stringify({ id: SBX, controlPlaneUrl: URL_ }),
+    );
+    expect(await h.run(['up'])).toBe(0);
+    expect(h.cp.posts()).toHaveLength(0);
+    expect(binding(h.r).id).toBe(SBX);
+  });
+
   it('warns and pushes nothing when the reused sandbox holds changes not yet pulled', async () => {
     const h = harness();
     expect(await h.run(['up'])).toBe(0);
