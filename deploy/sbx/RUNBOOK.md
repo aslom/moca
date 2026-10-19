@@ -58,6 +58,20 @@ gitignored).
 7. **Check it** with [status](#8-status-and-the-audit-lines): every worker attached, the janitor
    timer active, then log in as a user and run `mocactl sbx doctor` in a repository.
 
+**Which `mocactl` users install.** No release carries `mocactl sbx` yet, so users install the
+`edge` channel (a build of `main`), as [the user guide](../../docs/sbx/user-guide.md#2-install)
+says:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rossoctl/moca/main/scripts/install-mocactl.sh | MOCACTL_VERSION=edge sh
+mocactl sbx --help    # the first line: usage (the sandbox service, SBX0):
+```
+
+The default channel, the latest release, installs a `mocactl` without `sbx`: its
+`mocactl sbx --help` prints the general `usage:` list, and a bare `mocactl sbx` says
+`unknown command "sbx"`. Once a release that includes `sbx` is out, drop `MOCACTL_VERSION` here and
+in the guide. Cutting that release is the maintainers' call.
+
 The increments' inputs, for an older deployment: 1a had `SBX_CLIENTS` (static tokens; now refused)
 and no sandbox profile; 1b added the control-plane inputs (`SBX_API_HOST`, `SBX_GITHUB_CLIENT_ID`,
 `SBX_ALLOWED_SUBJECTS`, `SBX_TEMPLATES_FILE`, the lifetimes and quotas); 1c adds the janitor

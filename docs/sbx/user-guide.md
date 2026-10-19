@@ -25,20 +25,29 @@ Why this is safer than letting the agent run on your laptop:
 ## 2. Install
 
 You need **Node.js 22 or later**, `git`, and a GitHub account that your operator has enrolled.
-Install `mocactl`, the client:
+Install `mocactl`, the client, from its `edge` channel (a build of `main`, rebuilt on every
+change): no release carries `mocactl sbx` yet, so the default channel, the latest release, would
+install a `mocactl` without it.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/rossoctl/moca/main/scripts/install-mocactl.sh | sh
+curl -fsSL https://raw.githubusercontent.com/rossoctl/moca/main/scripts/install-mocactl.sh | MOCACTL_VERSION=edge sh
 ```
+
+Once a release that includes `sbx` is out, drop `MOCACTL_VERSION`.
 
 It installs `mocactl` into `~/.local/bin`, and prints a line to add to your shell's rc file if that
-directory is not on your `PATH`. Re-running it upgrades. Its closing hint about
-`SH_CONTROL_PLANE_URL` is for MOCA's own server: ignore it here. Check it:
+directory is not on your `PATH`. Re-running it upgrades (with `MOCACTL_VERSION=edge` again, or it
+installs the latest release over your edge build). Its closing hint about `SH_CONTROL_PLANE_URL` is
+for MOCA's own server: ignore it here. Check that `sbx` is there:
 
 ```bash
-mocactl --version
-mocactl sbx --help
+mocactl --version     # edge-<commit>
+mocactl sbx --help    # the first line: usage (the sandbox service, SBX0):
 ```
+
+If `mocactl sbx --help` prints mocactl's general `usage:` list instead, with no `mocactl sbx`
+lines (and a bare `mocactl sbx` says `unknown command "sbx"`), you have a release without `sbx`:
+re-run the install line above, with `MOCACTL_VERSION=edge`.
 
 ## 3. First run
 
