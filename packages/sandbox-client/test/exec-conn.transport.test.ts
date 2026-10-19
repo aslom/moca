@@ -218,9 +218,30 @@ describe('SandboxExecConn (SBX0 §6.5)', () => {
     const { c } = conn(proxy.addr);
     const e = await c.exec('sleep 600', { timeoutS: 600 }).catch((x: unknown) => x);
     expect(e).toBeInstanceOf(ExecMachineryError);
-    expect(e).toMatchObject({ kind: 'machinery' });
+    expect(e).toMatchObject({ kind: 'machinery', mayHaveRun: true }); // final review M2
     expect((e as Error).message).toMatch(/^sandbox failure: /);
     expect(r.seen).toHaveLength(1);
+  });
+
+  it('marks a failure after output as may-have-run, and one before any event as not (final review M2)', async () => {
+    const late = await fakeRelay((call) => {
+      call.write(chunk('partial'));
+      setTimeout(() => fail(status.INTERNAL, 'worker went away')(call, 0), 20);
+    });
+    await expect(conn(late.addr).c.exec('x')).rejects.toMatchObject({ mayHaveRun: true });
+    const ended = await fakeRelay((call) => (call.write(chunk('half')), call.end()));
+    await expect(conn(ended.addr).c.exec('x')).rejects.toMatchObject({ mayHaveRun: true });
+    const early = await fakeRelay(fail(status.UNKNOWN, 'no live worker for sandbox sbx_default'));
+    await expect(conn(early.addr).c.exec('x')).rejects.toMatchObject({ mayHaveRun: false });
+    // A worker ExecError alone (a VM that never booted) did not run the command.
+    const boot = await fakeRelay(execError('vm boot failed'));
+    await expect(conn(boot.addr).c.exec('x')).rejects.toMatchObject({ mayHaveRun: false });
+    // One after output did.
+    const crash = await fakeRelay((call, n) => {
+      call.write(chunk('partial'));
+      execError('worker crashed')(call, n);
+    });
+    await expect(conn(crash.addr).c.exec('x')).rejects.toMatchObject({ mayHaveRun: true });
   });
 
   it('reports an in-stream ExecError as a machinery failure', async () => {

@@ -39,12 +39,19 @@ export interface ExecResult {
  */
 export type ExecFailureKind = 'machinery' | 'busy' | 'template_busy' | 'token_expired' | 'expiring';
 
-/** The machinery failed: NOT the command's outcome. `kind` says how (see `ExecFailureKind`). */
+/**
+ * The machinery failed: NOT the command's outcome. `kind` says how (see `ExecFailureKind`).
+ * `mayHaveRun` is set when the failure came after the command may have started: output had
+ * arrived, or the connection was lost (UNAVAILABLE, the client's backstop, a stream ended without
+ * its End) after the Exec went out. A refusal, or a worker error before any output (a VM that did
+ * not boot, no live worker), leaves it false.
+ */
 export class ExecMachineryError extends Error {
   constructor(
     message: string,
     readonly grpcCode?: number,
     readonly kind: ExecFailureKind = 'machinery',
+    readonly mayHaveRun = false,
   ) {
     super(message);
     this.name = 'ExecMachineryError';
@@ -346,6 +353,8 @@ export class SandboxExecConn {
       const out: Buffer[] = [];
       const err: Buffer[] = [];
       let started = false;
+      /** A chunk arrived: the command was running (final review M2). */
+      let output = false;
       let aborted = false;
       let end: { exitCode: number; truncated: boolean } | undefined;
       let execError: string | undefined;
@@ -377,11 +386,17 @@ export class SandboxExecConn {
       const workerFailure = (message: string, code?: number) =>
         TEMPLATE_BUSY.test(message)
           ? new ExecMachineryError(`template busy: ${message}`, code, 'template_busy')
-          : new ExecMachineryError(`sandbox failure: ${message || 'exec failed'}`, code);
+          : new ExecMachineryError(
+              `sandbox failure: ${message || 'exec failed'}`,
+              code,
+              'machinery',
+              output,
+            );
 
       call.on('data', (ev: ExecEvent) => {
         started = true;
         if (ev.chunk) {
+          output = true;
           (ev.chunk.stream === Stream.STREAM_STDERR ? err : out).push(Buffer.from(ev.chunk.data));
         } else if (ev.end) {
           end = { exitCode: ev.end.exitCode, truncated: ev.end.truncated };
@@ -425,6 +440,8 @@ export class SandboxExecConn {
               `sandbox failure: no answer within ${backstopS}s, the client-side backstop deadline ` +
                 `(timeout_s ${timeoutS} + ${backstopS - timeoutS}s): ${details}`,
               e.code,
+              'machinery',
+              true, // it went out, and may be running still
             ),
           );
         }
@@ -433,6 +450,8 @@ export class SandboxExecConn {
           new ExecMachineryError(
             `sandbox failure: ${status[e.code] ?? e.code}: ${details}`,
             e.code,
+            'machinery',
+            output || e.code === status.UNAVAILABLE, // UNAVAILABLE: the connection was lost
           ),
         );
       });
@@ -444,7 +463,12 @@ export class SandboxExecConn {
         if (outcome) return resolve(outcome);
         if (execError !== undefined) return reject(workerFailure(execError));
         reject(
-          new ExecMachineryError('sandbox failure: the exec stream ended without an End event'),
+          new ExecMachineryError(
+            'sandbox failure: the exec stream ended without an End event',
+            undefined,
+            'machinery',
+            true,
+          ),
         );
       });
     });

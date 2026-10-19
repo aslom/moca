@@ -65,9 +65,11 @@ export const MCP_INSTRUCTIONS = instructionsFor(WORKSPACE);
 export const SANDBOX_BUSY_TEXT =
   'sandbox busy: another client of this sandbox has Execs in flight; retry later';
 export const TEMPLATE_BUSY_TEXT = 'template busy; retry later';
+/** What a failure after the command started adds: it may have changed files (final review M2). */
+const MAY_HAVE_RUN = 'the command may have partly run';
 export const TOKEN_EXPIRED_TEXT =
   'the sandbox token expired during the command, so the relay cancelled it; this is not your ' +
-  "command's output, and the command may have partly run. Retry it, split into shorter steps " +
+  `command's output, and ${MAY_HAVE_RUN}. Retry it, split into shorter steps ` +
   'if it is long.';
 const CANCELLED = 'cancelled by the client';
 const UP = 'run `mocactl sbx up` for a new one';
@@ -115,7 +117,8 @@ export function execFailureText(
       default: {
         const what =
           o.audience === 'cli' ? 'sandbox failure' : "sandbox failure, not your command's output";
-        return `${what}: ${err.message.replace(/^sandbox failure: /, '')}`;
+        const ran = err.mayHaveRun ? `; ${MAY_HAVE_RUN}` : '';
+        return `${what}: ${err.message.replace(/^sandbox failure: /, '')}${ran}`;
       }
     }
   }

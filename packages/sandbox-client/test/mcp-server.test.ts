@@ -9,6 +9,7 @@ import {
 } from '../src/exec-conn.js';
 import {
   MCP_INSTRUCTIONS,
+  TOKEN_EXPIRED_TEXT,
   createSandboxMcpServer,
   execFailureText,
   type CallRecord,
@@ -507,6 +508,26 @@ describe('execFailureText: one mapping for the MCP server and mocactl', () => {
     expect(execFailureText(busy, { audience: 'cli' })).toBe(execFailureText(busy));
     const refused = new ExecRefusedError('workspace not owned by this sandbox', 7);
     expect(execFailureText(refused, { audience: 'cli' })).toBe(execFailureText(refused));
+  });
+
+  it('says a machinery failure after the command started may have partly run, to both audiences (final review M2)', () => {
+    const cut = new ExecMachineryError(
+      'sandbox failure: UNAVAILABLE: Connection dropped',
+      14,
+      'machinery',
+      true,
+    );
+    expect(execFailureText(cut)).toBe(
+      "sandbox failure, not your command's output: UNAVAILABLE: Connection dropped; " +
+        'the command may have partly run',
+    );
+    expect(execFailureText(cut, { audience: 'cli' })).toBe(
+      'sandbox failure: UNAVAILABLE: Connection dropped; the command may have partly run',
+    );
+    expect(TOKEN_EXPIRED_TEXT).toContain('the command may have partly run');
+    // Before it started: no such clause.
+    const early = new ExecMachineryError('sandbox failure: vm boot failed', 13);
+    expect(execFailureText(early)).not.toContain('may have partly run');
   });
 
   it('is undefined for an error that is not an Exec failure', () => {

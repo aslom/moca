@@ -243,6 +243,19 @@ describe('mocactl sbx run (SBX0 §6.1, §6.5)', () => {
     );
     expect(full.code).toBe(125);
     expect(full.err).toContain(TEMPLATE_BUSY_TEXT);
+    // Cut mid-command: the CLI says it may have partly run (final review M2).
+    const cut = await run(
+      new ExecMachineryError(
+        'sandbox failure: UNAVAILABLE: Connection dropped',
+        14,
+        'machinery',
+        true,
+      ),
+    );
+    expect(cut.code).toBe(125);
+    expect(cut.err).toBe(
+      'sbx: sandbox failure: UNAVAILABLE: Connection dropped; the command may have partly run',
+    );
     const expired = await run(
       new ExecMachineryError('sandbox token expired during the Exec', 4, 'token_expired'),
     );
