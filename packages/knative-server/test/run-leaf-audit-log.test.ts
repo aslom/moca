@@ -121,4 +121,25 @@ describe('POST /runs — audit log mirror', () => {
     expect(starts).toHaveLength(1);
     expect(finals).toHaveLength(1);
   });
+
+  it('still emits run_finalized when runLeaf throws, so an operator grep is never left unterminated', async () => {
+    runLeaf.mockRejectedValue(new Error('boom'));
+    const r = await post({
+      sessionId: 'sid-err',
+      item: { item_id: 'i1', file: 'f', pattern: 'p' },
+    });
+    // route().catch(internalError) answers 500; the lifecycle still pairs.
+    expect(r.status).toBe(500);
+    const audits = auditLines().filter(
+      (l) => l.decision === 'run_started' || l.decision === 'run_finalized',
+    );
+    expect(audits).toHaveLength(2);
+    expect(audits[0]).toMatchObject({ decision: 'run_started', sessionId: 'sid-err' });
+    expect(audits[1]).toMatchObject({
+      decision: 'run_finalized',
+      sessionId: 'sid-err',
+      status: 'failed',
+      reason: 'error',
+    });
+  });
 });

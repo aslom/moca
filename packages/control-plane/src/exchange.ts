@@ -347,9 +347,11 @@ export async function exchangeCredential(
     decision: (usedOperatorFallback ? 'operator_fallback_used' : 'credential_issued') as
       'credential_issued' | 'operator_fallback_used',
   };
-  // Inline fallback (not resolveAuditLog): avoids a handlers.ts <-> exchange.ts cycle.
-  (deps.log ?? defaultAuditLog)({ event: 'audit', ...exchangeEntry });
+  // Emit after the await: this index.audit is not best-effort (exchange answers 503 on XADD
+  // failure and no credential is returned), so stdout must agree with the server's view.
+  // Inline fallback (not resolveAuditLog) avoids a handlers.ts <-> exchange.ts cycle.
   await deps.index.audit(exchangeEntry);
+  (deps.log ?? defaultAuditLog)({ event: 'audit', ...exchangeEntry });
 
   if (rec.configRef) {
     // Best effort: a bundle in daily use must not age out, but a failed refresh never fails a turn.

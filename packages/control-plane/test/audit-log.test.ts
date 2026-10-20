@@ -37,23 +37,24 @@ const ALLOWED_KEYS = new Set([
 ]);
 
 // Field names that must NEVER appear as keys regardless of their values.
+// Lowercased because the test compares against key.toLowerCase() below.
 const FORBIDDEN_KEYS = [
   'token',
   'secret',
   'password',
-  'apiKey',
+  'apikey',
   'bearer',
   'authorization',
-  'credentialValue',
+  'credentialvalue',
   'prompt',
-  'promptText',
+  'prompttext',
   'body',
   'contents',
   'response',
   'text',
   'output',
   'email',
-  'displayName',
+  'displayname',
   'label',
 ];
 
@@ -133,24 +134,16 @@ describe('audit-log module', () => {
 });
 
 describe('data-handling policy across the auditing surface', () => {
+  // Refresh-store mirror (RedisRefreshStore) is covered in refresh-redis.test.ts, which runs
+  // against a real Redis and passes a capturing `log` as the 4th constructor arg. The three
+  // tests here exercise the control-plane handler seams only.
+
   it('no planted token appears in any emitted line (#359)', async () => {
     const deps = makeDeps();
     await seedCredential(deps, alice.sub, 'my-anthropic', { secret: { token: PLANTED_TOKEN } });
     await driveAuditingRoutes(deps);
 
-    // Also stress the refresh path, which writes via a different seam.
-    const r = await deps.refresh.issue({
-      subject: alice.sub,
-      displayName: PLANTED_DISPLAY,
-      label: 'laptop',
-      nowMs: Date.now(),
-    });
-    await deps.refresh.rotate(r.refreshToken, Date.now()).catch(() => {});
-    await deps.refresh.revoke(r.refreshToken, Date.now()).catch(() => {});
-
     // Sanity floor: a regression that stops emission must not silently shrink the array.
-    // (Refresh mirror lives on RedisRefreshStore; tests use the in-memory store, so only the
-    // control-plane handler decisions are reachable here.)
     const decisions = new Set(deps.logLines.map((l) => l.decision));
     expect(decisions.has('session_created'), 'session_created should emit').toBe(true);
 
@@ -167,15 +160,6 @@ describe('data-handling policy across the auditing surface', () => {
     await seedCredential(deps, alice.sub);
     await driveAuditingRoutes(deps);
 
-    // Refresh path with planted display name — Lua writes it to Redis; our mirror must not.
-    const r = await deps.refresh.issue({
-      subject: alice.sub,
-      displayName: PLANTED_DISPLAY,
-      label: 'laptop',
-      nowMs: Date.now(),
-    });
-    await deps.refresh.rotate(r.refreshToken, Date.now()).catch(() => {});
-
     expect(deps.logLines.length).toBeGreaterThan(0);
     for (const line of deps.logLines) {
       const text = lineToSearchable(line);
@@ -189,13 +173,6 @@ describe('data-handling policy across the auditing surface', () => {
     const deps = makeDeps();
     await seedCredential(deps, alice.sub);
     await driveAuditingRoutes(deps);
-    const r = await deps.refresh.issue({
-      subject: alice.sub,
-      displayName: 'label',
-      label: 'laptop',
-      nowMs: Date.now(),
-    });
-    await deps.refresh.rotate(r.refreshToken, Date.now()).catch(() => {});
 
     expect(deps.logLines.length).toBeGreaterThan(0);
     for (const line of deps.logLines) {
@@ -214,32 +191,31 @@ describe('data-handling policy across the auditing surface', () => {
 });
 
 describe('concurrent-subject attribution', () => {
-  it('two sessions created in parallel attribute to the right subjects', async () => {
+  it('two sessions created in parallel attribute each subject to its own sessionId', async () => {
     const deps = makeDeps();
     await seedCredential(deps, alice.sub);
     await seedCredential(deps, bob.sub);
-    deps.identity = {
-      ...(deps.identity as any),
-    };
 
-    // Both call createSession at once with their own principals. Nothing in the handler holds
-    // request-scoped state across subjects, so lines must attribute cleanly.
+    // Each call gets its own sessionId; the test asserts the emitted lines pair each subject
+    // with the sessionId its own createSession response returned (not just that two distinct
+    // subjects showed up).
     let n = 0;
     deps.newId = () => `sid-${++n}`;
-    await Promise.all([
+    const [aliceRes, bobRes] = await Promise.all([
       HANDLERS.createSession!(
         ctx({ principal: alice, body: { credential: 'my-anthropic' } }),
         deps,
       ),
       HANDLERS.createSession!(ctx({ principal: bob, body: { credential: 'my-anthropic' } }), deps),
     ]);
+    const aliceSid = (aliceRes.body as { sessionId: string }).sessionId;
+    const bobSid = (bobRes.body as { sessionId: string }).sessionId;
+    expect(aliceSid).not.toBe(bobSid);
 
     const sessionCreated = deps.logLines.filter((l) => l.decision === 'session_created');
     expect(sessionCreated).toHaveLength(2);
     const bySubject = new Map(sessionCreated.map((l) => [l.subject, l]));
-    expect(bySubject.get(alice.sub)).toBeDefined();
-    expect(bySubject.get(bob.sub)).toBeDefined();
-    expect(bySubject.get(alice.sub)!.subject).toBe(alice.sub);
-    expect(bySubject.get(bob.sub)!.subject).toBe(bob.sub);
+    expect(bySubject.get(alice.sub)?.sessionId).toBe(aliceSid);
+    expect(bySubject.get(bob.sub)?.sessionId).toBe(bobSid);
   });
 });

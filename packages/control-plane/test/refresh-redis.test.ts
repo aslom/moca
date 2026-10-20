@@ -26,9 +26,9 @@ const stream = async (key: string) =>
   ((await client.xRange(key, '-', '+')) ?? []).map((e) => e.message as Record<string, string>);
 
 /** A unique prefix per store, so the suite shares a Redis with anything else without colliding. */
-function isolated(policy: RefreshPolicy) {
+function isolated(policy: RefreshPolicy, log?: (line: Record<string, unknown>) => void) {
   const prefix = `test:refresh:${process.pid}:${randomUUID()}:`;
-  const store = new RedisRefreshStore(redis, policy, prefix);
+  const store = new RedisRefreshStore(redis, policy, prefix, log);
   return {
     prefix,
     store,
@@ -248,6 +248,93 @@ describe('RedisRefreshStore, Redis-only behaviour', () => {
     } finally {
       const keys = await client.keys(`${prefix}*`);
       if (keys.length) await client.del(keys);
+    }
+  });
+});
+
+describe('RedisRefreshStore audit-log mirror', () => {
+  it('emits one line per state change, pairing decision to the Lua XADD', async () => {
+    const lines: Array<Record<string, unknown>> = [];
+    const h = isolated(POLICY, (l) => lines.push(l));
+    try {
+      // issue: emits refresh_issued with subject + family.
+      const i = await h.store.issue({
+        subject: 'github:1',
+        displayName: 'Ada',
+        label: 'laptop',
+        nowMs: T0,
+      });
+      // rotate (ok): emits refresh_rotated with subject + family + graceReplay=false.
+      await h.store.rotate(i.refreshToken, T0 + 1000);
+      // Rotating the ORIGINAL token again detects reuse: emits refresh_reuse_detected.
+      await h.store.rotate(i.refreshToken, T0 + 2000);
+      // Unknown token: emits refresh_refused with reason=unknown.
+      await h.store.rotate('mrt_' + 'A'.repeat(43), T0 + 3000);
+      // Revoke after reuse detected is a no-op (already revoked); emits nothing.
+
+      const decisions = lines.map((l) => l.decision);
+      expect(decisions).toEqual([
+        'refresh_issued',
+        'refresh_rotated',
+        'refresh_reuse_detected',
+        'refresh_refused',
+      ]);
+      expect(lines[0]).toMatchObject({ event: 'audit', subject: 'github:1', family: i.family });
+      expect(lines[1]).toMatchObject({
+        event: 'audit',
+        subject: 'github:1',
+        family: i.family,
+        graceReplay: false,
+      });
+      expect(lines[2]).toMatchObject({ family: i.family, reason: 'reuse' });
+      expect(lines[3]).toMatchObject({ reason: 'unknown' });
+    } finally {
+      await h.done();
+    }
+  });
+
+  it('emits refresh_revoked only on an actual revocation; already-revoked and gone are silent', async () => {
+    const lines: Array<Record<string, unknown>> = [];
+    const h = isolated(POLICY, (l) => lines.push(l));
+    try {
+      const i = await h.store.issue({
+        subject: 'github:1',
+        displayName: 'Ada',
+        label: 'laptop',
+        nowMs: T0,
+      });
+      lines.length = 0;
+      await h.store.revoke(i.refreshToken, T0 + 1000);
+      await h.store.revoke(i.refreshToken, T0 + 2000); // already revoked
+      expect(lines.map((l) => l.decision)).toEqual(['refresh_revoked']);
+      expect(lines[0]).toMatchObject({ family: i.family, reason: 'logout' });
+    } finally {
+      await h.done();
+    }
+  });
+
+  it('never emits a token value, token hash, displayName, or label (identifiers only)', async () => {
+    const lines: Array<Record<string, unknown>> = [];
+    const h = isolated(POLICY, (l) => lines.push(l));
+    try {
+      const i = await h.store.issue({
+        subject: 'github:1',
+        displayName: 'PLANTED-DISPLAY',
+        label: 'PLANTED-LABEL',
+        nowMs: T0,
+      });
+      await h.store.rotate(i.refreshToken, T0 + 1000);
+      await h.store.revoke(i.refreshToken, T0 + 2000);
+
+      for (const line of lines) {
+        const text = JSON.stringify(line);
+        expect(text).not.toContain('PLANTED-DISPLAY');
+        expect(text).not.toContain('PLANTED-LABEL');
+        expect(text).not.toContain(i.refreshToken);
+        expect(text).not.toContain(hashRefreshToken(i.refreshToken));
+      }
+    } finally {
+      await h.done();
     }
   });
 });

@@ -1027,41 +1027,55 @@ async function handleRunLeafParsed(
     kind: body.kind,
   });
 
-  // Spec §4.3: on pool saturation the sync path bounded-waits with backoff, then 503 Retry-After.
-  // selectPoolSandbox throws before taking any lease or doing agent work, so re-running runLeaf on a
-  // "saturated" result only re-attempts acquisition — the preceding steps (validate, model resolve,
-  // Redis verdict fast-path) are idempotent. The async path is untouched (queue drains as leases free).
-  const cfg = saturationWaitConfig();
-  const deadline = Date.now() + cfg.waitMs;
-  let delay = cfg.backoffMs;
-  let result = await runLeaf(body, buildConfig(auth));
-  while (isSaturated(result) && Date.now() < deadline) {
-    await sleep(Math.min(delay, Math.max(0, deadline - Date.now())));
-    delay = Math.min(delay * 2, cfg.maxBackoffMs);
-    result = await runLeaf(body, buildConfig(auth));
-  }
+  // Finally-with-flag so every run_started pairs with exactly one run_finalized, including on
+  // thrown runLeaf / writeResult errors. Without this, a Redis-down writeResult (the exact case
+  // the mirror is for) leaves the operator grepping for an unterminated run.
+  let finalized = false;
+  const finalize = (extra: Record<string, unknown>) => {
+    if (finalized) return;
+    finalized = true;
+    emitLifecycle('run_finalized', extra);
+  };
+  try {
+    // Spec §4.3: on pool saturation the sync path bounded-waits with backoff, then 503 Retry-After.
+    // selectPoolSandbox throws before taking any lease or doing agent work, so re-running runLeaf on a
+    // "saturated" result only re-attempts acquisition — the preceding steps (validate, model resolve,
+    // Redis verdict fast-path) are idempotent. The async path is untouched (queue drains as leases free).
+    const cfg = saturationWaitConfig();
+    const deadline = Date.now() + cfg.waitMs;
+    let delay = cfg.backoffMs;
+    let result = await runLeaf(body, buildConfig(auth));
+    while (isSaturated(result) && Date.now() < deadline) {
+      await sleep(Math.min(delay, Math.max(0, deadline - Date.now())));
+      delay = Math.min(delay * 2, cfg.maxBackoffMs);
+      result = await runLeaf(body, buildConfig(auth));
+    }
 
-  if (isSaturated(result)) {
-    // Still saturated after the budget: tell the client to retry. Do NOT persist a result record —
-    // a 503 is "retry", not a terminal failure, and /runs/status must not report it as one.
-    emitLifecycle('run_finalized', { status: 'failed', reason: 'saturated' });
-    res
-      .writeHead(503, { ...JSON_HEADERS, 'Retry-After': String(cfg.retryAfterS) })
-      .end(JSON.stringify({ status: 'failed', reason: 'saturated' }));
-    return;
-  }
+    if (isSaturated(result)) {
+      // Still saturated after the budget: tell the client to retry. Do NOT persist a result record —
+      // a 503 is "retry", not a terminal failure, and /runs/status must not report it as one.
+      finalize({ status: 'failed', reason: 'saturated' });
+      res
+        .writeHead(503, { ...JSON_HEADERS, 'Retry-After': String(cfg.retryAfterS) })
+        .end(JSON.stringify({ status: 'failed', reason: 'saturated' }));
+      return;
+    }
 
-  await writeResult(
-    getResultStore(),
-    leafSessionId(body),
-    toResultRecord(result, body.sessionId, new Date().toISOString()),
-    RESULT_TTL_SECONDS,
-  );
-  emitLifecycle('run_finalized', {
-    status: result.status,
-    ...('reason' in result && result.reason ? { reason: result.reason } : {}),
-  });
-  res.writeHead(200, JSON_HEADERS).end(JSON.stringify(result));
+    await writeResult(
+      getResultStore(),
+      leafSessionId(body),
+      toResultRecord(result, body.sessionId, new Date().toISOString()),
+      RESULT_TTL_SECONDS,
+    );
+    finalize({
+      status: result.status,
+      ...('reason' in result && result.reason ? { reason: result.reason } : {}),
+    });
+    res.writeHead(200, JSON_HEADERS).end(JSON.stringify(result));
+  } catch (err) {
+    finalize({ status: 'failed', reason: 'error' });
+    throw err;
+  }
 }
 
 async function handleLeafStatus(url: URL, res: ServerResponse): Promise<void> {
