@@ -88,7 +88,11 @@ func poolFor(t *testing.T, lc Launcher) Pool {
 // would otherwise still be dirty when the VM is destroyed); on the Cloud Hypervisor arm
 // the write is already durable via virtio-fs's host-filesystem authority, so this gate is
 // expected to pass there structurally rather than by catching anything (see
-// TestCloudHypervisorRestoresPausedAndRunsOneCommand's comment).
+// TestCloudHypervisorRestoresPausedAndRunsOneCommand's comment). Exec N deliberately ends
+// in its own `exit 0` — the shape of every client put — because a wrapper whose command
+// can terminate the shell before its sync passes this gate with a plain write and lost
+// every real put (caught live 2026-10-20; the non-KVM unit gate for the same regression
+// is TestWrapCommandSyncSurvivesCommandExit).
 func TestGateWriteDurability(t *testing.T) {
 	requireKVM(t)
 	lc := launcherForArm(t)
@@ -96,7 +100,7 @@ func TestGateWriteDurability(t *testing.T) {
 	ctx := context.Background()
 	const key = "gate-durability"
 
-	if _, err := p.Exec(ctx, key, Exec{Command: "echo n1 >> log.txt", TimeoutS: 30}, &capturingSink{}); err != nil {
+	if _, err := p.Exec(ctx, key, Exec{Command: "echo n1 >> log.txt; exit 0", TimeoutS: 30}, &capturingSink{}); err != nil {
 		t.Fatalf("Exec N: %v", err)
 	}
 	var out capturingSink

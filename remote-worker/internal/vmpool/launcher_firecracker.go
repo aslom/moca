@@ -937,8 +937,16 @@ func (v *firecrackerVM) Resume(ctx context.Context) error {
 // write in Exec N is simply absent in Exec N+1 — spec §8's write-durability gate is
 // what catches its omission. `(exit $__fc_rc)` preserves the command's own exit
 // status: sync must not be able to change what the worker reports.
+//
+// The command runs in a SUBSHELL, not a brace group, so that its own `exit` ends the
+// subshell instead of this whole script — a brace group let a command ending in
+// `exit` (every writeFileCommand-based put does; packages/sandbox-client's put/edit
+// scripts end `exit 0`/`exit 1`) skip the sync and take its writes to the grave with
+// the VM's page cache. The guest agent's parked-shell path sources this same script
+// inside its own `( . file )` subshell, so the subshell here is what makes `exit`
+// survivable on BOTH paths.
 func wrapCommand(cmd string) string {
-	return "cd /workspace\n{ " + cmd + "\n}\n__fc_rc=$?\nsync\n(exit $__fc_rc)\n"
+	return "cd /workspace\n( " + cmd + "\n)\n__fc_rc=$?\nsync\n(exit $__fc_rc)\n"
 }
 
 // Run sends exactly one command over a fresh vsock connection. Dialed AFTER resume,
