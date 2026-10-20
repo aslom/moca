@@ -555,7 +555,10 @@ fi
 for i in ${aff_sids[@]+"${!aff_sids[@]}"}; do
   # shellcheck disable=SC2016 # $HOSTNAME is the sandbox's: it must expand there, not here
   (
-    turn "where1-$i" "${aff_sids[$i]}" "$(ask K8S-SMOKE-WHERE-1 'sleep 2; echo "where=$HOSTNAME"')" && exit 0
+    # Asked once, into a variable: the retry below must send the same command, and the mock
+    # scripts exactly the one ask (tests/smoke.test.sh syncs every ask line with mock-anthropic.mjs).
+    where1="$(ask K8S-SMOKE-WHERE-1 'sleep 2; echo "where=$HOSTNAME"')"
+    turn "where1-$i" "${aff_sids[$i]}" "$where1" && exit 0
     # The burst is four turns of ONE subject on a pool whose trial size fits them exactly (W=2,
     # S=4, so the per-subject cap is 2 per worker): routing's estimate is optimistic and a
     # worker's stale `load` report can lower it after the next hand-off -- over-admission the
@@ -567,8 +570,7 @@ for i in ${aff_sids[@]+"${!aff_sids[@]}"}; do
     for _ in 1 2; do
       grep -q subject_quota_exceeded "$OUT/where1-$i.sse" || exit 1
       sleep 2
-      # shellcheck disable=SC2016 # as above
-      turn "where1-$i" "${aff_sids[$i]}" "$(ask K8S-SMOKE-WHERE-1 'sleep 2; echo "where=$HOSTNAME"')" && exit 0
+      turn "where1-$i" "${aff_sids[$i]}" "$where1" && exit 0
     done
     exit 1
   ) &
