@@ -66,6 +66,11 @@ is-active)
   sbx-worker@sbx_default.service | sbx-janitor.timer) echo active ;;
   *) echo failed; exit 3 ;;
   esac ;;
+show)
+  case "$4" in
+  Result) echo "${MOCK_JANITOR_RESULT:-success}" ;;
+  ExecMainStartTimestamp) echo 'Mon 2026-10-19 09:00:00 UTC' ;;
+  esac ;;
 *) echo "mock systemctl: unexpected: $*" >&2; exit 99 ;;
 esac
 MOCK
@@ -196,14 +201,22 @@ has 'unit sbx-janitor.timer: active'
 has 'workspace filesystem: 45% used, 90G of 200G (110G free) on /srv'
 has 'janitor last run: {"janitor":"summary","ts":"2026-10-19T09:00:00Z","examined":4,"removed":1,"unknown":0,"bytes_freed":4096,"errors":0}'
 has 'janitor wait: 3600 s (outlasts the token lifetime 900 s + 30 s)'
+has 'janitor service: success, last started Mon 2026-10-19 09:00:00 UTC'
 grep -qx "df -hP $SBX_SRV/workspaces" "$MOCK_LOG" || fail 'df is not of the workspace root'
 while read -r tool verb _; do
   case "$tool $verb" in
-  'systemctl list-units' | 'systemctl is-active' | 'df -hP' | journalctl\ *) ;;
+  'systemctl list-units' | 'systemctl is-active' | 'systemctl show' | 'df -hP' | journalctl\ *) ;;
   *) fail "a host call that is not a read: $tool $verb" ;;
   esac
 done <"$MOCK_LOG"
 pass 'host: units, workspace disk, the janitor last summary and its wait; read-only'
+
+# A janitor run that refused its settings writes no JSON line: the service result shows it failed,
+# though the last summary in the journal is an older, good one (#554 review).
+MOCK_JANITOR_RESULT=exit-code bash "$STATUS" --host --token-ttl-seconds 900 >"$TMP/out" 2>&1 || fail "exited $?"
+grep -q '^janitor service: latest run at Mon 2026-10-19 09:00:00 UTC FAILED (exit-code)' "$TMP/out" ||
+  fail 'a failed janitor run behind a good summary is not reported'
+pass 'host: a janitor run that refused its settings shows as FAILED'
 
 # The wait must exceed the lifetime + 30 s: equal warns, one second more is fine (the boundary).
 bash "$STATUS" --host --token-ttl-seconds 3570 >"$TMP/out" 2>&1 || fail "exited $?"

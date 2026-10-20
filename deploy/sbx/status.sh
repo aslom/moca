@@ -84,6 +84,16 @@ host_janitor() {
   last="$(journalctl -u sbx-janitor -o cat -n 200 --no-pager </dev/null 2>/dev/null |
     grep -E '^\{"janitor":"(summary|skipped)"' | tail -1)" || last=''
   say 'janitor last run' "${last:-none in the journal}"
+  # A run that refused its settings (a bad token mode or URL) writes no JSON line, so the line above
+  # would still show the last good one: the service's own result says whether the latest failed.
+  local result started
+  result="$(systemctl show sbx-janitor.service -p Result --value </dev/null 2>/dev/null)" || result=''
+  started="$(systemctl show sbx-janitor.service -p ExecMainStartTimestamp --value </dev/null 2>/dev/null)" || started=''
+  if [[ -n "$result" && "$result" != success ]]; then
+    say 'janitor service' "latest run ${started:+at $started }FAILED ($result): journalctl -u sbx-janitor -n 20 says why"
+  else
+    say 'janitor service' "${result:-unknown}${started:+, last started $started}"
+  fi
   if [[ ! -f "$env" ]]; then
     say 'janitor wait' 'not installed'
     return 0

@@ -37,7 +37,8 @@
 #
 # Output: one JSON line per action or anomaly, then exactly one summary line
 # {"janitor":"summary","ts","examined","removed","unknown","bytes_freed","errors"}; or, when it did
-# nothing, one {"janitor":"skipped"} line. The token never reaches argv or the log: curl reads it
+# nothing, one {"janitor":"skipped","ts","why"} line. A refusal of its own settings (exit 2) writes
+# neither, only its reason on stderr: status.sh reads the service's result for that. The token never reaches argv or the log: curl reads it
 # from a 0600 header file (-H @file).
 set -euo pipefail
 shopt -s nullglob
@@ -340,7 +341,7 @@ main() {
   check_settings
   SKIP_WHY=''
   if ! fetch; then
-    say "{\"janitor\":\"skipped\",\"why\":\"$SKIP_WHY; nothing touched\"}"
+    say "{\"janitor\":\"skipped\",\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"why\":\"$SKIP_WHY; nothing touched\"}"
     return 0
   fi
   local ws path wrk

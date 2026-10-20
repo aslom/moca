@@ -210,7 +210,9 @@ anything unexpected. The wait must exceed one token lifetime plus 30 s, so a del
 token has expired before its files go; `setup.sh` refuses a shorter one, and `status.sh --host`
 warns when a host's installed bundle predates a lifetime raise.
 
-Each run logs one JSON line, `summary` or `skipped`:
+Each run logs one JSON line, `summary` or `skipped`, unless it refuses its own settings (a token
+file with the wrong mode, a bad URL): then it exits 2 with the reason on stderr and no JSON line.
+`status.sh --host` shows the service's result, so such a run shows as FAILED:
 
 ```bash
 ssh <host> sudo journalctl -u sbx-janitor -o cat | grep '"janitor":"summary"' | tail -1
