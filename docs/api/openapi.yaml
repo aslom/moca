@@ -1041,7 +1041,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Sandbox' }
         '400':
-          description: '`invalid_request`, or `unknown_template`'
+          description: '`invalid_json`, `invalid_request`, or `unknown_template`'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -1054,6 +1054,11 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '429':
           description: '`quota_exceeded`: per-user or deployment-wide live sandboxes (SBX0 §5.3)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: redis_unavailable
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -1091,6 +1096,11 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: redis_unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/sandboxes/{id}:
     get:
       operationId: getSandbox
@@ -1107,6 +1117,11 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/NotEnrolled' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '503':
+          description: redis_unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
     delete:
       operationId: deleteSandbox
       summary: Terminate a sandbox
@@ -1130,6 +1145,11 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/NotEnrolled' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '503':
+          description: redis_unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/sandboxes/{id}/token:
     post:
       operationId: mintSandboxToken
@@ -1164,6 +1184,11 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
           description: '`sandbox_terminated`, with `reason` (deleted | expired)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: redis_unavailable
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -1203,6 +1228,11 @@ paths:
                         wrk: { type: string }
                         terminatedAt: { type: integer, description: epoch seconds }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '503':
+          description: redis_unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /internal/credentials:
     post:
       operationId: exchangeCredential

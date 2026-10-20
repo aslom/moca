@@ -53,7 +53,7 @@ class Result:
     truncated: bool  # stdout hit the worker's 8 MiB cap
     timed_out: bool = False  # the command ran out of timeout_s (ExecError "timeout:<n>")
     timeout_s: int = 0  # the timeout actually sent
-    capped: bool = False  # the requested timeout was cut to the token lifetime minus 60 s
+    capped: bool = False  # the requested timeout was cut to fit the token, less 60 s
 
 
 class SandboxError(RuntimeError):
@@ -152,20 +152,31 @@ class Sandbox:
 
     def _prepare(self, requested: int | None) -> tuple[list, int, bool]:
         """Token freshness (SBX0 §6.5): the metadata, the timeout to send, and whether a requested
-        timeout was cut. `timeout_s` defaults to, and is capped at, the token lifetime minus 60 s,
-        and the token must have the timeout plus 60 s left, or the relay cancels the Exec at its
-        `exp` (§3.6)."""
+        timeout was cut. `timeout_s` is capped at the token lifetime minus 60 s, and the token must
+        have the timeout plus 60 s left, or the relay cancels the Exec at its `exp` (§3.6).
+
+        With no timeout requested, the timeout is what the held token has left, less 60 s, and the
+        held token is kept while that is at least half the cap: 420 s of the 840 s cap with
+        15-minute tokens. Requiring the full cap would mint for every default Exec after the first,
+        since a held token always has a little less than its lifetime left. A requested timeout
+        that the held token cannot cover still mints a fresh one."""
         before = self._tokens.mints
         life = self._tokens.lifetime()
         if life:
             cap = max(1, life - MARGIN_S)
-            timeout, capped = (cap, False) if requested is None else (min(requested, cap), requested > cap)
+            if requested is None:
+                timeout, capped, need = cap, False, cap // 2 + MARGIN_S
+            else:
+                timeout, capped = min(requested, cap), requested > cap
+                need = timeout + MARGIN_S
         else:
             timeout, capped = (requested or 120), False  # a token without iat: no lifetime to cap at
+            need = timeout + MARGIN_S
         # Mint at most once per Exec: a token minted just now is as fresh as one can be.
-        token = self._tokens.get(need=0 if self._tokens.mints > before else timeout + MARGIN_S)
-        # Even a fresh token may not cover it: one minted near the sandbox's expiry is shorter, and
-        # clocks differ. Then the timeout is cut to what the token has left, less 60 s.
+        token = self._tokens.get(need=0 if self._tokens.mints > before else need)
+        # The default timeout, and even a fresh token, may not fit: a held token has less than its
+        # lifetime left, one minted near the sandbox's expiry is shorter, and clocks differ. Then
+        # the timeout is cut to what the token has left, less 60 s; only a requested one says so.
         left = self._tokens.remaining()
         if left is not None and timeout + MARGIN_S > left:
             cut = max(1, math.ceil(left) - MARGIN_S)  # ceil: a token minted this instant keeps its full cap
@@ -217,7 +228,12 @@ class Sandbox:
                     # The machinery failed (VM boot, worker gone): not the command's exit status.
                     raise SandboxError(f"exec failed: {ev.error.message}")
         except KeyboardInterrupt:
-            self.abort(req_id)
+            try:
+                self.abort(req_id)
+            except (grpc.RpcError, RuntimeError):
+                # PERMISSION_DENIED if the Exec has just finished, or a failed token command: either
+                # way the KeyboardInterrupt, not this, is what the caller must see.
+                pass
             raise
         except grpc.RpcError as e:
             code, details = e.code(), e.details() or ""
@@ -231,6 +247,10 @@ class Sandbox:
                 raise SandboxBusy(
                     f"{details}: nothing ran; retry once a running command finishes") from None
             raise SandboxError(f"exec failed: {code.name}: {details}") from None
+        finally:
+            # Close the call on every way out, the early returns after End and on timeout included;
+            # after an abort, so the relay still knows the Exec when the Abort reaches it.
+            events.cancel()
         raise SandboxError("exec stream ended without an End event")
 
     def abort(self, req_id: int) -> None:

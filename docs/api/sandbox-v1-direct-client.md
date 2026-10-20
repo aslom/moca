@@ -71,11 +71,18 @@ as the example client does.
 - **`req_id`** unique within the sandbox, and below 2^53. The proto says `uint64`, but the relay
   decodes it as a JavaScript number and refuses larger values. The relay namespaces `req_id` per
   sandbox, so your ids cannot collide with another user's, and `Abort` reaches only your own Execs.
-  Reusing an id that is still in flight in your sandbox is refused with `ALREADY_EXISTS`. A random
-  53-bit id is enough.
-- **`timeout_s`**: the worker kills the command when it runs out. It defaults to, and is capped at,
-  the token's lifetime (`exp − iat`) minus 60 s: 840 s with the default 15-minute tokens. See
-  [Tokens](#tokens) for why.
+  Use a fresh random 53-bit id for every call. Reusing an id that is still in flight in your
+  sandbox is refused with `ALREADY_EXISTS`. Reusing the id of a call that has **completed** replays
+  it: the worker keeps its last 256 completed results, keyed by id plus a fingerprint of `command`,
+  `stdin`, `timeout_s` and `streaming`, and answers a match with the cached `end` (or timeout
+  `error`) without running the command or sending its output again. The one deliberate reuse is
+  the retry after `UNAUTHENTICATED` (see [Tokens](#tokens)), and nothing ran before it.
+- **`timeout_s`**: the worker kills the command when it runs out. **Always send it.** The relay
+  passes it through unchanged, and the worker treats 0 or an absent value as its own default,
+  30 minutes, which is longer than a 15-minute token. Send at most what the token has left minus
+  60 s, and never more than its lifetime (`exp − iat`) minus 60 s: 840 s with the default tokens.
+  Otherwise a command that runs past the token's `exp` is cancelled at `exp` + 30 s with
+  `DEADLINE_EXCEEDED`, possibly after it has already changed the workspace. See [Tokens](#tokens).
 - **`streaming: true`**, so output arrives as it is produced. `false` buffers it until the end.
 - **Keepalive every 20 s** (`grpc.keepalive_time_ms = 20000`, and permitted without calls). The
   relay pings too. Without it, a command that prints nothing for minutes can lose its connection to
@@ -103,8 +110,14 @@ Exec at the token's `exp` (plus a 30 s leeway), ending the call with `DEADLINE_E
 before each Exec, a client:
 
 1. makes sure its token has at least `timeout_s` + 60 s left, and mints a fresh one if not;
-2. sends a `timeout_s` of at most the token lifetime minus 60 s, so that the worker's own timeout
-   fires before the relay's cancel. When it cuts a longer request, it says so.
+2. sends a `timeout_s` of at most what the token has left minus 60 s, so that the worker's own
+   timeout fires before the relay's cancel. When it cuts a longer request, it says so.
+
+Asking for the whole cap on every call would mint a token before every call but the first, since a
+held token always has a little less than its lifetime left. The example client therefore keeps a
+held token for a call that names no timeout while the token has at least half the cap plus 60 s
+left (480 s by default), and cuts that call's timeout to what the token has left minus 60 s. A call
+that names a timeout the held token cannot cover still gets a fresh token.
 
 The longest single command is therefore one token lifetime. Split longer work into several calls.
 
@@ -203,10 +216,11 @@ eval "$(mocactl sbx env <sandbox id>)"
 **From the shell, with `grpcurl`:**
 
 ```bash
+REQ_ID="$(od -An -N6 -tu8 /dev/urandom | tr -d ' ')"   # a fresh random 48-bit id for every call
 SBX_BEARER="$(eval "$SBX_TOKEN_CMD")" grpcurl -import-path proto -proto sandbox/v1/sandbox.proto \
   ${SBX_CA_FILE:+-cacert "$SBX_CA_FILE"} \
   -expand-headers -H 'authorization: Bearer ${SBX_BEARER}' \
-  -d "{\"sandbox_id\":\"$SBX_SANDBOX_ID\",\"exec\":{\"req_id\":\"42\",\"command\":\"ls -la\",
+  -d "{\"sandbox_id\":\"$SBX_SANDBOX_ID\",\"exec\":{\"req_id\":\"$REQ_ID\",\"command\":\"ls -la\",
        \"timeout_s\":60,\"streaming\":true,\"workspace_key\":\"$SBX_WORKSPACE_KEY\"}}" \
   "$SBX_ADDR" sandbox.v1.SandboxExec/Exec
 ```
