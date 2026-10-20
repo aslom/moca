@@ -73,11 +73,13 @@ export function commandPreview(command: string): string {
 
 /** Writes the audit lines. Built only on a relay with sandbox keys; `write` absent writes nothing. */
 export function makeAudit(write: ((line: string) => void) | undefined, withCommands: boolean) {
-  // An audit write must never stop enforcement: it runs before the expiry abort and the slot's
-  // release, so a sink that throws is reported and swallowed.
-  const emit = (o: Record<string, unknown>) => {
+  // An audit line must never stop enforcement: it runs before the expiry abort and the slot's
+  // release, so a throw while BUILDING the line (a timestamp, a prefix, a claims getter) or while
+  // writing it is reported and swallowed. `build` runs inside the try, so every method's whole body
+  // is covered, not only the write.
+  const emit = (build: () => Record<string, unknown>) => {
     try {
-      write?.(JSON.stringify(o));
+      write?.(JSON.stringify(build()));
     } catch (err) {
       console.error(
         `[sandbox-relay] audit line not written: ${(err as Error)?.message ?? String(err)}`,
@@ -97,21 +99,23 @@ export function makeAudit(write: ((line: string) => void) | undefined, withComma
         command?: string;
       },
     ): void {
-      const { claims, command } = l;
       // A fixed key order (SBX0 §3.5), whatever order the caller built `l` in; absent, never null.
-      emit({
-        audit: 'sandbox_exec',
-        ts: new Date(t0).toISOString(),
-        ...(claims ? { sub: claims.sub, sbx: claims.sbx } : {}),
-        wrk: utf8Prefix(l.wrk, AUDIT_WRK_BYTES),
-        req_id: l.req_id,
-        ms: Math.max(0, Date.now() - t0),
-        outcome: l.outcome,
-        ...(l.exit_code !== undefined ? { exit_code: l.exit_code } : {}),
-        ...(l.truncated !== undefined ? { truncated: l.truncated } : {}),
-        out_bytes: l.out_bytes,
-        ...(l.reason !== undefined ? { reason: l.reason } : {}),
-        ...(withCommands && command !== undefined ? { cmd: commandPreview(command) } : {}),
+      emit(() => {
+        const { claims, command } = l;
+        return {
+          audit: 'sandbox_exec',
+          ts: new Date(t0).toISOString(),
+          ...(claims ? { sub: claims.sub, sbx: claims.sbx } : {}),
+          wrk: utf8Prefix(l.wrk, AUDIT_WRK_BYTES),
+          req_id: l.req_id,
+          ms: Math.max(0, Date.now() - t0),
+          outcome: l.outcome,
+          ...(l.exit_code !== undefined ? { exit_code: l.exit_code } : {}),
+          ...(l.truncated !== undefined ? { truncated: l.truncated } : {}),
+          out_bytes: l.out_bytes,
+          ...(l.reason !== undefined ? { reason: l.reason } : {}),
+          ...(withCommands && command !== undefined ? { cmd: commandPreview(command) } : {}),
+        };
       });
     },
     /**
@@ -119,7 +123,7 @@ export function makeAudit(write: ((line: string) => void) | undefined, withComma
      * ownership are given back anyway. Not an Exec line (that was `expired`), so its own marker.
      */
     released(wrk: string, reqId: number, graceS: number, claims: SandboxTokenClaims): void {
-      emit({
+      emit(() => ({
         audit: 'sandbox_release',
         ts: new Date().toISOString(),
         sub: claims.sub,
@@ -128,11 +132,11 @@ export function makeAudit(write: ((line: string) => void) | undefined, withComma
         req_id: reqId,
         outcome: 'released',
         reason: `the worker did not end the Exec within ${graceS} s of its expiry abort`,
-      });
+      }));
     },
     /** A refused Abort (not an Exec, so a separate marker that Exec statistics skip). */
     abortRefused(wrk: string, reqId: number, reason: string, claims?: SandboxTokenClaims): void {
-      emit({
+      emit(() => ({
         audit: 'sandbox_abort',
         ts: new Date().toISOString(),
         ...(claims ? { sub: claims.sub, sbx: claims.sbx } : {}),
@@ -140,7 +144,7 @@ export function makeAudit(write: ((line: string) => void) | undefined, withComma
         req_id: reqId,
         outcome: 'refused',
         reason,
-      });
+      }));
     },
   };
 }
