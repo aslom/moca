@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { posix } from 'node:path';
 import type { Exec, ExecResult } from './exec-conn.js';
 import { PI_SCHEMAS } from './schemas.js';
@@ -81,13 +82,30 @@ export const q = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
  * file and exits non-zero. A read-only target is refused, as a plain write would refuse it. A
  * hard link to the target is not updated (the inode is replaced), and a kill mid-write can leave a
  * hidden `.sbx-*` temp beside the target.
+ *
+ * `expectSha256` (edit's write-back) makes the write conditional: the target's sha256, taken after
+ * the temp file is complete and just before the rename, must equal it, or nothing is written and
+ * the command exits `WRITE_CONFLICT_EXIT` (a target that no longer exists has changed too). The
+ * check and the rename are one shell step apart, not one atomic operation: a writer landing in
+ * that instant is not caught, one landing at any point between the read and the write is.
  */
-export function writeFileCommand(path: string): string {
+export function writeFileCommand(path: string, o: { expectSha256?: string } = {}): string {
+  const want = o.expectSha256;
+  if (want !== undefined && !/^[0-9a-f]{64}$/.test(want)) {
+    throw new RangeError('expectSha256 must be a lowercase hex sha256');
+  }
   // GNU `chmod --reference` on the sandbox; `stat -f %Lp` is the BSD fallback (local tests).
   const mode =
     'if [ -e "$p" ]; then chmod --reference="$p" -- "$t" 2>/dev/null || ' +
     'chmod "$(stat -c %a -- "$p" 2>/dev/null || stat -f %Lp "$p")" "$t"; ' +
     `else chmod "$(printf '%o' $(( 0666 & ~$(umask) )))" "$t"; fi`;
+  // coreutils `sha256sum` in the sandbox image; `shasum -a 256` is the BSD fallback (local tests).
+  const unchanged =
+    want === undefined
+      ? ''
+      : '{ [ -f "$p" ] && h=$({ sha256sum -- "$p" 2>/dev/null || shasum -a 256 -- "$p"; } | ' +
+        `cut -d ' ' -f 1) && [ "$h" = ${want} ] || ` +
+        `{ rm -f -- "$t"; echo "$p: changed since it was read" >&2; exit ${WRITE_CONFLICT_EXIT}; }; } && `;
   return (
     `p=${q(path)}; if [ -L "$p" ]; then ` +
     'p=$(readlink -f -- "$p") || { echo "$p: cannot resolve the symlink" >&2; exit 1; }; fi; ' +
@@ -96,10 +114,12 @@ export function writeFileCommand(path: string): string {
     'if [ -e "$p" ] && [ ! -w "$p" ]; then echo "$p: Permission denied" >&2; exit 1; fi; ' +
     'd=$(dirname -- "$p"); mkdir -p -- "$d" || exit 1; ' +
     't=$(mktemp "$d/.sbx-XXXXXX") || exit 1; ' +
-    `if cat > "$t" && { ${mode}; } && mv -f -- "$t" "$p"; then exit 0; fi; ` +
+    `if cat > "$t" && { ${mode}; } && ${unchanged}mv -f -- "$t" "$p"; then exit 0; fi; ` +
     'rm -f -- "$t"; exit 1'
   );
 }
+/** `writeFileCommand`'s exit status when `expectSha256` did not match: nothing was written. */
+export const WRITE_CONFLICT_EXIT = 3;
 
 /** Pi's line-ending and BOM handling for `edit` (edit-diff.ts), so CRLF files stay CRLF. */
 function detectLineEnding(content: string): '\r\n' | '\n' {
@@ -108,6 +128,9 @@ function detectLineEnding(content: string): '\r\n' | '\n' {
   if (lf === -1 || crlf === -1) return '\n';
   return crlf < lf ? '\r\n' : '\n';
 }
+/** CRLF beside a lone LF, or a bare CR: one ending cannot be restored to every line. */
+const mixedLineEndings = (text: string): boolean =>
+  /\r(?!\n)/.test(text) || (text.includes('\r\n') && /(?<!\r)\n/.test(text));
 const normalizeToLF = (text: string): string => text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 const restoreLineEndings = (text: string, ending: '\r\n' | '\n'): string =>
   ending === '\r\n' ? text.replace(/\n/g, '\r\n') : text;
@@ -384,6 +407,14 @@ export function sandboxTools(o: {
       // quotes, trailing spaces) is left out on purpose: when it matches, Pi writes the WHOLE file
       // back in normalized form, which rewrites lines the edit never touched.
       const { bom, text: unbom } = stripBom(raw);
+      // Normalizing and restoring one ending would rewrite the lines with the other: refuse, as
+      // Pi's fuzzy pass is refused above, rather than touch lines the edit never named.
+      if (mixedLineEndings(unbom)) {
+        return err(
+          `Could not edit file: ${path}. It has mixed line endings (CRLF beside LF, or a bare CR), ` +
+            "and editing it here would rewrite every line's ending; use bash instead.",
+        );
+      }
       const ending = detectLineEnding(unbom);
       const original = normalizeToLF(unbom);
       const wanted = parsed.map((e) => ({
@@ -439,7 +470,19 @@ export function sandboxTools(o: {
             `${formatSize(MAX_STDIN_BYTES)} one call can carry; use bash (sed -i) instead.`,
         );
       }
-      const w = await exec(writeFileCommand(path), { stdin: out, ...fileOpts(signal) });
+      // Optimistic concurrency: written only if the file is still the one read, so a concurrent
+      // writer (another client, or a cancelled call still running remotely) is never overwritten.
+      const read = createHash('sha256').update(r.stdout).digest('hex');
+      const w = await exec(writeFileCommand(path, { expectSha256: read }), {
+        stdin: out,
+        ...fileOpts(signal),
+      });
+      if (w.exitCode === WRITE_CONFLICT_EXIT && w.timedOutS === undefined) {
+        return err(
+          `Could not edit file: ${path}. It changed since it was read, so nothing was written; ` +
+            'read it again and redo the edit.',
+        );
+      }
       if (w.exitCode !== 0) return err(`Could not edit file: ${path}. ${why(w)}.`);
       return ok(`Successfully replaced ${spans.length} block(s) in ${path}.`);
     },

@@ -1,4 +1,5 @@
 import { execFile, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   lstatSync,
@@ -597,9 +598,87 @@ describe('sandbox tools (SBX0 §6.4)', () => {
       );
       expect(s.sent.map(({ command, stdin }) => ({ command, stdin }))).toEqual([
         { command: "cat -- '/workspace/x/f'", stdin: undefined },
-        { command: writeFileCommand('/workspace/x/f'), stdin: 'a\nB\n' },
+        {
+          command: writeFileCommand('/workspace/x/f', {
+            expectSha256: createHash('sha256').update('a\nb\n').digest('hex'),
+          }),
+          stdin: 'a\nB\n',
+        },
       ]);
     });
+
+    it('refuses, writing nothing, when the file changed between its read and its write (review #554)', async () => {
+      const l = local();
+      const f = join(l.dir, 'c.py');
+      writeFileSync(f, 'a = 1\n');
+      // Another client writes the file after edit's read, before its write-back.
+      let n = 0;
+      const racing: Exec = async (command, o) => {
+        const r = await l.exec(command, o);
+        if (++n === 1) writeFileSync(f, 'a = 1\nb = 2\n');
+        return r;
+      };
+      const r = await t(l.tools, 'edit').run(
+        { path: 'c.py', edits: [{ oldText: 'a = 1', newText: 'a = 10' }] },
+        racing,
+      );
+      expect(r.isError).toBe(true);
+      expect(txt(r)).toBe(
+        `Could not edit file: ${f}. It changed since it was read, so nothing was written; read it again and redo the edit.`,
+      );
+      expect(readFileSync(f, 'utf8')).toBe('a = 1\nb = 2\n');
+      expect(readdirSync(l.dir)).toEqual(['c.py']); // no temp file left
+      // Deleted in between: also a change, and not recreated.
+      writeFileSync(f, 'x\n');
+      n = 0;
+      const deleting: Exec = async (command, o) => {
+        const res = await l.exec(command, o);
+        if (++n === 1) rmSync(f);
+        return res;
+      };
+      const gone = await t(l.tools, 'edit').run(
+        { path: 'c.py', edits: [{ oldText: 'x', newText: 'y' }] },
+        deleting,
+      );
+      expect(txt(gone)).toMatch(/It changed since it was read, so nothing was written/);
+      expect(readdirSync(l.dir)).toEqual([]);
+    });
+
+    it('writeFileCommand with expectSha256 writes when the file is unchanged, through a symlink too', async () => {
+      const l = local();
+      writeFileSync(join(l.dir, 'real'), 'old\n');
+      symlinkSync('real', join(l.dir, 'link'));
+      const sha = createHash('sha256').update('old\n').digest('hex');
+      const w = await l.exec(writeFileCommand(join(l.dir, 'link'), { expectSha256: sha }), {
+        stdin: Buffer.from('new\n'),
+      });
+      expect(w.exitCode).toBe(0);
+      expect(readFileSync(join(l.dir, 'real'), 'utf8')).toBe('new\n');
+      expect(lstatSync(join(l.dir, 'link')).isSymbolicLink()).toBe(true);
+      expect(() => writeFileCommand('f', { expectSha256: 'not-hex; rm -rf /' })).toThrow(/sha256/);
+    });
+
+    it.each([
+      ['CRLF beside LF', 'a\r\nb\nc\r\n'],
+      ['a bare CR', 'a\rb\nc\n'],
+    ])(
+      'refuses a file with mixed line endings (%s), which a round-trip would rewrite whole (review #554)',
+      async (_what, content) => {
+        const l = local();
+        writeFileSync(join(l.dir, 'm.txt'), content);
+        const r = await t(l.tools, 'edit').run(
+          { path: 'm.txt', edits: [{ oldText: 'c', newText: 'C' }] },
+          l.exec,
+        );
+        expect(r.isError).toBe(true);
+        expect(txt(r)).toBe(
+          `Could not edit file: ${l.dir}/m.txt. It has mixed line endings (CRLF beside LF, or a bare ` +
+            "CR), and editing it here would rewrite every line's ending; use bash instead.",
+        );
+        expect(readFileSync(join(l.dir, 'm.txt'), 'utf8')).toBe(content);
+        expect(l.count()).toBe(1);
+      },
+    );
 
     it('keeps CRLF line endings: matches LF-normalized, writes CRLF back', async () => {
       const l = local();
