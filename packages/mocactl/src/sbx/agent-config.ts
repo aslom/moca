@@ -14,6 +14,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join, relative, sep } from 'node:path';
+import { sbxDirProblem } from './state.js';
 import { parse, parseTree, ParseErrorCode, type Node, type ParseError } from 'jsonc-parser';
 import {
   append,
@@ -59,6 +60,10 @@ export const CLAUDE_DENY: readonly string[] = Object.freeze([
   'EnterWorktree',
   'ExitWorktree',
   'Workflow',
+  // Older or adjacent Claude Code versions' names: denying a tool that does not exist is harmless.
+  'MultiEdit',
+  'LS',
+  'NotebookRead',
 ]);
 /** OpenCode's built-ins that act on the laptop: `tools.<t> = false` (spec §6.3). */
 export const OPENCODE_OFF: readonly string[] = Object.freeze([
@@ -76,6 +81,7 @@ export const OPENCODE_OFF: readonly string[] = Object.freeze([
   'task',
   // `patch`'s newer name in current OpenCode: switching off a tool an older one lacks is harmless.
   'apply_patch',
+  'multiedit',
 ]);
 export const MARK_BEGIN = '<!-- sbx:begin -->';
 export const MARK_END = '<!-- sbx:end -->';
@@ -234,7 +240,13 @@ function target(root: string, rel: string, hint = WRITE_HINT): Target {
       hint,
     );
   }
-  return { rel: relative(rroot, real).split(sep).join('/'), abs: real, exists };
+  const resolved = relative(rroot, real).split(sep).join('/');
+  // Inside the repository but in .git (a hook, the config): never a file sbx up edits, and a record
+  // naming it would be malformed for good (#554 review).
+  if (resolved === '.git' || resolved.startsWith('.git/')) {
+    throw new ConfigConflict(rel, rel, 'is a link into .git', hint);
+  }
+  return { rel: resolved, abs: real, exists };
 }
 
 /** Atomic: a temp file beside it, renamed over it; the existing file's mode is kept. */
@@ -826,6 +838,9 @@ function manifestProblem(m: Json, ok: { json: string[]; md: string[] }): string 
   return undefined;
 }
 
+const SBX_DIR_HINT =
+  "it holds this laptop's binding and its record of what sbx up added, so neither is read from it: remove it from the repository (git rm -r --cached .sbx) or replace the link, then run the command again";
+
 const BAD_RECORD_HINT =
   'it lists what sbx up added, so it was kept: fix or remove it by hand (taking back what it lists)';
 
@@ -846,6 +861,8 @@ const uniq = <T>(xs: T[]): T[] => {
  * it before it creates or pushes anything.
  */
 export function writeAgentConfig(root: string, o: { dryRun?: boolean } = {}): AgentConfigResult {
+  const sbxBad = sbxDirProblem(root);
+  if (sbxBad) throw new ConfigConflict('.sbx', '.sbx', sbxBad, SBX_DIR_HINT);
   const recs: JsonRec[] = [];
   const created: string[] = [];
   const dirs: string[] = [];
@@ -1030,6 +1047,9 @@ export interface TakeBack {
  * that cannot be read is kept, with a warning: deleting it would orphan what it lists.
  */
 export function takeBackAgentConfig(root: string): TakeBack {
+  const sbxBad = sbxDirProblem(root);
+  if (sbxBad)
+    return { removed: [], warnings: [`.sbx ${sbxBad}; ${SBX_DIR_HINT}`], recordKept: true };
   const { m, bad } = loadManifest(root);
   if (bad) {
     return { removed: [], warnings: [`${MANIFEST} ${bad}; ${BAD_RECORD_HINT}`], recordKept: true };

@@ -21,7 +21,7 @@ import { gzipSync } from 'node:zlib';
 import { MAX_STDIN_BYTES, q, WORKSPACE, type Exec, type ExecResult } from '@moca/sandbox-client';
 import { sanitizeRemote } from '../core/sanitize.js';
 import { MARK_BEGIN, MARK_END } from './agent-config.js';
-import { BINDING_URL_RE, SANDBOX_ID_RE } from './state.js';
+import { BINDING_URL_RE, SANDBOX_ID_RE, sbxDirProblem } from './state.js';
 import { PY_TAR_EXTRACT, tarEntries, type TarEntry } from './tar.js';
 
 /**
@@ -190,7 +190,8 @@ const foldedIn = (seg: string, names: Record<string, string>): string | undefine
 function agentConfigWhy(p: string): string | undefined {
   const segs = segments(p);
   for (let i = 0; i < segs.length; i++) {
-    if (isShortName(segs[i]!)) return 'an 8.3 short name, which may stand for any of these on Windows';
+    if (isShortName(segs[i]!))
+      return 'an 8.3 short name, which may stand for any of these on Windows';
     const dir = foldedIn(segs[i]!, AGENT_DIRS);
     if (dir) return dir;
     if (i === segs.length - 1) {
@@ -1094,6 +1095,12 @@ export function writeBinding(
   b: { id: string; controlPlaneUrl: string; template: string },
 ): void {
   if (!SANDBOX_ID_RE.test(b.id)) throw new PushError(`not a sandbox id: ${sanitizeRemote(b.id)}`);
+  const sbxBad = sbxDirProblem(root);
+  if (sbxBad) {
+    throw new PushError(
+      `.sbx ${sbxBad}, so the binding is not written there: remove it from the repository (git rm -r --cached .sbx) or replace the link`,
+    );
+  }
   const controlPlaneUrl = bindingUrl(b.controlPlaneUrl);
   const exclude = excludeFile(root);
   mkdirSync(dirname(exclude), { recursive: true });

@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -93,6 +94,9 @@ describe('agent configuration (SBX0 §6.3)', () => {
       'EnterWorktree',
       'ExitWorktree',
       'Workflow',
+      'MultiEdit',
+      'LS',
+      'NotebookRead',
     ]);
     expect(OPENCODE_OFF).toEqual([
       'bash',
@@ -109,6 +113,7 @@ describe('agent configuration (SBX0 §6.3)', () => {
       'task',
       // The newer name for patch in current OpenCode (review round 2).
       'apply_patch',
+      'multiedit',
     ]);
     for (const s of [
       'remote sandbox at `/workspace`',
@@ -926,5 +931,44 @@ describe('agent configuration (SBX0 §6.3)', () => {
     writeAgentConfig(d);
     spoil(d);
     expect(checkAgentConfig(d).join('\n')).toMatch(re);
+  });
+});
+
+describe('an untrusted .sbx/ (#554 review)', () => {
+  it('refuses a symlinked .sbx: nothing is written outside the repository, nothing taken back', () => {
+    const d = dir();
+    const outside = dir();
+    symlinkSync(outside, join(d, '.sbx'));
+    expect(conflictOf(() => writeAgentConfig(d)).message).toMatch(/^\.sbx is a symlink/);
+    expect(existsSync(join(outside, 'agent-config.json'))).toBe(false);
+    expect(existsSync(join(d, '.mcp.json'))).toBe(false);
+    const t = takeBackAgentConfig(d);
+    expect(t.removed).toEqual([]);
+    expect(t.recordKept).toBe(true);
+    expect(t.warnings.join('\n')).toMatch(/\.sbx is a symlink/);
+  });
+
+  it("refuses a .sbx/ tracked by git, whose record is the repository's say-so", () => {
+    const d = realpathSync(mkdtempSync(join(tmpdir(), 'sbx-cfg-')));
+    made.push(d);
+    execFileSync('git', ['init', '-q', d]);
+    mkdirSync(join(d, '.sbx'));
+    writeFileSync(
+      join(d, '.sbx', 'agent-config.json'),
+      '{"version":1,"files":[],"dirs":[],"json":[],"markdown":[]}\n',
+    );
+    execFileSync('git', ['add', '.sbx'], { cwd: d });
+    expect(conflictOf(() => writeAgentConfig(d)).message).toMatch(/^\.sbx is tracked by git/);
+    expect(takeBackAgentConfig(d).warnings.join('\n')).toMatch(/tracked by git/);
+  });
+
+  it('refuses a target linked into .git', () => {
+    const d = dir();
+    writeFileSync(join(d, '.git', 'config'), '[core]\n');
+    symlinkSync('.git/config', join(d, '.mcp.json'));
+    expect(conflictOf(() => writeAgentConfig(d)).message).toMatch(
+      /\.mcp\.json is a link into \.git/,
+    );
+    expect(readFileSync(join(d, '.git', 'config'), 'utf8')).toBe('[core]\n');
   });
 });

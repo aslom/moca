@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 /**
@@ -9,6 +10,36 @@ import { dirname, join } from 'node:path';
 export const SANDBOX_ID_RE = /^sbx-[0-9a-z]{1,64}$/;
 
 /**
+ * Why the repository's `.sbx/` cannot be trusted as this laptop's state, or undefined when it can.
+ * A symlink would have `up` write (and `rm` delete) outside the repository; a tracked one came with
+ * the clone, so its binding (which names a control plane) and its record of what `up` added are
+ * the repository's say-so, not this laptop's (#554 review). `sbx up` keeps `.sbx/` untracked by
+ * excluding it, so neither is ever its own doing.
+ */
+export function sbxDirProblem(root: string): string | undefined {
+  const dir = join(root, '.sbx');
+  let st;
+  try {
+    st = lstatSync(dir);
+  } catch {
+    return undefined;
+  }
+  if (st.isSymbolicLink()) return 'is a symlink';
+  if (!st.isDirectory()) return 'is not a directory';
+  let tracked = '';
+  try {
+    tracked = execFileSync('git', ['ls-files', '-z', '--', '.sbx'], {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+  } catch {
+    return undefined; // not a git repository: nothing can be tracked
+  }
+  return tracked ? 'is tracked by git (it came with the repository)' : undefined;
+}
+
+/**
  * The repository's bound sandbox: `.sbx/sandbox.json` in the nearest directory up from `cwd`,
  * stopping at a repository root (a `.git` entry) or `/`. `mocactl sbx up` (1c) writes it; every
  * other command reads it when no id is given (SBX0 §6.1).
@@ -17,7 +48,8 @@ export function findSandboxFile(cwd: string): string | undefined {
   let dir = cwd;
   for (;;) {
     const f = join(dir, '.sbx', 'sandbox.json');
-    if (existsSync(f)) return f;
+    // A symlinked or tracked .sbx/ is never this laptop's binding (sbxDirProblem).
+    if (existsSync(f)) return sbxDirProblem(dir) ? undefined : f;
     if (existsSync(join(dir, '.git'))) return undefined;
     const up = dirname(dir);
     if (up === dir) return undefined;

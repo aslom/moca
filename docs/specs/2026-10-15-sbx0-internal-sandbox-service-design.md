@@ -488,11 +488,12 @@ Every curated template ships `tar` and `git` (§8.2).
   - `.mcp.json` gets `mcpServers.sandbox = { "command": "mocactl", "args": ["sbx", "mcp"] }`;
   - `.claude/settings.json` gets `permissions.allow` `mcp__sandbox__*`, and `permissions.deny` for
     `Bash`, `Read`, `Edit`, `Write`, `Glob`, `Grep`, `NotebookEdit`, `WebFetch`, `WebSearch`,
-    `Agent`, `Task`, `EnterWorktree`, `ExitWorktree`, `Workflow`, and `enabledMcpjsonServers` gets
-    `sandbox`.
+    `Agent`, `Task`, `EnterWorktree`, `ExitWorktree`, `Workflow`, and older versions' `MultiEdit`,
+    `LS`, `NotebookRead`; `enabledMcpjsonServers` gets `sandbox`.
 - **OpenCode:** `opencode.json` gets `mcp.sandbox = { "type": "local", "command": ["mocactl", "sbx", "mcp"], "enabled": true }`,
   and `tools` set to `false` for `bash`, `read`, `edit`, `write`, `patch`, `apply_patch`
-  (`patch`'s newer name), `glob`, `grep`, `list`, `lsp`, `webfetch`, `websearch`, `task`.
+  (`patch`'s newer name), `glob`, `grep`, `list`, `lsp`, `webfetch`, `websearch`, `task`, and
+  older versions' `multiedit`.
 - **`CLAUDE.md` and `AGENTS.md`:** a block between `<!-- sbx:begin -->` and `<!-- sbx:end -->`
   stating that:
   - the code lives in a remote sandbox at `/workspace`;

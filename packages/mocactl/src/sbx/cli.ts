@@ -178,7 +178,15 @@ export async function openSbx(
         ? `mocactl sbx login --control-plane-url ${q(sanitizeRemote(url))}`
         : 'mocactl sbx login';
     const where = opts.urlFrom ? ` at ${sanitizeRemote(url)} (from ${opts.urlFrom})` : '';
-    io.err(`sbx: not logged in to the sandbox service${where}: run \`${login}\``);
+    // A binding naming another control plane than the one remembered: logging in there would hand
+    // it this working tree on the next push. Say so, rather than only nudge a login (#554 review).
+    const other =
+      opts.urlFrom &&
+      remembered.sbxControlPlaneUrl &&
+      normalizeUrl(remembered.sbxControlPlaneUrl) !== normalizeUrl(url)
+        ? `; that is not the control plane you logged in to (${sanitizeRemote(remembered.sbxControlPlaneUrl)}): log in there only if you trust it, as it would receive this repository's files`
+        : '';
+    io.err(`sbx: not logged in to the sandbox service${where}: run \`${login}\`${other}`);
     return SBX_EXIT.loginRequired;
   }
   if (auth.kind === 'unreachable') return failRefresh(io, auth.error);

@@ -823,6 +823,22 @@ describe("a bound sandbox's control plane (R5j)", () => {
     expect(h.seen).toEqual([]);
   });
 
+  it('warns when the binding names another control plane than the one logged in to', async () => {
+    const { home, paths, io } = setup();
+    saveConfig(paths, { ...DEFAULT_CONFIG, sbxControlPlaneUrl: URL_ });
+    const h = hosts();
+    expect(
+      await sbxMain(['mcp'], { HOME: home }, io, {
+        home,
+        fetchImpl: h.fetchImpl,
+        cwd: repoBoundTo(MCP_URL),
+      }),
+    ).toBe(3);
+    expect(io.errs.join('\n')).toContain(
+      `that is not the control plane you logged in to (${URL_}): log in there only if you trust it`,
+    );
+  });
+
   it('ignores a binding URL with a control character or a space, and never prints the escape', async () => {
     const { home, paths, io } = setup();
     saveConfig(paths, { ...DEFAULT_CONFIG, sbxControlPlaneUrl: URL_ });
