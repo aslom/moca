@@ -73,6 +73,8 @@ export interface PumpOpts {
    * before the drain finishes (a sandbox Exec's expiry line).
    */
   result?: PumpResult;
+  /** The caller's ExecRequest.workload, for the relay's workload check (workload sandboxes §3.3). */
+  workload?: string;
 }
 
 /**
@@ -139,7 +141,7 @@ export async function pumpExec(
     // see its sawErr note in cmd/exec-driver/drive.go).
     let sawExecError = false;
     let execErrorMessage = '';
-    for await (const ev of relay.routeExec(sandboxId, exec)) {
+    for await (const ev of relay.routeExec(sandboxId, exec, { workload: opts.workload })) {
       if (over()) continue;
       call.write(toCaller(ev));
       if (ev.chunk && ev.chunk.stream !== Stream.STREAM_STDERR)

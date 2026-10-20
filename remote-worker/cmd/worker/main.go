@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -115,6 +116,35 @@ func sweepInterval(idle time.Duration) time.Duration {
 	return max(min(idle/4, time.Minute), time.Second)
 }
 
+// tokenSource returns how the worker gets its relay bearer token, called before every dial.
+//
+// With SANDBOX_TOKEN_FILE set, the token is that file's contents (surrounding whitespace trimmed),
+// re-read on every dial and reconnect: a workload's attach token is a mounted Secret that the
+// kubelet refreshes in place when the provisioner re-mints it (workload sandboxes spec §3.1), and
+// the relay closes the stream when the old token expires, so the redial picks up the new one.
+// Unset, it is SANDBOX_TOKEN (default "dev-token"), read once, exactly as before.
+func tokenSource(get func(string) string, readFile func(string) ([]byte, error)) func() (string, error) {
+	path := get("SANDBOX_TOKEN_FILE")
+	if path == "" {
+		token := get("SANDBOX_TOKEN")
+		if token == "" {
+			token = "dev-token"
+		}
+		return func() (string, error) { return token, nil }
+	}
+	return func() (string, error) {
+		b, err := readFile(path)
+		if err != nil {
+			return "", fmt.Errorf("SANDBOX_TOKEN_FILE: %w", err)
+		}
+		token := strings.TrimSpace(string(b))
+		if token == "" {
+			return "", fmt.Errorf("SANDBOX_TOKEN_FILE %s is empty", path)
+		}
+		return token, nil
+	}
+}
+
 func nextBackoff(d time.Duration) time.Duration { return min(d*2, backoffMax) }
 
 // jitter spreads reconnects so a relay restart does not get a synchronized herd.
@@ -124,7 +154,11 @@ func jitter(d time.Duration) time.Duration {
 
 func main() {
 	relayAddr := env("RELAY_ADDR", "localhost:8443")
-	token := env("SANDBOX_TOKEN", "dev-token")
+	token := tokenSource(os.Getenv, os.ReadFile)
+	// A token file that cannot be read at boot is a misconfiguration: fail loudly, as for RELAY_TLS.
+	if _, err := token(); err != nil {
+		log.Fatalf("%v", err)
+	}
 	useTLS, tlsErr := envBool("RELAY_TLS", false)
 	if tlsErr != nil {
 		// Fail loudly rather than guessing: guessing wrong here ships the bearer
@@ -190,8 +224,15 @@ func main() {
 
 	backoff := backoffMin
 	for ctx.Err() == nil {
-		attachCtx := metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+token)
-		stream, err := client.Attach(attachCtx)
+		// Re-read before every dial, so a rotated token file is picked up on the next reconnect.
+		// A read that fails after boot backs off and retries like a failed dial.
+		bearer, err := token()
+		var stream pb.SandboxWorker_AttachClient
+		var attachCtx context.Context
+		if err == nil {
+			attachCtx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+bearer)
+			stream, err = client.Attach(attachCtx)
+		}
 		if err == nil {
 			log.Printf("worker: attached, serving execs")
 			// Serve gets attachCtx — the very context this stream was created from,

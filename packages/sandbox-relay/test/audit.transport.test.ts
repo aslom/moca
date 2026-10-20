@@ -291,7 +291,7 @@ describe('one audit line per sandbox Exec (SBX0 §3.5)', () => {
     const md = new Metadata();
     md.set('authorization', `Bearer ${token()}`);
     const code = await new Promise<number>((resolve) => {
-      const call = client.exec({ sandboxId: 'sbx_default', exec: undefined }, md);
+      const call = client.exec({ sandboxId: 'sbx_default', workload: '', exec: undefined }, md);
       call.on('error', () => {});
       call.on('data', () => {});
       call.on('status', (s: { code: number }) => resolve(s.code));

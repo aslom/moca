@@ -60,6 +60,7 @@ function execResult(addr: string, token?: string): Promise<{ code: number; detai
   const call = client.exec(
     {
       sandboxId: 'sbx-x',
+      workload: '',
       exec: {
         reqId: 1,
         command: 'true',

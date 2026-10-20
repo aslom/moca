@@ -89,6 +89,11 @@ export function toSessionId(sessionId: string): string {
   return cleaned.slice(start, end) || 'leaf';
 }
 
+/** A workload key: the workload record's Context name (knative-server workloads.ts). */
+const WORKLOAD_KEY = /^w-[0-9a-f]{32}$/;
+/** An owner scope: `recordScope(owner)`, 32 hex (knative-server workloads.ts). */
+const OWNER_SCOPE = /^[0-9a-f]{32}$/;
+
 export interface LeafItem {
   item_id: string;
   file: string;
@@ -116,6 +121,17 @@ export interface LeafEnvelope {
     loadBundle: () => Promise<Buffer>;
     /** Give the run its own writable copy of the context, removed when the run ends. */
     writable?: boolean;
+    /**
+     * The workload key (`w-<32 hex>`) when the workload has sandboxes of its own (workload
+     * sandboxes spec §3.3): the run then selects only those, never the shared pool. Absent for a
+     * phase 1 workload, which runs on the shared pool as before. The server sets it from PR 2 on.
+     */
+    workload?: string;
+    /**
+     * The owner's `recordScope` (32 hex), required with `workload`: selection also matches the
+     * sandbox's `moca.dev/owner` label against it. Set by the server alongside `workload`.
+     */
+    ownerScope?: string;
   };
   item: LeafItem; // inputs inline (was inputsRef)
   decision?: Decision; // resume/approve only (was decisionRef)
@@ -416,11 +432,24 @@ async function runPromptLeaf(
   // outside this try, and two separate reads of the environment can disagree if it is mutated
   // between them.
   const promptTimings = leaseTimings(process.env);
+  const workload = env.internalContext?.workload;
+  const ownerScope = env.internalContext?.ownerScope;
+  // Checked before selection, unlike the rest of internalContext: they decide which sandbox to lease.
+  // An owner scope is required with a workload, and meaningless without one.
+  if (
+    (workload !== undefined && (typeof workload !== 'string' || !WORKLOAD_KEY.test(workload))) ||
+    (ownerScope !== undefined &&
+      (typeof ownerScope !== 'string' || !OWNER_SCOPE.test(ownerScope))) ||
+    (workload !== undefined) !== (ownerScope !== undefined)
+  ) {
+    return { status: 'failed', reason: 'error', message: 'invalid internal context reference' };
+  }
   try {
     selected = await selectPoolSandbox(sandboxEnvironment(env), cwd, sid, {
       cap: promptTimings.cap,
       ttlMs: promptTimings.ttlMs,
       remoteSandbox: process.env.SH_REMOTE_SANDBOX === '1',
+      ...(workload ? { workload, ownerScope } : {}),
     });
   } catch (err) {
     // Saturation stays a distinct transient signal, as for the other kinds: the sync /runs path

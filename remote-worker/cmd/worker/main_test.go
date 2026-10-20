@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -133,5 +134,50 @@ func TestSweepIntervalIsBounded(t *testing.T) {
 		if got := sweepInterval(idle); got != want {
 			t.Errorf("sweepInterval(%s) = %s, want %s", idle, got, want)
 		}
+	}
+}
+
+func TestTokenSourceFallsBackToEnvWhenNoFile(t *testing.T) {
+	vars := map[string]string{}
+	get := func(k string) string { return vars[k] }
+	noFile := func(string) ([]byte, error) { t.Fatal("read a file with SANDBOX_TOKEN_FILE unset"); return nil, nil }
+
+	if got, err := tokenSource(get, noFile)(); err != nil || got != "dev-token" {
+		t.Errorf("unset: got %q, %v; want the dev-token default", got, err)
+	}
+	vars["SANDBOX_TOKEN"] = "shared"
+	if got, err := tokenSource(get, noFile)(); err != nil || got != "shared" {
+		t.Errorf("SANDBOX_TOKEN: got %q, %v; want shared", got, err)
+	}
+}
+
+func TestTokenSourceRereadsTheFileOnEveryCall(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "token")
+	vars := map[string]string{"SANDBOX_TOKEN_FILE": path, "SANDBOX_TOKEN": "ignored-when-a-file-is-named"}
+	next := tokenSource(func(k string) string { return vars[k] }, os.ReadFile)
+
+	if err := os.WriteFile(path, []byte("first\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := next(); err != nil || got != "first" {
+		t.Fatalf("got %q, %v; want first (trailing newline trimmed)", got, err)
+	}
+	// The kubelet's in-place Secret refresh: the next dial must present the new token.
+	if err := os.WriteFile(path, []byte("second"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := next(); err != nil || got != "second" {
+		t.Fatalf("after rotation got %q, %v; want second", got, err)
+	}
+	// A missing or empty file is an error, never a silent fallback to SANDBOX_TOKEN.
+	if err := os.WriteFile(path, []byte("  \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := next(); err == nil {
+		t.Error("an empty token file must be an error")
+	}
+	os.Remove(path)
+	if _, err := next(); err == nil {
+		t.Error("a missing token file must be an error")
 	}
 }

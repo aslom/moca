@@ -229,6 +229,7 @@ export function exec(
   const call = client.exec(
     {
       sandboxId: opts.sandboxId ?? 'sbx_default',
+      workload: '',
       exec: {
         reqId: opts.reqId ?? ++req,
         command: opts.command ?? 'true',

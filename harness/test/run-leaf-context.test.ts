@@ -162,4 +162,44 @@ describe('frozen context on a prompt leaf', () => {
     expect(executeTurn).not.toHaveBeenCalled();
     expect(transport.exec).not.toHaveBeenCalled();
   });
+
+  it('selects with the workload key when the context names one, and without it otherwise', async () => {
+    const WL = `w-${'a'.repeat(32)}`;
+    const { lease } = relayLease();
+    const overlayContext = vi.fn(async () => '/workspace/.moca-context/runs/run-1');
+    selectPoolSandboxMock.mockReset().mockResolvedValue(lease);
+    const withWl = env(vi.fn());
+    withWl.internalContext!.workload = WL;
+    withWl.internalContext!.ownerScope = 'b'.repeat(32);
+    await runLeaf(withWl, undefined, { executeTurn: okTurn(), overlayContext });
+    expect(selectPoolSandboxMock.mock.calls[0]![3]).toMatchObject({
+      workload: WL,
+      ownerScope: 'b'.repeat(32),
+    });
+    selectPoolSandboxMock.mockReset().mockResolvedValue(lease);
+    await runLeaf(env(vi.fn()), undefined, { executeTurn: okTurn(), overlayContext });
+    expect(selectPoolSandboxMock.mock.calls[0]![3]).not.toHaveProperty('workload');
+    expect(selectPoolSandboxMock.mock.calls[0]![3]).not.toHaveProperty('ownerScope');
+  });
+
+  it('refuses a malformed workload key or owner scope, or one without the other, before selecting', async () => {
+    selectPoolSandboxMock.mockReset();
+    const WL = `w-${'a'.repeat(32)}`;
+    const OWN = 'b'.repeat(32);
+    for (const bad of [
+      { workload: 'moca-sandbox', ownerScope: OWN },
+      { workload: `w-${'A'.repeat(32)}`, ownerScope: OWN },
+      { workload: 42, ownerScope: OWN },
+      { workload: WL, ownerScope: 'B'.repeat(32) },
+      { workload: WL, ownerScope: 'short' },
+      { workload: WL },
+      { ownerScope: OWN },
+    ]) {
+      const e = env(vi.fn());
+      Object.assign(e.internalContext as Record<string, unknown>, bad);
+      const r = await runLeaf(e, undefined, { executeTurn: okTurn(), overlayContext: vi.fn() });
+      expect(r).toMatchObject({ status: 'failed', message: 'invalid internal context reference' });
+    }
+    expect(selectPoolSandboxMock).not.toHaveBeenCalled();
+  });
 });
