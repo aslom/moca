@@ -1,4 +1,4 @@
-import { timingSafeEqual } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import {
   Server,
@@ -40,10 +40,10 @@ import {
   type SandboxVerifier,
 } from './sandbox-auth.js';
 import { failExecStream, grpcError, pumpExec } from './exec-stream.js';
-import { makeAudit, makeSandboxCaller } from './sandbox-caller.js';
+import { SANDBOX_DRAIN_GRACE_S, makeAudit, makeSandboxCaller } from './sandbox-caller.js';
 
 export { grpcError } from './exec-stream.js';
-export { armDeadline } from './sandbox-caller.js';
+export { SANDBOX_DRAIN_GRACE_S, armDeadline } from './sandbox-caller.js';
 
 /** Relay server dependencies: the relay's own, plus the SandboxExec caller checks (MI1 §5 R5, SBX0 §3). */
 export interface RelayServerDeps extends RelayDeps {
@@ -54,6 +54,13 @@ export interface RelayServerDeps extends RelayDeps {
   sandboxMaxInflight?: number;
   /** Seconds past a token's `exp` at which its running Exec is cancelled. Defaults to 30; tests set 0. */
   sandboxLeewayS?: number;
+  /**
+   * Seconds after that cancel at which an Exec the worker never acknowledged gives back its in-flight
+   * slot and its Abort ownership anyway. Defaults to 60.
+   */
+  sandboxDrainGraceS?: number;
+  /** The key of the per-sandbox req_id mapping (workerReqId). Defaults to 32 random bytes per boot. */
+  sandboxReqIdKey?: Buffer;
   /** Where the sandbox Exec audit lines go (SBX0 §3.5). Defaults to stdout. */
   log?: (line: string) => void;
   /** SH_SANDBOX_AUDIT_COMMANDS=1: audit lines carry the command's first 200 bytes (SBX0 §3.5). */
@@ -155,6 +162,8 @@ type ExecAuth = Pick<
   | 'verifySandboxToken'
   | 'sandboxMaxInflight'
   | 'sandboxLeewayS'
+  | 'sandboxDrainGraceS'
+  | 'sandboxReqIdKey'
   | 'log'
   | 'sandboxAuditCommands'
   | 'timers'
@@ -231,6 +240,10 @@ function addExecService(server: Server, relay: Relay, auth: ExecAuth): void {
   const sandbox = makeSandboxCaller(relay, {
     maxInflight: auth.sandboxMaxInflight ?? DEFAULT_SANDBOX_MAX_INFLIGHT,
     leewayS: auth.sandboxLeewayS ?? SANDBOX_CLOCK_LEEWAY_S,
+    drainGraceS: auth.sandboxDrainGraceS ?? SANDBOX_DRAIN_GRACE_S,
+    // Never leaves this process. A new one at each boot changes every wid, which costs nothing: a
+    // sandbox client re-sends a req_id only for a call that never started (SBX0 §6.5).
+    reqIdKey: auth.sandboxReqIdKey ?? randomBytes(32),
     timers: auth.timers,
     audit,
   });

@@ -214,7 +214,9 @@ neither is the token. An operator debug flag (`SH_SANDBOX_AUDIT_COMMANDS=1`, exa
 command's first 200 bytes as `cmd`, cut at a UTF-8 character boundary, and only for a token that
 verified. Every line carries the token's `sub` and `sbx` only when it verified. An `UNAUTHENTICATED`
 line has neither, because an unverified token's claims are the caller's own say-so. A refused
-`Abort` is logged on the same channel with `audit: "sandbox_abort"`, so Exec statistics skip it.
+`Abort` is logged on the same channel with `audit: "sandbox_abort"`, and an expired Exec whose slot
+the relay released without the worker's answer (§3.6) with `audit: "sandbox_release"`, so Exec
+statistics skip both.
 
 ### 3.6 Sandbox Execs: request ids, expiry and the in-flight cap
 
@@ -227,12 +229,16 @@ Harness callers are unchanged, and the worker is not changed.
     include the workspace key.
   - Without this rule, two sandboxes that send the same `req_id` and command would share one result.
     One user could also block or abort another user's Exec.
-  - So the relay sends the worker `wid`: the first 53 bits of SHA-256(`sbx` ‖ 0x00 ‖ `req_id` as 8
-    big-endian bytes), with 0 mapped to 1. It writes the caller's own `req_id` back into every frame
-    it returns, and maps `Abort` the same way.
-  - The mapping is deterministic, so a client that retries its own `req_id` still reaches the
-    worker's dedup for its own sandbox. Two sandboxes share a worker id only through a hash
-    collision, which is negligible (2^-53 per pair).
+  - So the relay sends the worker `wid`: the first 53 bits of HMAC-SHA-256(key, `sbx` ‖ 0x00 ‖
+    `req_id` as 8 big-endian bytes), with 0 mapped to 1. It writes the caller's own `req_id` back
+    into every frame it returns, and maps `Abort` the same way.
+  - The key is 32 random bytes the relay draws at boot and never shares. Unkeyed, a sandbox could
+    search offline for a `req_id` of its own whose `wid` equals another sandbox's predictable one,
+    run that sandbox's command first, and have the worker's dedup hand it the planted result.
+  - For one key the mapping is deterministic, so a client that retries its own `req_id` still
+    reaches the worker's dedup for its own sandbox. A relay restart draws a new key; a client
+    re-sends a `req_id` only for a call that never started (§6.5), so nothing is lost. Two
+    sandboxes share a worker id only through a collision, which is negligible (2^-53 per pair).
   - A second Exec with a `req_id` the same sandbox already has in flight is refused with
     `ALREADY_EXISTS`, before routing. The worker would otherwise attach it to the first Exec, and the
     second Exec's cleanup would drop the first one's `Abort` ownership.
@@ -240,8 +246,11 @@ Harness callers are unchanged, and the worker is not changed.
   - The relay checks `exp` only when it accepts an Exec, and the worker allows `timeout_s` up to 2 h
     (`MaxExecTimeoutS`).
   - So the relay arms a timer for each accepted sandbox Exec, at the token's `exp` plus the 30 s
-    leeway. When it fires, the relay aborts the Exec at the worker and ends the call with
-    `DEADLINE_EXCEEDED`, "sandbox token expired during the Exec".
+    leeway. When it fires, the relay aborts the Exec at the worker, even if the client has already
+    cancelled, and ends the call with `DEADLINE_EXCEEDED`, "sandbox token expired during the Exec".
+  - The Exec keeps its in-flight slot until the worker sends its terminal frame. A worker that has
+    not sent one 60 s after the abort (a wedged guest, a lost frame) loses the slot anyway, and the
+    relay logs `audit: "sandbox_release"`, `outcome: "released"`.
   - The Exec itself is not rewritten, because changing `timeout_s` would change the worker's dedup
     fingerprint.
   - If the relay dies first, the worker's attach stream drops and the worker kills that stream's

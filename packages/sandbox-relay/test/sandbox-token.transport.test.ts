@@ -2,7 +2,6 @@ import { status } from '@grpc/grpc-js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { SANDBOX_TOKEN_TYP } from '@moca/control-plane';
 import { makeExecAuth, startRelay } from '../src/main.js';
-import { workerReqId } from '../src/sandbox-auth.js';
 import {
   HARNESS,
   K,
@@ -23,6 +22,7 @@ import {
   token,
   tokenB,
   worker,
+  wid,
 } from './helpers/sandbox-relay.js';
 
 // SBX0 §3.2 / §3.6 / §10.2 over a REAL grpc-js server and client. Every refusal happens BEFORE
@@ -181,7 +181,7 @@ describe('the relay sandbox caller (SBX0 §3.2)', () => {
     expect(w.aborts).toHaveLength(0);
     expect((await abort(r.exec, token(), 4242)).code).toBe(status.OK);
     expect((await running.done).code).not.toBe(status.OK);
-    expect(w.aborts).toEqual([workerReqId('sbx-aaaa', 4242)]);
+    expect(w.aborts).toEqual([wid('sbx-aaaa', 4242)]);
   });
 
   it('refuses to Abort a finished Exec: its ownership entry is gone', async () => {
@@ -204,7 +204,7 @@ describe('the relay sandbox caller (SBX0 §3.2)', () => {
     expect(denied.code).toBe(status.PERMISSION_DENIED);
     expect(w.aborts).toHaveLength(0);
     expect(n22.aborts).toHaveLength(0);
-    w.release(workerReqId('sbx-aaaa', 55));
+    w.release(wid('sbx-aaaa', 55));
     expect((await running.done).code).toBe(status.OK);
   });
 
@@ -219,7 +219,7 @@ describe('the relay sandbox caller (SBX0 §3.2)', () => {
       expect.objectContaining({ audit: 'sandbox_abort', reason: 'wrong token issuer' }),
     ]);
     expect(w.aborts).toHaveLength(0);
-    w.release(workerReqId('sbx-aaaa', 66));
+    w.release(wid('sbx-aaaa', 66));
     expect((await running.done).code).toBe(status.OK);
   });
 });
@@ -233,8 +233,8 @@ describe('sandbox Execs: per-sandbox request ids (SBX0 §3.6)', () => {
     const [ra, rb] = await Promise.all([a.done, b.done]);
     expect(ra.code).toBe(status.OK);
     expect(rb.code).toBe(status.OK);
-    const wa = workerReqId('sbx-aaaa', 7);
-    const wb = workerReqId('sbx-bbbb', 7);
+    const wa = wid('sbx-aaaa', 7);
+    const wb = wid('sbx-bbbb', 7);
     expect(wa).not.toBe(wb);
     expect(w.execs.map((e) => e.reqId).sort()).toEqual([wa, wb].sort());
     // Nothing else of the Exec is rewritten: the worker's dedup fingerprint is the caller's.
@@ -254,12 +254,12 @@ describe('sandbox Execs: per-sandbox request ids (SBX0 §3.6)', () => {
     await sleep(200);
     expect((await abort(r.exec, tokenB(), 9)).code).toBe(status.OK);
     const rb = await b.done;
-    expect(w.aborts).toEqual([workerReqId('sbx-bbbb', 9)]);
+    expect(w.aborts).toEqual([wid('sbx-bbbb', 9)]);
     // B's abort acknowledgement comes back under B's id.
     expect(idsOf(rb.events)).toEqual([9]);
     expect(rb.events[0]?.error?.message).toBe('aborted');
     // A is still running, and finishes normally.
-    w.release(workerReqId('sbx-aaaa', 9));
+    w.release(wid('sbx-aaaa', 9));
     const ra = await a.done;
     expect(ra.code).toBe(status.OK);
     expect(idsOf(ra.events)).toEqual([9, 9]);
@@ -284,9 +284,9 @@ describe('sandbox Execs: per-sandbox request ids (SBX0 §3.6)', () => {
     await sleep(200);
     const dup = await exec(r.exec, { token: token(), reqId: 13 }).done;
     expect(dup.code).toBe(status.ALREADY_EXISTS);
-    expect(dup.details).not.toContain(String(workerReqId('sbx-aaaa', 13)));
+    expect(dup.details).not.toContain(String(wid('sbx-aaaa', 13)));
     expect(w.execs).toHaveLength(1);
-    w.release(workerReqId('sbx-aaaa', 13));
+    w.release(wid('sbx-aaaa', 13));
     expect((await first.done).code).toBe(status.OK);
   });
 
@@ -295,14 +295,14 @@ describe('sandbox Execs: per-sandbox request ids (SBX0 §3.6)', () => {
     // names the id it collided on, which the sandbox caller must only ever see as its own.
     const r = await relay({ MOCA_RELAY_EXEC_TOKEN: HARNESS });
     const w = await worker(r.attach, 'sbx_default', 'hold');
-    const wid = workerReqId('sbx-aaaa', 14);
-    const harness = exec(r.exec, { token: HARNESS, reqId: wid, wsk: 'run-1' });
+    const id = wid('sbx-aaaa', 14);
+    const harness = exec(r.exec, { token: HARNESS, reqId: id, wsk: 'run-1' });
     await sleep(200);
     const res = await exec(r.exec, { token: token(), reqId: 14 }).done;
     expect(res.code).not.toBe(status.OK);
     expect(res.details).toMatch(/req_id 14 already in flight/);
-    expect(res.details).not.toContain(String(wid));
-    w.release(wid);
+    expect(res.details).not.toContain(String(id));
+    w.release(id);
     expect((await harness.done).code).toBe(status.OK);
   });
 
@@ -314,7 +314,7 @@ describe('sandbox Execs: per-sandbox request ids (SBX0 §3.6)', () => {
     a.cancel();
     expect((await a.done).code).toBe(status.CANCELLED);
     await sleep(100);
-    expect(w.aborts).toEqual([workerReqId('sbx-aaaa', 15)]);
+    expect(w.aborts).toEqual([wid('sbx-aaaa', 15)]);
   });
 });
 
@@ -337,12 +337,12 @@ describe('sandbox Execs: no Exec outlives its token (SBX0 §3.6)', () => {
       await sleep(200);
       // Exactly one Abort: grpc-js reports the call it ended as cancelled, which must not send a
       // second one.
-      expect(w.aborts).toEqual([workerReqId('sbx-aaaa', 21)]);
+      expect(w.aborts).toEqual([wid('sbx-aaaa', 21)]);
       if (mode === 'hold') {
         // The relay is sound afterwards: the next Exec runs, under its own id.
         const next = exec(r.exec, { token: token(), reqId: 24 });
         await sleep(200);
-        w.release(workerReqId('sbx-aaaa', 24));
+        w.release(wid('sbx-aaaa', 24));
         const done = await next.done;
         expect(done.code).toBe(status.OK);
         expect(idsOf(done.events)).toEqual([24, 24]);
@@ -356,7 +356,7 @@ describe('sandbox Execs: no Exec outlives its token (SBX0 §3.6)', () => {
     const a = exec(r.exec, { token: token({ ttlSeconds: 1 }), reqId: 22 });
     await sleep(2_200);
     expect(w.aborts).toHaveLength(0);
-    w.release(workerReqId('sbx-aaaa', 22));
+    w.release(wid('sbx-aaaa', 22));
     expect((await a.done).code).toBe(status.OK);
   });
 
@@ -394,7 +394,7 @@ describe('sandbox Execs: no Exec outlives its token (SBX0 §3.6)', () => {
     const cancelled = exec(r.exec, { token: token(), reqId: 2 });
     await sleep(200);
     expect(live.size).toBe(2);
-    w.release(workerReqId('sbx-aaaa', 1));
+    w.release(wid('sbx-aaaa', 1));
     expect((await ended.done).code).toBe(status.OK);
     cancelled.cancel();
     expect((await cancelled.done).code).toBe(status.CANCELLED);
@@ -418,14 +418,14 @@ describe('sandbox Execs: the in-flight cap (SBX0 §3.6)', () => {
     const other = exec(r.exec, { token: tokenB(), reqId: 3, wsk: 'sbx-bbbb' });
     await sleep(200);
     expect(w.execs).toHaveLength(3);
-    w.release(workerReqId('sbx-aaaa', 1));
+    w.release(wid('sbx-aaaa', 1));
     expect((await one.done).code).toBe(status.OK);
     const four = exec(r.exec, { token: token(), reqId: 4 });
     await sleep(200);
-    expect(w.execs.map((e) => e.reqId)).toContain(workerReqId('sbx-aaaa', 4));
-    w.release(workerReqId('sbx-aaaa', 4));
-    w.release(workerReqId('sbx-aaaa', 2));
-    w.release(workerReqId('sbx-bbbb', 3));
+    expect(w.execs.map((e) => e.reqId)).toContain(wid('sbx-aaaa', 4));
+    w.release(wid('sbx-aaaa', 4));
+    w.release(wid('sbx-aaaa', 2));
+    w.release(wid('sbx-bbbb', 3));
     expect((await four.done).code).toBe(status.OK);
     expect((await two.done).code).toBe(status.OK);
     expect((await other.done).code).toBe(status.OK);
@@ -439,7 +439,7 @@ describe('sandbox Execs: the in-flight cap (SBX0 §3.6)', () => {
     const two = await exec(r.exec, { token: token(), reqId: 2 }).done;
     expect(two.code).toBe(status.RESOURCE_EXHAUSTED);
     expect(two.details).toBe('sandbox busy: 1 Execs already in flight');
-    w.release(workerReqId('sbx-aaaa', 1));
+    w.release(wid('sbx-aaaa', 1));
     expect((await one.done).code).toBe(status.OK);
   });
 
@@ -461,7 +461,7 @@ describe('sandbox Execs: the in-flight cap (SBX0 §3.6)', () => {
       wsk: path === 'refusal' ? 'sbx-other' : 'sbx-aaaa',
     });
     await sleep(200);
-    if (path === 'end') w.release(workerReqId('sbx-aaaa', 1));
+    if (path === 'end') w.release(wid('sbx-aaaa', 1));
     if (path === 'error') await abort(r.exec, token(), 1); // answered with an ExecError
     if (path === 'cancel') first.cancel();
     if (path === 'disconnect') w.close();
@@ -480,8 +480,8 @@ describe('sandbox Execs: the in-flight cap (SBX0 §3.6)', () => {
     await sleep(150);
     const next = exec(r.exec, { token: token(), reqId: 2 });
     await sleep(200);
-    expect(w.execs.map((e) => e.reqId)).toContain(workerReqId('sbx-aaaa', 2));
-    w.release(workerReqId('sbx-aaaa', 2));
+    expect(w.execs.map((e) => e.reqId)).toContain(wid('sbx-aaaa', 2));
+    w.release(wid('sbx-aaaa', 2));
     expect((await next.done).code).toBe(status.OK);
   });
 });

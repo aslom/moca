@@ -71,6 +71,15 @@ describe('the sandbox profile config (SBX0 §4.1, §5)', () => {
     );
   });
 
+  it('refuses a token TTL over an hour, which would stretch how late a delete takes effect', () => {
+    expect(configFromEnv(env({ SH_SANDBOX_TOKEN_TTL_SECONDS: '3600' })).sandbox?.tokenTtlS).toBe(
+      3600,
+    );
+    expect(() => configFromEnv(env({ SH_SANDBOX_TOKEN_TTL_SECONDS: '3601' }))).toThrow(
+      /^SH_SANDBOX_TOKEN_TTL_SECONDS must be at most 3600/,
+    );
+  });
+
   it('names the variable in a refusal, never its value', () => {
     // A refusal lands in a pod log; a mistyped secret must not ride along with it.
     const short = 'janitor-secret-too-short'; // notsecret

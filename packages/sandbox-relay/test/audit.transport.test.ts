@@ -3,7 +3,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SandboxExecClient, Stream } from '@moca/k8s-sandbox';
 import { makeExecAuth, startRelay } from '../src/main.js';
 import { commandPreview, type AuditLine } from '../src/sandbox-caller.js';
-import { workerReqId } from '../src/sandbox-auth.js';
 import {
   HARNESS,
   K,
@@ -19,6 +18,7 @@ import {
   tokenB,
   worker,
   type Reply,
+  wid,
 } from './helpers/sandbox-relay.js';
 
 // SBX0 §3.5 over a real grpc-js relay: one audit line per sandbox Exec, on the relay's existing
@@ -38,7 +38,7 @@ async function answering(reply: Reply, env: NodeJS.ProcessEnv = {}) {
   return r;
 }
 
-const WID = (reqId: number) => workerReqId('sbx-aaaa', reqId);
+const WID = (reqId: number) => wid('sbx-aaaa', reqId);
 
 describe('one audit line per sandbox Exec (SBX0 §3.5)', () => {
   it('writes one line with the caller, the outcome and the stdout size, and no command or output', async () => {

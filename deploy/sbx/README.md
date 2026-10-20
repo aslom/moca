@@ -69,7 +69,17 @@ The run refuses, before applying anything, when `SBX_MAX_TOTAL` × `SBX_WORKSPAC
 80 % of `SBX_WORKSPACE_FS_GIB`: the quota is the disk control.
 
 Re-run it after any change; tokens, the signing key and certificates are kept. A change to any
-setting rolls the control plane and the relay, which read their settings only at boot.
+setting, the public keyset or a route certificate rolls the control plane and the relay, which read
+them only at boot.
+
+**One namespace per SBX stack.** The run refuses a `moca-mu1` Secret it did not create: a MOCA
+control plane's signing key, in a shared namespace or copied in. The two stacks also mint API tokens
+under different issuers, so neither accepts the other's.
+
+**Rotating the signing key is a hard cut.** The keyset holds only the current key, so there is no
+overlap window. Delete `moca-mu1` and re-run: every API token and sandbox token already issued is
+refused at once. Refresh tokens are not signed and survive, so `mocactl sbx` gets new ones on its
+next call, but an Exec in flight fails, and a direct client must fetch a new sandbox token.
 
 **Changing `SBX_LIFETIME_DAYS` means reinstalling every host's workers.** The control plane takes
 the new lifetime at once, but a running worker keeps the idle reclaim (`SH_WORKSPACE_IDLE`) it was
@@ -100,7 +110,10 @@ bundles, which now carry the workspace idle time and image size; it refuses a 1a
 workspaces are not migrated:** a 1b sandbox has a workspace key of its own, which no 1a workspace
 matches, so tell 1a users to pull their work out before the upgrade.
 
-**The API Route's certificate:** without `SBX_API_TLS_CERT/KEY` the API Route uses the router's
+**The API Route's certificate:** with `SBX_API_TLS_CERT/KEY` the run patches the certificate and
+key onto the Route itself, never into the applied overlay or a file left on disk. OpenShift keeps an
+edge Route's key in its spec, so anyone who can read Routes in the namespace (`view`) can read it:
+give that role only to operators. Without them the API Route uses the router's
 default certificate. If that certificate is not publicly trusted (a self-signed or internal-CA
 wildcard), `mocactl sbx login` fails its TLS check: users then need `NODE_EXTRA_CA_CERTS=<ca.pem>`
 in their environment.

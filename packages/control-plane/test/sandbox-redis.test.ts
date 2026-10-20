@@ -80,4 +80,35 @@ describe('RedisSandboxStore TTLs (retention is the key lifetime)', () => {
     expect(ttl).toBeLessThanOrEqual(1500);
     await done();
   });
+
+  it('prunes index members whose record is gone on create, so a create-and-delete loop never grows them', async () => {
+    const { prefix, store, done } = isolated();
+    const now = Math.floor(Date.now() / 1000);
+    const rec = (id: string) => ({
+      id,
+      owner: 'github:1',
+      tenant: 'github:1',
+      name: '',
+      template: 'd',
+      worker: 'w',
+      wsk: id,
+      labels: {},
+      createdAt: now,
+      expiresAt: now + 1000,
+    });
+    const limits = { perSubject: 50, total: 50, retentionS: 500 };
+    for (let i = 0; i < 20; i++) {
+      expect(await store.create(rec(`sbx-old${i}`), limits, now)).toBe('ok');
+      await store.markDeleted(`sbx-old${i}`, now, 500);
+      // Retention passed: the TTL took the record, as Redis would.
+      await client.del(`${prefix}sandbox:sbx-old${i}`);
+    }
+    const owner = `${prefix}owner:${subjectHash('github:1')}`;
+    expect(await client.zCard(owner)).toBeLessThanOrEqual(1);
+    expect(await client.zCard(`${prefix}all`)).toBeLessThanOrEqual(2);
+    // A live member stays.
+    expect(await store.create(rec('sbx-live'), limits, now)).toBe('ok');
+    expect(await client.zScore(owner, 'sbx-live')).not.toBeNull();
+    await done();
+  });
 });

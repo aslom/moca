@@ -60,6 +60,12 @@ export function routeProfileFromEnv(env: NodeJS.ProcessEnv): RouteProfile {
   return v;
 }
 
+/**
+ * The longest sandbox token (SBX0 §3.6): a delete or a de-enrollment takes effect within one token
+ * lifetime, so this bounds how late that can be. setup.sh's SBX_TOKEN_TTL_MINUTES stops at 60 too.
+ */
+export const MAX_SANDBOX_TOKEN_TTL_S = 3600;
+
 function positive(env: NodeJS.ProcessEnv, name: string, def: number): number {
   const v = env[name];
   if (v === undefined || v === '') return def;
@@ -135,12 +141,18 @@ export function sandboxConfigFromEnv(env: NodeJS.ProcessEnv): SandboxConfig {
   if (janitorToken !== undefined && janitorToken.length < 32) {
     throw new Error('SH_JANITOR_TOKEN must be at least 32 characters');
   }
+  const tokenTtlS = positive(env, 'SH_SANDBOX_TOKEN_TTL_SECONDS', 900);
+  if (tokenTtlS > MAX_SANDBOX_TOKEN_TTL_S) {
+    throw new Error(
+      `SH_SANDBOX_TOKEN_TTL_SECONDS must be at most ${MAX_SANDBOX_TOKEN_TTL_S}: a delete takes effect only within one token lifetime`,
+    );
+  }
   return {
     templates: parseTemplates(env.SH_SANDBOX_TEMPLATES),
     allowedSubjects,
     lifetimeS: positive(env, 'SH_SANDBOX_LIFETIME_SECONDS', 7 * 86_400),
     retentionS: positive(env, 'SH_SANDBOX_RETENTION_SECONDS', 14 * 86_400),
-    tokenTtlS: positive(env, 'SH_SANDBOX_TOKEN_TTL_SECONDS', 900),
+    tokenTtlS,
     maxPerSubject: positive(env, 'SH_SANDBOX_MAX_PER_SUBJECT', 3),
     maxTotal: positive(env, 'SH_SANDBOX_MAX_TOTAL', 40),
     issuer: env.SH_SANDBOX_TOKEN_ISSUER || DEFAULT_SANDBOX_ISSUER,

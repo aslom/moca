@@ -115,26 +115,43 @@ def error(message: str):
     return sandbox_pb2.ExecEvent(error=sandbox_pb2.ExecError(message=message))
 
 
+class FakeCall:
+    """Stands in for the streaming call grpc returns: an iterator of events that can be cancelled."""
+
+    def __init__(self, script):
+        self._items, self.cancelled = iter(script), False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        item = next(self._items)
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    def cancel(self):
+        self.cancelled = True
+        return True
+
+
 class FakeStub:
     """Stands in for SandboxExecStub. Each script is a list of events, or an exception to raise
-    after them; one script per Exec call, in order."""
+    after them; one script per Exec call, in order. `abort_error`, when set, is what Abort raises."""
 
-    def __init__(self, *scripts):
-        self.scripts, self.calls = list(scripts), []
+    def __init__(self, *scripts, abort_error: Exception | None = None):
+        self.scripts, self.calls, self.streams, self.aborts = list(scripts), [], [], []
+        self.abort_error = abort_error
 
     def Exec(self, request, metadata):
         self.calls.append((request, dict(metadata)["authorization"].removeprefix("Bearer ")))
-        script = self.scripts.pop(0)
-
-        def events():
-            for item in script:
-                if isinstance(item, Exception):
-                    raise item
-                yield item
-
-        return events()
+        self.streams.append(FakeCall(self.scripts.pop(0)))
+        return self.streams[-1]
 
     def Abort(self, request, metadata):
+        self.aborts.append(request.req_id)
+        if self.abort_error:
+            raise self.abort_error
         return sandbox_pb2.AbortResponse()
 
 
@@ -229,10 +246,23 @@ class SandboxExecTest(unittest.TestCase):
         self.assertGreaterEqual(stub.calls[0][0].exec.timeout_s, 238)
         self.assertTrue(r.capped)
 
-    def test_the_cap_is_the_lifetime_minus_60_not_what_is_left(self):
-        # A token with 500 s left of a 900 s lifetime: the cap is still 840, so a default Exec needs
-        # a fresh token rather than a shorter timeout.
+    def test_a_default_exec_keeps_a_token_with_half_the_cap_left_and_cuts_the_timeout(self):
+        # 500 s left of a 900 s lifetime covers half the 840 s cap plus 60 s: the token is kept, and
+        # the default timeout is cut to what it has left, less 60 s. Not a requested timeout, so
+        # not reported as capped.
         tokens = fresh_tokens(life_left=500, lifetime=900)
+        held = tokens.get()
+        tokens._command = cmd("other")  # a second run would return this
+        stub = FakeStub([end(0)])
+        r = sandbox(stub, tokens).exec("true")
+        self.assertEqual(stub.calls[0][1], held)
+        self.assertEqual(tokens.mints, 1)
+        self.assertIn(r.timeout_s, (438, 439, 440))
+        self.assertFalse(r.capped)
+
+    def test_a_default_exec_mints_when_less_than_half_the_cap_is_left(self):
+        # 400 s left is under 420 + 60: a fresh token, and the full 840 s cap.
+        tokens = fresh_tokens(life_left=400, lifetime=900)
         tokens.get()
         now = int(time.time())
         tokens._command = cmd(jwt(now + 900, now))
@@ -240,6 +270,29 @@ class SandboxExecTest(unittest.TestCase):
         r = sandbox(stub, tokens).exec("true")
         self.assertGreaterEqual(r.timeout_s, 838)
         self.assertEqual(tokens.mints, 2)
+
+    def test_back_to_back_default_execs_mint_once(self):
+        now = int(time.time())
+        tokens = TokenSource(command=cmd(jwt(now + 900, now)))
+        stub = FakeStub([end(0)], [end(0)], [end(0)])
+        s = sandbox(stub, tokens)
+        for _ in range(3):
+            s.exec("true")
+        self.assertEqual(tokens.mints, 1)
+        for req, _ in stub.calls:
+            self.assertLessEqual(req.exec.timeout_s + 60, 900)
+
+    def test_a_requested_timeout_the_held_token_cannot_cover_still_mints(self):
+        # 500 s left keeps the token for a default Exec, but not for a requested 600 s.
+        tokens = fresh_tokens(life_left=500, lifetime=900)
+        tokens.get()
+        now = int(time.time())
+        fresh = jwt(now + 900, now)
+        tokens._command = cmd(fresh)
+        stub = FakeStub([end(0)])
+        r = sandbox(stub, tokens).exec("true", timeout_s=600)
+        self.assertEqual(stub.calls[0][1], fresh)
+        self.assertEqual((r.timeout_s, r.capped), (600, False))
 
     def test_mints_a_fresh_token_when_the_exec_needs_more_time_than_is_left(self):
         tokens = fresh_tokens(life_left=300, lifetime=900)
@@ -301,6 +354,28 @@ class SandboxExecTest(unittest.TestCase):
         with self.assertRaises(SandboxError):
             sandbox(stub, fresh_tokens()).exec("true")
         self.assertEqual(len(stub.calls), 1)
+
+    def test_the_stream_is_cancelled_on_every_way_out(self):
+        for script in ([end(0)], [error("timeout:5"), INTERNAL_AFTER_ERROR], [error("vm boot failed")]):
+            stub = FakeStub(script)
+            with contextlib.suppress(SandboxError):
+                sandbox(stub, fresh_tokens()).exec("true", timeout_s=5)
+            self.assertTrue(stub.streams[0].cancelled, script)
+
+    def test_ctrl_c_aborts_the_exec_and_propagates(self):
+        stub = FakeStub([chunk(b"x"), KeyboardInterrupt()])
+        with self.assertRaises(KeyboardInterrupt):
+            sandbox(stub, fresh_tokens()).exec("sleep 60")
+        self.assertEqual(stub.aborts, [stub.calls[0][0].exec.req_id])
+        self.assertTrue(stub.streams[0].cancelled)
+
+    def test_a_failed_abort_does_not_replace_the_keyboard_interrupt(self):
+        # The Exec finished as Ctrl-C arrived: the relay answers the Abort with PERMISSION_DENIED.
+        denied = FakeRpcError(grpc.StatusCode.PERMISSION_DENIED, "abort not permitted")
+        stub = FakeStub([chunk(b"x"), KeyboardInterrupt()], abort_error=denied)
+        with self.assertRaises(KeyboardInterrupt):
+            sandbox(stub, fresh_tokens()).exec("sleep 60")
+        self.assertEqual(len(stub.aborts), 1)
 
 
 class FromEnvTest(unittest.TestCase):

@@ -45,7 +45,9 @@ patches:
         value: []
   # The sandbox profile makes no Kubernetes API call (no credential store, no service account
   # token), so its egress keeps Redis and 443 (GitHub's device flow) and drops the base's 6443 (the
-  # kube API after DNAT). The `test` op pins the index: the render fails if the base reorders it.
+  # kube API after DNAT). GitHub is public, so 443 also loses the private, CGNAT and link-local
+  # ranges, as base/sandbox.yaml's research egress does: no in-cluster Service, kube API on 443 or
+  # instance metadata. The `test` ops pin the indexes: the render fails if the base reorders them.
   - target:
       kind: NetworkPolicy
       name: moca-control-plane
@@ -58,6 +60,12 @@ patches:
         value: 6443
       - op: remove
         path: /spec/egress/1/ports/1
+      - op: test
+        path: /spec/egress/1/to/0/ipBlock/cidr
+        value: 0.0.0.0/0
+      - op: add
+        path: /spec/egress/1/to/0/ipBlock/except
+        value: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16]
   # The base's in-cluster relay Services: with the exec listener on loopback and the relay's
   # NetworkPolicy ingress emptied, neither is usable, so neither should look like a supported path.
   # The two ghostunnel Services (sandbox-relay-tls, sbx-relay-exec-tls) select the pods directly and

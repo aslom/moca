@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { CpError, writeError } from './errors.js';
 import { checkExchangeAuth, checkStaticBearer } from './exchange.js';
-import { HANDLERS, type CpDeps, type RequestCtx } from './handlers.js';
+import { HANDLERS, apiIssuer, type CpDeps, type RequestCtx } from './handlers.js';
 import { matchRoute, type RouteSpec, bodyLimitFor } from './routes.js';
 import { verifyToken } from './token.js';
 
@@ -73,6 +73,7 @@ function authorize(route: RouteSpec, req: IncomingMessage, deps: CpDeps, ctx: Re
   ctx.principal = verifyToken(presented, deps.verifyKeys, {
     now: Math.floor(deps.now() / 1000),
     requiredScope: 'api',
+    issuer: apiIssuer(deps.config),
   });
 }
 

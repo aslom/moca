@@ -4,6 +4,7 @@ export {
   TOKEN_AUDIENCE,
   DEFAULT_ISSUER,
   KeysetError,
+  SANDBOX_API_ISSUER,
   keyIdFor,
   makeSigner,
   parseKeyset,

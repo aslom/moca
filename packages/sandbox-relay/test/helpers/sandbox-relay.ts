@@ -24,6 +24,7 @@ import {
   mintSandboxToken,
 } from '@moca/control-plane';
 import { makeExecAuth, startRelay, type RelayServerDeps } from '../../src/main.js';
+import { workerReqId } from '../../src/sandbox-auth.js';
 
 // The sandbox relay's transport test kit: a real grpc-js relay, a fake worker attached to it and a
 // SandboxExec client, over loopback. Shared by sandbox-token.transport.test.ts and
@@ -35,6 +36,9 @@ export const records: RecordStore = {
   list: async () => [],
 };
 export const ISS = 'sbx-control-plane';
+/** The relay's req_id key, pinned so a test can name the worker id an Exec will get. */
+export const REQ_ID_KEY = Buffer.alloc(32, 7);
+export const wid = (sbx: string, reqId: number) => workerReqId(REQ_ID_KEY, sbx, reqId);
 export const HARNESS = 'harness-exec-token-for-tests'; // notsecret
 export const closers: Array<() => unknown> = [];
 /** Closes every relay, worker and client the kit opened, newest first. */
@@ -195,6 +199,7 @@ export async function relay(env: NodeJS.ProcessEnv = {}, over: Partial<RelayServ
         ...env,
       }),
       log: (l: string) => lines.push(l),
+      sandboxReqIdKey: REQ_ID_KEY,
       ...over,
     },
   });

@@ -114,6 +114,22 @@ export function makeAudit(write: ((line: string) => void) | undefined, withComma
         ...(withCommands && command !== undefined ? { cmd: commandPreview(command) } : {}),
       });
     },
+    /**
+     * An expired Exec whose worker never ended it within the drain grace: its slot and Abort
+     * ownership are given back anyway. Not an Exec line (that was `expired`), so its own marker.
+     */
+    released(wrk: string, reqId: number, graceS: number, claims: SandboxTokenClaims): void {
+      emit({
+        audit: 'sandbox_release',
+        ts: new Date().toISOString(),
+        sub: claims.sub,
+        sbx: claims.sbx,
+        wrk: utf8Prefix(wrk, AUDIT_WRK_BYTES),
+        req_id: reqId,
+        outcome: 'released',
+        reason: `the worker did not end the Exec within ${graceS} s of its expiry abort`,
+      });
+    },
     /** A refused Abort (not an Exec, so a separate marker that Exec statistics skip). */
     abortRefused(wrk: string, reqId: number, reason: string, claims?: SandboxTokenClaims): void {
       emit({
@@ -146,6 +162,13 @@ function finished(
 const MAX_TIMER_MS = 2 ** 31 - 1;
 
 /**
+ * How long after an expiry Abort an unacknowledged sandbox Exec keeps its in-flight slot. The Go
+ * worker always sends a terminal frame; this bounds a wedged guest or a lost frame, which would
+ * otherwise hold the slot for as long as the attach stream lives.
+ */
+export const SANDBOX_DRAIN_GRACE_S = 60;
+
+/**
  * Runs `fn` once at the absolute time `deadlineMs`, re-arming across setTimeout's 24.8-day ceiling
  * so a long-lived token is never cancelled early. Returns the canceller.
  */
@@ -171,6 +194,10 @@ export interface SandboxCallerOpts {
   maxInflight: number;
   /** Seconds past a token's `exp` at which its running Exec is cancelled. */
   leewayS: number;
+  /** Seconds after the expiry Abort at which an unacknowledged Exec gives back its slot anyway. */
+  drainGraceS: number;
+  /** The key of the per-sandbox req_id mapping (workerReqId); never leaves the relay. */
+  reqIdKey: Buffer;
   timers?: RelayTimers;
   /** Where the audit lines go (SBX0 §3.5). */
   audit: Audit;
@@ -182,7 +209,7 @@ export interface SandboxCallerOpts {
  * and Abort only of the caller's own in-flight Exec. One per Exec server.
  */
 export function makeSandboxCaller(relay: Relay, opts: SandboxCallerOpts) {
-  const { maxInflight, leewayS, audit } = opts;
+  const { maxInflight, leewayS, drainGraceS, reqIdKey, audit } = opts;
   // A sandbox caller may abort only an Exec its own sandbox started and that is still in flight:
   // req_ids are not secret, so without this one sandbox could kill another's command. Keyed by the
   // token's sbx and the CALLER's req_id; the entry holds where the Exec actually runs.
@@ -216,6 +243,12 @@ export function makeSandboxCaller(relay: Relay, opts: SandboxCallerOpts) {
         ...l,
       });
     };
+    // A call cancelled before its handler ran never fires 'cancelled' again, so nothing would abort
+    // what it started: route nothing.
+    if (call.cancelled) {
+      log({ outcome: 'cancelled' });
+      return;
+    }
     // Exact equality on both (SBX0 §3.2): never a prefix, so sbx-a cannot reach sbx-ab.
     const denied =
       sandboxId !== claims.wrk
@@ -250,7 +283,7 @@ export function makeSandboxCaller(relay: Relay, opts: SandboxCallerOpts) {
     }
     let wid: number;
     try {
-      wid = workerReqId(claims.sbx, e.reqId);
+      wid = workerReqId(reqIdKey, claims.sbx, e.reqId);
     } catch {
       log({ outcome: 'refused', reason: 'req_id out of range' });
       failExecStream(call, grpcError(status.INVALID_ARGUMENT, 'req_id out of range'));
@@ -261,23 +294,46 @@ export function makeSandboxCaller(relay: Relay, opts: SandboxCallerOpts) {
     const result = newPumpResult();
     // No Exec outlives its token (SBX0 §3.6): at exp + leeway the worker is told to abort and
     // the call ends at once. The handler then drains the worker's acknowledgement without
-    // writing it, so the slot and the ownership entry are held until the worker lets go.
+    // writing it, so the slot and the ownership entry are held until the worker lets go -- or,
+    // if it never does (a wedged guest, a lost frame), until the drain grace has passed.
     let expired = false;
     let disarm: ReturnType<typeof armDeadline> | undefined;
+    let disarmGrace: ReturnType<typeof armDeadline> | undefined;
+    let freed = false;
+    const free = () => {
+      if (freed) return;
+      freed = true;
+      if (owned.get(key) === entry) owned.delete(key);
+      const left = (inflight.get(claims.sbx) ?? 1) - 1;
+      if (left > 0) inflight.set(claims.sbx, left);
+      else inflight.delete(claims.sbx);
+    };
     try {
       owned.set(key, entry);
       inflight.set(claims.sbx, n + 1);
       disarm = armDeadline(
         (claims.exp + leewayS) * 1000,
         () => {
-          if (call.cancelled) return;
           expired = true;
-          // Now, not after the drain: a worker that never acknowledges must still leave a line.
+          // Now, not after the drain: a worker that never acknowledges must still leave a line. A
+          // call the client already cancelled has its line; this is a no-op then.
           log({ outcome: 'expired' }, result.outBytes);
+          // Always, even on a call already cancelled: a second Abort is a no-op on the worker, and
+          // a missed one leaves the command running to its own timeout.
           relay.routeAbort(sandboxId, wid);
-          failExecStream(
-            call,
-            grpcError(status.DEADLINE_EXCEEDED, 'sandbox token expired during the Exec'),
+          if (!call.cancelled) {
+            failExecStream(
+              call,
+              grpcError(status.DEADLINE_EXCEEDED, 'sandbox token expired during the Exec'),
+            );
+          }
+          disarmGrace = armDeadline(
+            Date.now() + drainGraceS * 1000,
+            () => {
+              audit.released(sandboxId, e.reqId, drainGraceS, claims);
+              free();
+            },
+            opts.timers,
           );
         },
         opts.timers,
@@ -308,10 +364,8 @@ export function makeSandboxCaller(relay: Relay, opts: SandboxCallerOpts) {
       // throw out of the pump still leaves one (as `error`: it has no End).
       log(finished(result, entry.aborted === true), result.outBytes);
       if (disarm) disarm();
-      if (owned.get(key) === entry) owned.delete(key);
-      const left = (inflight.get(claims.sbx) ?? 1) - 1;
-      if (left > 0) inflight.set(claims.sbx, left);
-      else inflight.delete(claims.sbx);
+      if (disarmGrace) disarmGrace();
+      free();
     }
   }
 

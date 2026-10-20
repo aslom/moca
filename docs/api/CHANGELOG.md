@@ -16,6 +16,8 @@ control plane answers 404 for all of them.
 - New `Sandbox` schema and `sandboxId` path parameter (`sbx-` plus 26 lowercase hex characters).
 - New error codes `not_enrolled` (403), `sandbox_not_found` (404), `sandbox_terminated` (409, with
   `reason`), `name_conflict` (409), `quota_exceeded` (429) and `unknown_template` (400).
+- Every sandbox route, the janitor's included, keeps its records in Redis and can answer
+  `503 redis_unavailable`; POST /v1/sandboxes can answer `400 invalid_json`.
 - GET /v1/discovery names the route `profile`, and on `sandbox` answers `execEndpoint` and `execCa`.
 - POST /v1/auth/device/token and POST /v1/auth/token can answer `403 not_enrolled` on the `sandbox`
   profile (a subject not in, or since removed from, `SH_ALLOWED_SUBJECTS`); a refused refresh also

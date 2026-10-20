@@ -40,7 +40,7 @@ export const DEFAULT_SANDBOX_PREFIX = 'sbx:';
 
 // KEYS: live, owner, all, rec, name (a placeholder when unnamed).
 // ARGV: now, expiresAt, perSubject, total, retention, id, createdAt, hasName, nameGcAtMs,
-// field1, value1, ...
+// recPrefix, field1, value1, ...
 // The name key only says WHO last took the name; `live` alone says whether that holder is still
 // live at `now`, exactly as in the memory model. Its PXAT is (expiresAt + retention), garbage
 // collection only: a holder expired by the caller's clock frees the name though the key remains,
@@ -54,7 +54,13 @@ if redis.call('ZCOUNT', KEYS[1], '(' .. ARGV[1], '+inf') >= tot then return 'quo
 local n = 0
 for _, m in ipairs(redis.call('ZRANGE', KEYS[2], 0, -1)) do
   local s = redis.call('ZSCORE', KEYS[1], m)
-  if s and tonumber(s) > now then n = n + 1 end
+  if s and tonumber(s) > now then n = n + 1
+  elseif redis.call('EXISTS', ARGV[10] .. m) == 0 then redis.call('ZREM', KEYS[2], m) end
+end
+-- The oldest members of the global index, whose records the TTL takes first: a few per create keep
+-- it from growing without a list, at bounded cost.
+for _, m in ipairs(redis.call('ZRANGE', KEYS[3], 0, 15)) do
+  if redis.call('EXISTS', ARGV[10] .. m) == 0 then redis.call('ZREM', KEYS[3], m) end
 end
 if n >= per then return 'quota_subject' end
 if ARGV[8] == '1' then
@@ -65,7 +71,7 @@ if ARGV[8] == '1' then
   end
 end
 local fields = {}
-for i = 10, #ARGV do fields[#fields + 1] = ARGV[i] end
+for i = 11, #ARGV do fields[#fields + 1] = ARGV[i] end
 redis.call('HSET', KEYS[4], unpack(fields))
 redis.call('EXPIREAT', KEYS[4], exp + ret)
 redis.call('ZADD', KEYS[1], exp, id)
@@ -142,6 +148,7 @@ export class RedisSandboxStore implements SandboxStore {
           String(rec.createdAt),
           rec.name ? '1' : '0',
           String((rec.expiresAt + l.retentionS) * 1000),
+          this.recKey(''),
           ...fields,
         ],
       })) as CreateOutcome;
