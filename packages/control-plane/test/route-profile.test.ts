@@ -3,7 +3,7 @@ import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ROUTES, matchRoute, type RouteSpec } from '../src/routes.js';
 import { buildHandler } from '../src/server.js';
-import type { CpConfig } from '../src/handlers.js';
+import { apiIssuer, type CpConfig } from '../src/handlers.js';
 import { makeDeps, NOW_MS, type TestDeps } from './helpers/deps.js';
 
 // SBX0 §4.1: the sandbox control plane mounts the login routes and its own, NOTHING else -- by an
@@ -172,5 +172,36 @@ describe('route profiles (SBX0 §4.1)', () => {
   it('still serves the harness routes under the default profile', async () => {
     const base = await serve('harness');
     expect((await fetch(`${base}/v1/sessions`)).status).toBe(401); // matched, then refused: no token
+  });
+});
+
+describe('API token issuers per profile (SBX0 §4.1)', () => {
+  // One signing key, two stacks: what an SBX namespace that reused a MOCA moca-mu1 would run.
+  const apiToken = (d: TestDeps, iss: string) =>
+    d.signer.mint({
+      sub: 'github:1',
+      tenant: 'github:1',
+      roles: [],
+      scope: ['api'],
+      ttlSeconds: 3600,
+      iss,
+      now: Math.floor(NOW_MS / 1000),
+    });
+
+  it('refuses the other profile’s API token on the same key, both ways', async () => {
+    const harness = makeDeps({ config: { routeProfile: 'harness' } });
+    const sandbox = makeDeps({
+      config: { routeProfile: 'sandbox' },
+      signer: harness.signer,
+      verifyKeys: harness.verifyKeys,
+    });
+    const hBase = await serveWith(harness);
+    const sBase = await serveWith(sandbox);
+    const me = (base: string, token: string) =>
+      fetch(`${base}/v1/me`, { headers: { authorization: `Bearer ${token}` } });
+    expect((await me(hBase, apiToken(harness, apiIssuer(harness.config)))).status).toBe(200);
+    expect((await me(sBase, apiToken(sandbox, apiIssuer(sandbox.config)))).status).toBe(200);
+    expect((await me(hBase, apiToken(sandbox, apiIssuer(sandbox.config)))).status).toBe(401);
+    expect((await me(sBase, apiToken(harness, apiIssuer(harness.config)))).status).toBe(401);
   });
 });

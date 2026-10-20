@@ -24,6 +24,12 @@ import { CpError } from './errors.js';
  */
 export const TOKEN_AUDIENCE = 'harness';
 export const DEFAULT_ISSUER = 'sh-control-plane';
+/**
+ * The `iss` of the API tokens a sandbox-profile control plane mints (SBX0 §4.1). Distinct from
+ * DEFAULT_ISSUER, so an SBX stack that shares a signing key with a MOCA one (one namespace, or a
+ * copied Secret) still mints nothing the other accepts: each verifier pins its own issuer.
+ */
+export const SANDBOX_API_ISSUER = 'sbx-control-plane-api';
 
 export interface TokenClaims {
   iss: string;
@@ -260,7 +266,7 @@ export function verifyJws(
 export function verifyToken(
   token: string,
   keys: Map<string, KeyObject>,
-  opts: { now?: number; requiredScope?: string } = {},
+  opts: { now?: number; requiredScope?: string; issuer?: string } = {},
 ): TokenClaims {
   const claims = verifyJws(token, keys, 'JWT').claims as unknown as TokenClaims;
   if (claims.aud !== TOKEN_AUDIENCE) bad('wrong token audience');
@@ -268,7 +274,7 @@ export function verifyToken(
   // a token from any other issuer signed by a key in this keyset verified fine. It matters as soon as
   // a deployment publishes more than one issuer's key -- which is exactly what the keyset LIST exists
   // to allow (spec §5.2) -- so check it while there is still only one.
-  if (claims.iss !== DEFAULT_ISSUER) bad('wrong token issuer');
+  if (claims.iss !== (opts.issuer ?? DEFAULT_ISSUER)) bad('wrong token issuer');
   if (typeof claims.sub !== 'string' || claims.sub.length === 0) bad('token has no subject');
   if (typeof claims.exp !== 'number') bad('token has no expiry');
   const now = opts.now ?? Math.floor(Date.now() / 1000);

@@ -49,7 +49,7 @@ import type { RunKubectl } from './kubectl.js';
 import { DEFAULT_PAGE_SIZE, type OwnershipIndex, type SessionRecord } from './ownership.js';
 import type { IdentityProvider } from './identity.js';
 import type { KeyObject } from 'node:crypto';
-import type { MintInput, TokenClaims } from './token.js';
+import { DEFAULT_ISSUER, SANDBOX_API_ISSUER, type MintInput, type TokenClaims } from './token.js';
 import { isRefreshTokenShape, type RefreshStore } from './refresh-store.js';
 import { projectResources, resolveSandbox } from './resources.js';
 import type { SandboxTiers } from './sandbox-tiers.js';
@@ -57,6 +57,11 @@ import type { RouteProfile } from './routes.js';
 import { isEnrolled, notEnrolled, type SandboxConfig } from './sandbox-config.js';
 import type { SandboxStore } from './sandbox-store.js';
 import { SANDBOX_HANDLERS } from './sandbox-handlers.js';
+
+/** The `iss` this control plane mints API tokens under and accepts on API routes. */
+export function apiIssuer(config: Pick<CpConfig, 'routeProfile'>): string {
+  return config.routeProfile === 'sandbox' ? SANDBOX_API_ISSUER : DEFAULT_ISSUER;
+}
 
 export interface CpConfig {
   /** Which routes this control plane mounts (SBX0 §4.1). Absent means `harness`. */
@@ -224,6 +229,7 @@ function loginBody(
       roles: who.roles,
       scope: ['api'],
       ttlSeconds: deps.config.apiTokenTtlSeconds,
+      iss: apiIssuer(deps.config),
       now: iat,
     }),
     subject: who.subject,

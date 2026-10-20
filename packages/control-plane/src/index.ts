@@ -3,6 +3,7 @@ export { ROUTES, matchRoute, type RouteProfile, type RouteSpec } from './routes.
 export {
   TOKEN_AUDIENCE,
   DEFAULT_ISSUER,
+  SANDBOX_API_ISSUER,
   keyIdFor,
   makeSigner,
   parseKeyset,
