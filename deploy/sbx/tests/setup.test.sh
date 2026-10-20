@@ -39,6 +39,9 @@ case "$1 $2" in
   # MOCK_BLANK_GET=NAME: that Secret reads back with no data (emptied by someone else mid-run).
   # MOCK_FAIL_GET=NAME: reading that Secret fails (a transient API or RBAC error).
   [[ "$3" != "${MOCK_FAIL_GET:-}" ]] || { echo 'Error from server (InternalError): etcdserver: request timed out' >&2; exit 1; }
+  # MOCK_FAIL_GET_LATE=NAME: the same, but only once the relay's rollout has been waited on.
+  [[ "$3" != "${MOCK_FAIL_GET_LATE:-}" || ! -f "$MOCK_STATE/relay-rolled" ]] ||
+    { echo 'Error from server (InternalError): etcdserver: request timed out' >&2; exit 1; }
   if [[ -f "$f" && "$3" == "${MOCK_BLANK_GET:-}" ]]; then jq -c 'del(.data)' "$f"; elif [[ -f "$f" ]]; then cat "$f"; fi
   exit 0 ;;
 'create secret')
@@ -88,6 +91,13 @@ case "$1 $2" in
     .data = ((.data // {}) * ($p.data // {}) | with_entries(select(.value != null))) |
     if (.data // {}) == {} then del(.data) else . end' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
   exit 0 ;;
+'patch route')
+  # The last patch of each Route, as given (a --patch-file is read, so its content is never argv).
+  name="$3" patch=''
+  for a in "$@"; do case "$a" in --patch-file=*) patch="$(cat "${a#--patch-file=}")" ;; esac; done
+  for ((i = 0; i < $# - 1; i++)); do [[ "${args[$i]}" != -p ]] || patch="${args[$((i + 1))]}"; done
+  printf '%s' "$patch" >"$MOCK_STATE/route-$name-patch.json"
+  exit 0 ;;
 'delete secret')
   rm -f "$MOCK_STATE/secret-$3.json"
   exit 0 ;;
@@ -97,6 +107,7 @@ case "$1 $2" in
 'rollout status')
   # MOCK_ROLLOUT_FAIL=KIND/NAME: that rollout times out.
   [[ "$3" != "${MOCK_ROLLOUT_FAIL:-}" ]] || { echo "error: timed out waiting for the condition on $3" >&2; exit 1; }
+  [[ "$3" != deployment/sandbox-relay ]] || : >"$MOCK_STATE/relay-rolled"
   exit 0 ;;
 esac
 echo "mock kubectl: unhandled: $*" >&2
@@ -471,18 +482,18 @@ run_setup export SBX_EXEC_TLS_CERT="$TMP/leaf.crt" SBX_EXEC_TLS_KEY="$TMP/leaf.k
   SBX_API_TLS_CERT="$TMP/leaf.crt" SBX_API_TLS_KEY="$TMP/leaf.key" || fail 'the run with operator certificates failed'
 ! jq -e '.data | has("SH_SANDBOX_EXEC_CA")' "$MOCK_STATE/configmap-sbx-settings.json" >/dev/null ||
   fail 'an issued exec certificate still advertises a CA'
+P="$MOCK_STATE/route-sbx-api-patch.json"
+jq -e '.spec.tls.certificate | contains("BEGIN CERTIFICATE")' "$P" >/dev/null || fail 'the API Route has no certificate'
+jq -e '.spec.tls.key | contains("PRIVATE KEY")' "$P" >/dev/null || fail 'the API Route has no key'
+grep -q 'kubectl patch route sbx-api .*--patch-file=' "$MOCK_LOG" || fail 'the API Route key was not patched from a file'
 render
-awk '/^kind: Route$/,/^---$/' "$TMP/render.yaml" | grep -q 'BEGIN CERTIFICATE' || fail 'the API Route has no certificate'
-awk '/^kind: Route$/,/^---$/' "$TMP/render.yaml" | grep -q 'BEGIN PRIVATE KEY' || fail 'the API Route has no key'
-[[ "$(stat -c %a "$GEN/api-route-tls.json" 2>/dev/null || stat -f %Lp "$GEN/api-route-tls.json")" == 600 ]] ||
-  fail 'the API Route key file is not 0600'
+! grep -q 'PRIVATE KEY' "$TMP/render.yaml" "$GEN/kustomization.yaml" || fail 'the API key is in the applied overlay (and so in last-applied-configuration)'
+! grep -rq 'PRIVATE KEY' "$GEN" || fail 'the API key was left on disk under .generated'
 leaf_key_line="$(sed -n 2p "$TMP/leaf.key")"
 ! grep -qF "$leaf_key_line" "$MOCK_LOG" "$TMP/out" || fail 'the API key reached argv or the log'
 run_setup true || fail 'the run back to the router certificate failed'
-[[ ! -f "$GEN/api-route-tls.json" ]] || fail 'a dropped API certificate leaves its key file behind'
-render
-! awk '/^kind: Route$/,/^---$/' "$TMP/render.yaml" | grep -q 'BEGIN PRIVATE KEY' || fail 'a dropped API certificate is still rendered'
-pass 'an issued exec certificate advertises no CA; the API Route takes an operator certificate, from a 0600 file'
+[[ "$(jq -c .spec.tls "$P")" == '{"certificate":null,"key":null}' ]] || fail 'a dropped API certificate stays on the Route'
+pass 'an issued exec certificate advertises no CA; the API Route takes an operator certificate by a patch, never the overlay'
 
 # 8. A token that reads back empty is never written into a bundle as `SANDBOX_TOKEN=`.
 ! run_setup export MOCK_BLANK_GET=moca-relay-sandbox-tokens || fail 'wrote a worker bundle with an empty token'
@@ -514,3 +525,46 @@ grep -q "image: ghcr.io/example/moca@$D" "$TMP/render.yaml" || fail 'the digest-
 run_setup export SBX_IMAGE="registry.example.invalid:5000/moca@$D" || fail 'run with host:port/repo@digest failed'
 grep -qx '    newName: registry.example.invalid:5000/moca' "$K" || fail "newName lost the registry port: $(grep newName "$K")"
 pass 'a digest-pinned image renders newName without the tag (and keeps a registry port)'
+
+# 11. A failing `kubectl get` of moca-relay after the relay rolled fails the run; it never reads as
+# "no exec token" and reports success with MOCA_RELAY_EXEC_TOKEN still in place.
+rm -f "$MOCK_STATE/relay-rolled"
+! run_setup export MOCK_FAIL_GET_LATE=moca-relay || fail 'carried on past a failing kubectl get of moca-relay'
+! grep -q 'SBX0 ready' "$TMP/out" || fail 'reported ready after a failing kubectl get of moca-relay'
+rm -f "$MOCK_STATE/relay-rolled"
+pass 'a failing kubectl get of moca-relay in the exec-token cleanup fails the run'
+
+# 12. A renewed attach or exec certificate rolls the relay: ghostunnel reads its certificate only at start.
+openssl req -newkey rsa:2048 -nodes -subj '/CN=sbx.apps.example.invalid' -keyout "$TMP/leaf2.key" -out "$TMP/leaf2.csr" >/dev/null 2>&1
+openssl x509 -req -in "$TMP/leaf2.csr" -CA "$TMP/ca.crt" -CAkey "$TMP/ca.key" -CAcreateserial -days 2 -out "$TMP/leaf2.crt" >/dev/null 2>&1
+for pair in ATTACH EXEC; do
+  run_setup export "SBX_${pair}_TLS_CERT=$TMP/leaf.crt" "SBX_${pair}_TLS_KEY=$TMP/leaf.key" || fail "the run with a $pair certificate failed"
+  render
+  h1="$(pod_hash sandbox-relay)"
+  run_setup export "SBX_${pair}_TLS_CERT=$TMP/leaf2.crt" "SBX_${pair}_TLS_KEY=$TMP/leaf2.key" || fail "the run with a renewed $pair certificate failed"
+  render
+  [[ "$(pod_hash sandbox-relay)" != "$h1" ]] || fail "a renewed $pair certificate does not roll the relay"
+done
+pass 'a renewed attach or exec certificate moves the settings hash, so the relay rolls'
+
+# 13. A moca-mu1 setup.sh did not write is refused: an SBX stack never signs with a MOCA control
+# plane's key. One written before the label existed is adopted when sbx-token-keys already publishes it.
+saved="$TMP/state-saved"
+rm -rf "$saved"
+cp -R "$MOCK_STATE" "$saved"
+jq 'del(.metadata.labels)' "$MOCK_STATE/secret-moca-mu1.json" >"$TMP/mu1" && mv "$TMP/mu1" "$MOCK_STATE/secret-moca-mu1.json"
+run_setup true || fail 'refused the pre-label moca-mu1 whose key sbx-token-keys already publishes'
+[[ "$(secret_val moca-mu1 SH_SESSION_TOKEN_PRIVATE_KEY)" == "$priv" ]] || fail 'adopting the pre-label moca-mu1 rotated it'
+jq -e '.metadata.labels["sbx.moca.dev/setup"] == "true"' "$MOCK_STATE/secret-moca-mu1.json" >/dev/null || fail 'the adopted moca-mu1 was not labelled'
+openssl genpkey -algorithm ed25519 -outform DER -out "$TMP/foreign.der" 2>/dev/null
+jq -n --arg k "$(base64 <"$TMP/foreign.der" | tr -d '\n' | base64 | tr -d '\n')" \
+  '{apiVersion:"v1",kind:"Secret",metadata:{name:"moca-mu1"},data:{SH_SESSION_TOKEN_PRIVATE_KEY:$k}}' >"$MOCK_STATE/secret-moca-mu1.json"
+before_keys="$(jq -S . "$MOCK_STATE/secret-sbx-token-keys.json")"
+: >"$MOCK_LOG"
+! run_setup true || fail 'signed with a moca-mu1 that setup.sh did not create'
+grep -q 'moca-mu1 exists but was not created by deploy/sbx/setup.sh' "$TMP/out" || fail 'the foreign moca-mu1 refusal does not say why'
+! grep -q 'kubectl apply -k' "$MOCK_LOG" || fail 'applied the stack with a foreign moca-mu1'
+[[ "$(jq -S . "$MOCK_STATE/secret-sbx-token-keys.json")" == "$before_keys" ]] || fail 'published the foreign key'
+rm -rf "$MOCK_STATE"
+mv "$saved" "$MOCK_STATE"
+pass 'refuses a moca-mu1 it did not create, and adopts its own from before the label'

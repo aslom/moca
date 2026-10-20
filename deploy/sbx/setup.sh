@@ -219,7 +219,8 @@ apply_secret() {
   local name="$1"
   shift
   jq -n --arg name "$name" --arg ns "$NS" \
-    '{apiVersion: "v1", kind: "Secret", type: "Opaque", metadata: {name: $name, namespace: $ns},
+    '{apiVersion: "v1", kind: "Secret", type: "Opaque",
+      metadata: {name: $name, namespace: $ns, labels: {"sbx.moca.dev/setup": "true"}},
       stringData: ([$ARGS.positional | to_entries[] | {key: .value, value: env["S_\(.key)"]}] | from_entries)}' \
     --args "$@" | kc apply --server-side --force-conflicts --field-manager=sbx-setup -f - >/dev/null
 }
@@ -257,7 +258,10 @@ ensure_relay_secret() {
 # template requires that key, so removing it earlier, in a run that then fails, would leave any
 # restarted 1a relay pod in CreateContainerConfigError.
 remove_exec_token() {
-  if secret_json moca-relay | jq -e '.data // {} | has("MOCA_RELAY_EXEC_TOKEN")' >/dev/null; then
+  local json
+  # Captured first (errexit), as in route_cert: inside the `if`, a failing get would read as "no key".
+  json="$(secret_json moca-relay)"
+  if jq -e '.data // {} | has("MOCA_RELAY_EXEC_TOKEN")' <<<"$json" >/dev/null; then
     log "removing MOCA_RELAY_EXEC_TOKEN from moca-relay (SBX0 has no harness caller)"
     kc patch secret moca-relay -n "$NS" --type=merge -p '{"data":{"MOCA_RELAY_EXEC_TOKEN":null}}' >/dev/null
   fi
@@ -306,8 +310,15 @@ remove_client_tokens() {
 # keyIdFor -- so the keyset parses with parseKeyset. The private key lives only in a 0700 temp dir
 # and apply_secret's environment.
 ensure_signing_key() {
-  local json priv dir
+  local json priv dir foreign='' published
   json="$(secret_json moca-mu1)"
+  # A moca-mu1 this script did not write is a MOCA control plane's key (a shared namespace, or a
+  # copied Secret), and signing with it would tie the two stacks together: refused, below, unless
+  # its public key is already the one sbx-token-keys publishes (a namespace set up before the label).
+  if [[ -n "$json" ]] && ! jq -e '.metadata.labels["sbx.moca.dev/setup"] == "true"' <<<"$json" >/dev/null; then
+    foreign=1
+    published="$(json_value "$(secret_json sbx-token-keys)" PUBLIC_KEYS)"
+  fi
   priv="$(json_value "$json" SH_SESSION_TOKEN_PRIVATE_KEY)"
   dir="$(mktemp -d)"
   (
@@ -325,6 +336,8 @@ ensure_signing_key() {
       die 'moca-mu1 SH_SESSION_TOKEN_PRIVATE_KEY is not a PKCS#8 private key: delete the Secret and re-run (this rotates the key)'
     kid="$(openssl dgst -sha256 -hex <"$dir/pub.der" | awk '{print substr($NF, 1, 16)}')"
     spki="$(base64 <"$dir/pub.der" | tr -d '\n')"
+    [[ -z "$foreign" || "$published" == "$kid:$spki" ]] ||
+      die 'moca-mu1 exists but was not created by deploy/sbx/setup.sh: SBX0 needs a namespace of its own (or delete the Secret, which rotates the key)'
     export S_0="$priv"
     apply_secret moca-mu1 SH_SESSION_TOKEN_PRIVATE_KEY
     export S_0="$kid:$spki"
@@ -348,7 +361,7 @@ apply_configmap() {
 # the relay's), then SETTINGS_HASH: what both pods read at boot, with the public keyset, so a change
 # to any of it rolls both (write_overlay). Runs after route_cert: it reads exec-ca.crt.
 ensure_settings() {
-  local ca='' moca sbx
+  local ca='' moca sbx keys attach_crt exec_crt
   [[ ! -f "$GEN/exec-ca.crt" ]] || ca="$(cat "$GEN/exec-ca.crt")"
   # The TTLs are '' (the control plane's defaults); the base reads both keys, so both must exist.
   moca=("SH_GITHUB_CLIENT_ID=$SBX_GITHUB_CLIENT_ID" "SH_ADMIN_SUBJECTS=${SBX_ADMIN_SUBJECTS:-}"
@@ -361,9 +374,17 @@ ensure_settings() {
   [[ -z "$ca" ]] || sbx+=("SH_SANDBOX_EXEC_CA=$ca")
   apply_configmap moca-settings "${moca[@]}"
   apply_configmap sbx-settings "${sbx[@]}"
+  # Captured first, so a failing `kubectl get` stops the run (errexit) rather than hashing without it.
+  # The certificates are in the hash because ghostunnel reads its own only at start: a renewed one
+  # must roll the relay, or it keeps serving the old one until that expires.
+  keys="$(secret_json sbx-token-keys)"
+  attach_crt="$(secret_json moca-relay-tls)"
+  exec_crt="$(secret_json sbx-exec-tls)"
   SETTINGS_HASH="$({
     printf '%s\n' "${moca[@]}" "${sbx[@]}"
-    json_value "$(secret_json sbx-token-keys)" PUBLIC_KEYS
+    json_value "$keys" PUBLIC_KEYS
+    json_value "$attach_crt" tls.crt
+    json_value "$exec_crt" tls.crt
   } | openssl dgst -sha256 -hex | awk '{print substr($NF, 1, 16)}')"
   [[ "$SETTINGS_HASH" =~ ^[0-9a-f]{16}$ ]] || die 'could not hash the settings (openssl dgst)'
 }
@@ -424,17 +445,8 @@ image_entry() {
 
 write_overlay() {
   mkdir -p "$GEN"
-  # The API Route's operator certificate, as a JSON patch in a 0600 file: jq reads the key from its
-  # file, so it never reaches argv. Without one the Route keeps the router's default certificate.
+  # From before the API Route certificate was patched in by api_route_cert: it held the key.
   rm -f "$GEN/api-route-tls.json"
-  if [[ -n "${SBX_API_TLS_CERT:-}" ]]; then
-    (
-      umask 077
-      jq -n --rawfile c "$SBX_API_TLS_CERT" --rawfile k "$SBX_API_TLS_KEY" \
-        '[{op: "add", path: "/spec/tls/certificate", value: $c}, {op: "add", path: "/spec/tls/key", value: $k}]' \
-        >"$GEN/api-route-tls.json"
-    )
-  fi
   {
     printf '# GENERATED by deploy/sbx/setup.sh on every run. Do not edit; gitignored.\n'
     printf 'apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\n'
@@ -442,7 +454,6 @@ write_overlay() {
     printf '  - target: { kind: Route, name: moca-relay }\n    patch: |-\n      - { op: replace, path: /spec/host, value: %s }\n' "$SBX_ATTACH_HOST"
     printf '  - target: { kind: Route, name: sbx-exec }\n    patch: |-\n      - { op: replace, path: /spec/host, value: %s }\n' "$SBX_EXEC_HOST"
     printf '  - target: { kind: Route, name: sbx-api }\n    patch: |-\n      - { op: replace, path: /spec/host, value: %s }\n' "$SBX_API_HOST"
-    [[ ! -f "$GEN/api-route-tls.json" ]] || printf '  - target: { kind: Route, name: sbx-api }\n    path: api-route-tls.json\n'
     # Both pods read their settings and keys only at boot: a new hash changes their pod templates,
     # so the apply rolls them. The control plane's template has no annotations map; p4-relay gives
     # the relay's one, so there this adds a key.
@@ -455,8 +466,31 @@ write_overlay() {
   } >"$GEN/kustomization.yaml"
 }
 
+# The API Route's operator certificate, patched onto the live Route rather than put in the overlay:
+# client-side `apply -k` would copy the key into the last-applied-configuration annotation, and the
+# overlay would keep it on disk. The patch is read from a 0700 temp dir, never argv. A later apply
+# leaves the fields alone (they are not in its last-applied), and without a certificate they are
+# removed, so the Route returns to the router's default. Namespace readers (`view`) can still read a
+# Route's spec.tls.key: that is how OpenShift Routes carry an edge key.
+api_route_cert() {
+  local dir
+  if [[ -z "${SBX_API_TLS_CERT:-}" ]]; then
+    kc patch route sbx-api -n "$NS" --type=merge -p '{"spec":{"tls":{"certificate":null,"key":null}}}' >/dev/null
+    return 0
+  fi
+  dir="$(mktemp -d)"
+  (
+    trap 'rm -rf "$dir"' EXIT
+    chmod 700 "$dir"
+    jq -n --rawfile c "$SBX_API_TLS_CERT" --rawfile k "$SBX_API_TLS_KEY" \
+      '{spec: {tls: {certificate: $c, key: $k}}}' >"$dir/patch.json"
+    kc patch route sbx-api -n "$NS" --type=merge --patch-file="$dir/patch.json" >/dev/null
+  )
+}
+
 apply_stack() {
   kc apply -k "$GEN" >/dev/null
+  api_route_cert
   kc rollout status statefulset/redis -n "$NS" --timeout=300s
   kc rollout status deployment/sandbox-relay -n "$NS" --timeout=300s
   remove_exec_token

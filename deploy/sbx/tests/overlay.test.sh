@@ -158,12 +158,20 @@ cp_ports="$(obj NetworkPolicy moca-control-plane | jq -r '[.spec.egress[].ports[
 [[ " $cp_ports " == *' 6379 '* ]] || fail 'the control plane lost its Redis egress'
 [[ " $cp_ports " != *' 6443 '* ]] || fail 'the sandbox control plane still has 6443 (Kubernetes API) egress'
 pass 'the control plane has no Kubernetes API egress (6443)'
+cp_443="$(obj NetworkPolicy moca-control-plane | jq -c '[.spec.egress[] | select(any(.ports[]?; .port == 443)) | .to[].ipBlock.except] | .[0]')"
+[[ "$cp_443" == '["10.0.0.0/8","172.16.0.0/12","192.168.0.0/16","100.64.0.0/10","169.254.0.0/16"]' ]] ||
+  fail "the control plane's 443 egress reaches private, CGNAT or link-local addresses: $cp_443"
+pass "the control plane's 443 egress excludes private, CGNAT and link-local ranges"
 
 [[ "$(obj Route sbx-api | jq -r .spec.tls.termination)" == edge ]] || fail 'the API Route is not edge-terminated'
 [[ "$(obj Route sbx-api | jq -r .spec.to.name)" == moca-control-plane ]] || fail 'the API Route does not target the control plane'
 [[ "$(q '[.[] | select(.kind == "Route" and .spec.tls.termination == "edge") | .metadata.name] | join(" ")')" == sbx-api ]] ||
   fail 'want one edge Route (the API)'
-pass 'the API Route is edge-terminated, to the control plane'
+[[ "$(obj Route sbx-api | jq -r .spec.tls.insecureEdgeTerminationPolicy)" == None ]] ||
+  fail 'the API Route accepts plain HTTP (a redirect comes after the token has crossed in the clear)'
+[[ "$(obj Route sbx-api | jq -r '.metadata.annotations["haproxy.router.openshift.io/hsts_header"]')" == max-age=* ]] ||
+  fail 'the API Route sends no HSTS header'
+pass 'the API Route is edge-terminated, to the control plane, refuses plain HTTP and sends HSTS'
 
 for r in moca-relay sbx-exec; do
   [[ "$(obj Route "$r" | jq -r .spec.tls.termination)" == passthrough ]] ||
