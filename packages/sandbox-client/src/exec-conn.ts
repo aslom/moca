@@ -35,7 +35,8 @@ export interface ExecResult {
  *   or `max-runs:`). Nothing ran;
  * - `token_expired`: the relay cancelled the Exec at its token's `exp` (DEADLINE_EXCEEDED);
  * - `expiring`: the sandbox itself ends too soon for a command to run (its token, capped at the
- *   sandbox's `expiresAt`, has no more than the 60 s margin left). Nothing ran.
+ *   sandbox's `expiresAt`, has no more than the 60 s margin left), or even a freshly asked-for
+ *   token has no more than that margin left by this machine's clock. Nothing ran.
  */
 export type ExecFailureKind = 'machinery' | 'busy' | 'template_busy' | 'token_expired' | 'expiring';
 
@@ -314,7 +315,19 @@ export class SandboxExecConn {
     const left = this.left(grant);
     if (left !== undefined && t.timeoutS + TOKEN_MARGIN_S > left) {
       // ceil: a token minted this instant keeps its full cap.
-      const cut = Math.max(1, Math.ceil(left) - TOKEN_MARGIN_S);
+      const cut = Math.ceil(left) - TOKEN_MARGIN_S;
+      if (cut < 1) {
+        // Even the token just asked for (a fresh mint, if the held one fell short) has no more
+        // than the margin left: clock skew, or an exp all but here. A 1 s timeout would only
+        // report a timeout that is not the command's, so refuse it before sending anything.
+        throw new ExecMachineryError(
+          `the sandbox token has ${Math.max(0, Math.ceil(left))} s left, no more than the ` +
+            `${TOKEN_MARGIN_S} s margin a command needs; nothing ran. Check this machine's clock, ` +
+            'or the sandbox may be about to expire: `mocactl sbx pull --apply`',
+          undefined,
+          'expiring',
+        );
+      }
       if (cut < t.timeoutS) t = { timeoutS: cut, capped: true };
     }
     return { grant, ...t };

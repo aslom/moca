@@ -659,6 +659,36 @@ describe('SandboxExecConn token freshness (SBX0 §6.5)', () => {
     expect(r.seen.map((s) => s.req.exec!.timeoutS)).toEqual([840, 30]);
   });
 
+  it.each([60, 30, 0])(
+    'refuses as expiring, sending nothing, when even a fresh token has %i s left: within the 60 s margin (review #554)',
+    async (leftS) => {
+      // Clock skew, or a token whose lifetime reads fine but whose exp is all but here.
+      const r = await fakeRelay(ok);
+      const { c, asks } = conn(r.addr, {}, { lifetimeS: 900, leftS: () => leftS });
+      const e = await c.exec('x', { timeoutS: 30 }).catch((x: unknown) => x);
+      expect(e).toBeInstanceOf(ExecMachineryError);
+      expect(e).toMatchObject({ kind: 'expiring', mayHaveRun: false });
+      expect((e as Error).message).toMatch(/^the sandbox token has \d+ s left/);
+      expect(r.seen).toHaveLength(0);
+      // Only after a fresh mint was asked for: one covering the timeout and its margin.
+      expect(asks.at(-1)).toEqual({ force: false, minValidS: 90 });
+    },
+  );
+
+  it('still runs with a 1 s timeout when the token has 61 s left (the margin plus one)', async () => {
+    const r = await fakeRelay(ok);
+    const { c } = conn(r.addr, {}, { lifetimeS: 900, leftS: () => 61 });
+    expect((await c.exec('x', { timeoutS: 30 })).capped).toBe(true);
+    expect(r.seen[0]!.req.exec!.timeoutS).toBe(1);
+  });
+
+  it('refuses as expiring when the lifetime is unreadable and the token has no time left', async () => {
+    const r = await fakeRelay(ok);
+    const { c } = conn(r.addr, {}, { lifetimeS: 0, leftS: () => 20 });
+    await expect(c.exec('x')).rejects.toMatchObject({ kind: 'expiring' });
+    expect(r.seen).toHaveLength(0);
+  });
+
   it('accepts the shortest usable lifetime, 121 s, with a 61 s default timeout', async () => {
     const r = await fakeRelay(ok);
     const { c } = conn(r.addr, {}, { lifetimeS: 121 });
