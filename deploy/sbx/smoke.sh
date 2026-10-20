@@ -510,7 +510,12 @@ step5() {
     cd "$r"
     export PATH="$WORK/bin-a:$PATH"
     case "$agent" in
-    claude) exec claude -p "$PROMPT" --mcp-config .mcp.json --strict-mcp-config ;;
+    # --allowedTools puts the sandbox MCP tools on the session's own allowlist: headless
+    # claude in a fresh workspace has NOT accepted the trust dialog, and an untrusted
+    # workspace's .claude/settings.json allow entries are ignored (its deny entries are
+    # not — local tools stay denied), so without this every mcp__sandbox__* call is
+    # blocked at the permission gate and the agent exits 0 having done nothing.
+    claude) exec claude -p "$PROMPT" --mcp-config .mcp.json --strict-mcp-config --allowedTools 'mcp__sandbox__*' ;;
     *) exec opencode run "$PROMPT" ;;
     esac
   ) >"$LOGS/agent-$agent.log" 2>&1 </dev/null &
