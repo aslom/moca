@@ -345,8 +345,7 @@ export async function exchangeCredential(
     sessionId: rec.sessionId,
     credential: credentialName,
     decision: (usedOperatorFallback ? 'operator_fallback_used' : 'credential_issued') as
-      | 'credential_issued'
-      | 'operator_fallback_used',
+      'credential_issued' | 'operator_fallback_used',
   };
   // Inline fallback (not resolveAuditLog): avoids a handlers.ts <-> exchange.ts cycle.
   (deps.log ?? defaultAuditLog)({ event: 'audit', ...exchangeEntry });

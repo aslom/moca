@@ -50,7 +50,7 @@ The control plane's `/healthz` does not depend on Redis, so an outage does not r
 - **Audit log mirror** (control plane and knative-server, [ADR-0044](../adrs/0044-audit-log-mirror-stdout.md)):
   one JSON object per audit decision on stdout, shape `{"event":"audit","decision":"...","subject":"...","sessionId":"...",...}`.
   Field whitelist: `event, decision, subject, sessionId, workloadId?, configRef?, sandboxId?, credential?,
-  model?, fromModel?, kind?, status?, reason?, bytes?, writable?, family?, graceReplay?`. Never carries
+model?, fromModel?, kind?, status?, reason?, bytes?, writable?, family?, graceReplay?`. Never carries
   token / credential / prompt / response / filename / display-name values —
   [the spec](../specs/2026-10-20-audit-log-mirror-design.md) names the data-handling rules; three
   tests in `packages/control-plane/test/audit-log.test.ts` enforce them. `run_started` and

@@ -1011,7 +1011,10 @@ async function handleRunLeafParsed(
 
   // run_started once (saturation retries don't re-emit), run_finalized once.
   // subject is omitted when auth is null; sh:cp:audit carries it via session_created.
-  const emitLifecycle = (decision: 'run_started' | 'run_finalized', extra: Record<string, unknown>) =>
+  const emitLifecycle = (
+    decision: 'run_started' | 'run_finalized',
+    extra: Record<string, unknown>,
+  ) =>
     defaultAuditLog({
       event: 'audit',
       decision,

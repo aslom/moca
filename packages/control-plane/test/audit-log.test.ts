@@ -65,7 +65,10 @@ function lineToSearchable(line: Record<string, unknown>): string {
  * Drive the full control-plane handler surface that audits. Not every call succeeds (some are
  * refusals -- that's part of the coverage), but every call must emit at least one line.
  */
-async function driveAuditingRoutes(deps: ReturnType<typeof makeDeps>, subject = alice): Promise<void> {
+async function driveAuditingRoutes(
+  deps: ReturnType<typeof makeDeps>,
+  subject = alice,
+): Promise<void> {
   // createSession
   await HANDLERS.createSession!(
     ctx({ principal: subject, body: { credential: 'my-anthropic' } }),
@@ -112,7 +115,12 @@ async function driveAuditingRoutes(deps: ReturnType<typeof makeDeps>, subject = 
 describe('audit-log module', () => {
   it('defaultAuditLog emits one JSON line via console.log', () => {
     const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    defaultAuditLog({ event: 'audit', decision: 'session_created', subject: 'github:1', sessionId: 's' });
+    defaultAuditLog({
+      event: 'audit',
+      decision: 'session_created',
+      subject: 'github:1',
+      sessionId: 's',
+    });
     expect(spy).toHaveBeenCalledTimes(1);
     expect(JSON.parse(spy.mock.calls[0][0] as string)).toEqual({
       event: 'audit',
@@ -192,10 +200,14 @@ describe('data-handling policy across the auditing surface', () => {
     expect(deps.logLines.length).toBeGreaterThan(0);
     for (const line of deps.logLines) {
       for (const key of Object.keys(line)) {
-        expect(ALLOWED_KEYS.has(key), `off-whitelist key ${JSON.stringify(key)} in ${JSON.stringify(line)}`).toBe(true);
-        expect(FORBIDDEN_KEYS, `forbidden key ${JSON.stringify(key)} in ${JSON.stringify(line)}`).not.toContain(
-          key.toLowerCase(),
-        );
+        expect(
+          ALLOWED_KEYS.has(key),
+          `off-whitelist key ${JSON.stringify(key)} in ${JSON.stringify(line)}`,
+        ).toBe(true);
+        expect(
+          FORBIDDEN_KEYS,
+          `forbidden key ${JSON.stringify(key)} in ${JSON.stringify(line)}`,
+        ).not.toContain(key.toLowerCase());
       }
     }
   });
@@ -215,7 +227,10 @@ describe('concurrent-subject attribution', () => {
     let n = 0;
     deps.newId = () => `sid-${++n}`;
     await Promise.all([
-      HANDLERS.createSession!(ctx({ principal: alice, body: { credential: 'my-anthropic' } }), deps),
+      HANDLERS.createSession!(
+        ctx({ principal: alice, body: { credential: 'my-anthropic' } }),
+        deps,
+      ),
       HANDLERS.createSession!(ctx({ principal: bob, body: { credential: 'my-anthropic' } }), deps),
     ]);
 

@@ -25,7 +25,7 @@ sessionId. The two concerns share a single fix.
 - **Audit stream.** The control plane writes decisions to the Redis stream `sh:cp:audit`
   (`packages/control-plane/src/ownership.ts`, constant `AUDIT_STREAM`) with the field schema
   `ts, subject, decision, sessionId?, sandboxId?, credential?, configRef?, bytes?, reason?,
-  model?, fromModel?, family?`.
+model?, fromModel?, family?`.
 - **Shared entry point.** All control-plane handlers that audit go through `auditBestEffort`
   (`packages/control-plane/src/handler-util.ts`), which `XADD`s to that stream.
 - **No data-plane audit.** `handleRunLeafParsed` (`packages/knative-server/src/server.ts`) runs
@@ -52,7 +52,7 @@ One JSON line per audit decision on component stdout. Flat, not nested:
   "subject": "github:69598118",
   "sessionId": "325e15f3-bc0d-47ff-8131-81d6f299771f",
   "credential": "my-anthropic",
-  "model": "claude-sonnet-5"
+  "model": "claude-sonnet-5",
 }
 ```
 
@@ -75,7 +75,7 @@ Three seams:
   site that already uses `auditBestEffort`, which includes all the sandbox routes via a local
   wrapper.
 - **Control plane — raw `index.audit` sites.** `handlers.ts createSession/updateSession/
-  deleteSession`, `exchange.ts`, and the refresh store's `issue`/`rotate`/`revoke`/`revokeFamily`
+deleteSession`, `exchange.ts`, and the refresh store's `issue`/`rotate`/`revoke`/`revokeFamily`
   paths. Each gets a sibling `log({event:'audit', ...})` call next to its XADD.
 - **Data plane — `knative-server/src/server.ts handleRunLeafParsed`.** This is the P6 sync-run
   path. `run_started` emits once before the first `runLeaf` call; the saturation retry loop does
@@ -100,26 +100,26 @@ invariant must survive new audit decisions being added later.
 
 ### 3.1 Allowed field whitelist (closed set)
 
-| Field | Shape | Example |
-|---|---|---|
-| `event` | fixed literal | `"audit"` |
-| `decision` | enum | `"session_created"`, `"session_deleted"`, `"session_deleted_in_flight"`, `"model_changed"`, `"credential_written"`, `"credential_deleted"`, `"credential_issued"`, `"operator_fallback_used"`, `"config_bundle_uploaded"`, `"config_bundle_unchanged"`, `"config_bundle_refused"`, `"config_bundle_deleted"`, `"sandbox_created"`, `"sandbox_deleted"`, `"refresh_issued"`, `"refresh_rotated"`, `"refresh_reuse_detected"`, `"refresh_refused"`, `"refresh_revoked"`, `"run_started"`, `"run_finalized"` |
-| `subject` | OIDC subject id | `"github:69598118"` — identifier only, never display name / email / org |
-| `sessionId` | opaque UUID | `"325e15f3-bc0d-47ff-8131-81d6f299771f"` |
-| `workloadId` | opaque id | `"wl-39cbbd4b"` |
-| `configRef` | sha256 digest | `"sha256:6f7be6…"` — digest only |
-| `sandboxId` | opaque id | `"moca-sandbox-0"` |
-| `credential` | credential name | `"my-anthropic"` (name, not value) |
-| `model` / `fromModel` | model name | `"claude-sonnet-5"` |
-| `kind` | enum | `"prompt"` or `"solve"` |
-| `status` | enum | `"responded"`, `"failed"`, `"paused"`, `"solved"`, `"done"`, `"aborted"` |
-| `reason` | short enum code only | `"saturated"`, `"error"`, `"redis_unavailable"`, `"revoked"`, `"abs_expired"`, `"idle_expired"`, `"reuse"`, `"unknown"`, `"logout"`, `"logout_all"` — **not** error messages, stack traces, or user input |
-| `bytes` | integer | `2140` |
-| `writable` | boolean | `true` |
-| `family` | opaque uuid | `"6fb5d863-…"` (refresh family) |
-| `graceReplay` | boolean | `true` (refresh grace-window replay) |
-| `leafSid` | opaque id | `"<sid>"` (for data-plane leaf identity) |
-| `attempt` | integer | `1` (delivery count on the KEDA path — deferred) |
+| Field                 | Shape                | Example                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| --------------------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `event`               | fixed literal        | `"audit"`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `decision`            | enum                 | `"session_created"`, `"session_deleted"`, `"session_deleted_in_flight"`, `"model_changed"`, `"credential_written"`, `"credential_deleted"`, `"credential_issued"`, `"operator_fallback_used"`, `"config_bundle_uploaded"`, `"config_bundle_unchanged"`, `"config_bundle_refused"`, `"config_bundle_deleted"`, `"sandbox_created"`, `"sandbox_deleted"`, `"refresh_issued"`, `"refresh_rotated"`, `"refresh_reuse_detected"`, `"refresh_refused"`, `"refresh_revoked"`, `"run_started"`, `"run_finalized"` |
+| `subject`             | OIDC subject id      | `"github:69598118"` — identifier only, never display name / email / org                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `sessionId`           | opaque UUID          | `"325e15f3-bc0d-47ff-8131-81d6f299771f"`                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `workloadId`          | opaque id            | `"wl-39cbbd4b"`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `configRef`           | sha256 digest        | `"sha256:6f7be6…"` — digest only                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `sandboxId`           | opaque id            | `"moca-sandbox-0"`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `credential`          | credential name      | `"my-anthropic"` (name, not value)                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `model` / `fromModel` | model name           | `"claude-sonnet-5"`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `kind`                | enum                 | `"prompt"` or `"solve"`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `status`              | enum                 | `"responded"`, `"failed"`, `"paused"`, `"solved"`, `"done"`, `"aborted"`                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `reason`              | short enum code only | `"saturated"`, `"error"`, `"redis_unavailable"`, `"revoked"`, `"abs_expired"`, `"idle_expired"`, `"reuse"`, `"unknown"`, `"logout"`, `"logout_all"` — **not** error messages, stack traces, or user input                                                                                                                                                                                                                                                                                                 |
+| `bytes`               | integer              | `2140`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `writable`            | boolean              | `true`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `family`              | opaque uuid          | `"6fb5d863-…"` (refresh family)                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `graceReplay`         | boolean              | `true` (refresh grace-window replay)                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `leafSid`             | opaque id            | `"<sid>"` (for data-plane leaf identity)                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `attempt`             | integer              | `1` (delivery count on the KEDA path — deferred)                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 
 ### 3.2 Explicitly prohibited
 

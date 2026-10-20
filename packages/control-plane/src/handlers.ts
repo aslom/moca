@@ -777,8 +777,7 @@ export const HANDLERS: Record<string, Handler> = {
       subject: rec.owner,
       sessionId: rec.sessionId,
       decision: (inFlight ? 'session_deleted_in_flight' : 'session_deleted') as
-        | 'session_deleted'
-        | 'session_deleted_in_flight',
+        'session_deleted' | 'session_deleted_in_flight',
     };
     resolveAuditLog(deps)({ event: 'audit', ...deletedEntry });
     await deps.index.audit(deletedEntry);

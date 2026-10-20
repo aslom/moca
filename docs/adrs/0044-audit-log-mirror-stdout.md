@@ -57,4 +57,3 @@ Mirror every audit decision to component stdout as one JSON line, carrying subje
 - Not covered: tool-call transcript retrieval (separate upstream request); the deprecated
   KEDA/Knative drain, silent per-request until it is removed; the sandbox pods and the
   context-service pod, out of scope for #359.
-

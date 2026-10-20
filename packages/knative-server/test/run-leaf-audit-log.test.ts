@@ -21,12 +21,16 @@ const runLeaf = vi.fn();
 vi.mock('@moca/harness/run-leaf', () => ({
   runLeaf: (...a: any[]) => runLeaf(...a),
   validateItem: (o: any) =>
-    o && typeof o.item_id === 'string' && typeof o.file === 'string' && typeof o.pattern === 'string'
+    o &&
+    typeof o.item_id === 'string' &&
+    typeof o.file === 'string' &&
+    typeof o.pattern === 'string'
       ? o
       : null,
   leafSessionId: (env: any) =>
-    (env.sessionId ?? 'leaf').replace(/[^A-Za-z0-9._-]/g, '-').replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, '') ||
-    'leaf',
+    (env.sessionId ?? 'leaf')
+      .replace(/[^A-Za-z0-9._-]/g, '-')
+      .replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, '') || 'leaf',
 }));
 
 import { startServer } from '../src/server';
@@ -82,7 +86,10 @@ describe('POST /runs — audit log mirror', () => {
       verdict: { item_id: 'i1', verdict: 'CLEAR', reason: 'ok' },
     });
 
-    const r = await post({ sessionId: 'sid-abc', item: { item_id: 'i1', file: 'f', pattern: 'p' } });
+    const r = await post({
+      sessionId: 'sid-abc',
+      item: { item_id: 'i1', file: 'f', pattern: 'p' },
+    });
     expect(r.status).toBe(200);
 
     const audits = auditLines().filter(
@@ -98,14 +105,15 @@ describe('POST /runs — audit log mirror', () => {
 
   it('run_started fires once even when saturation makes runLeaf retry', async () => {
     // First call saturated, second call succeeds. The retry loop must NOT re-emit run_started.
-    runLeaf
-      .mockResolvedValueOnce({ status: 'failed', reason: 'saturated' })
-      .mockResolvedValueOnce({
-        status: 'done',
-        verdict: { item_id: 'i1', verdict: 'CLEAR', reason: 'ok' },
-      });
+    runLeaf.mockResolvedValueOnce({ status: 'failed', reason: 'saturated' }).mockResolvedValueOnce({
+      status: 'done',
+      verdict: { item_id: 'i1', verdict: 'CLEAR', reason: 'ok' },
+    });
 
-    const r = await post({ sessionId: 'sid-saturated', item: { item_id: 'i1', file: 'f', pattern: 'p' } });
+    const r = await post({
+      sessionId: 'sid-saturated',
+      item: { item_id: 'i1', file: 'f', pattern: 'p' },
+    });
     expect(r.status).toBe(200);
 
     const starts = auditLines().filter((l) => l.decision === 'run_started');

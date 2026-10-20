@@ -244,7 +244,13 @@ export class RedisRefreshStore implements RefreshStore {
         return { ok: false, reason: reply[0] };
       }
       const [, refreshToken, absExp, subject, displayName, grace] = reply;
-      this.log({ event: 'audit', decision: 'refresh_rotated', subject, family: fid, graceReplay: grace === '1' });
+      this.log({
+        event: 'audit',
+        decision: 'refresh_rotated',
+        subject,
+        family: fid,
+        graceReplay: grace === '1',
+      });
       return {
         ok: true,
         family: fid,
@@ -266,7 +272,8 @@ export class RedisRefreshStore implements RefreshStore {
       .then((n) => {
         const result = Number(n);
         // Only the actual-revocation case; "already revoked" / "gone" aren't state changes.
-        if (result === 1) this.log({ event: 'audit', decision: 'refresh_revoked', family: fid, reason });
+        if (result === 1)
+          this.log({ event: 'audit', decision: 'refresh_revoked', family: fid, reason });
         return result;
       });
   }
