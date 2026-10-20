@@ -186,3 +186,114 @@ bash "$INSTALL" --uninstall sbx_default >"$TMP/out" 2>&1 || fail 'uninstall sbx_
 [[ "$(tail -1 "$MOCK_LOG")" == 'systemctl daemon-reload' ]] || fail "daemon-reload is not the last step of the undo: $(tail -1 "$MOCK_LOG")"
 [[ ! -e "$SBX_UNIT_DIR/sbx-worker@.service" ]] || fail 'reinstall + uninstall left the template unit'
 pass '--uninstall of the last worker removes the shared unit and sbx.slice, then daemon-reloads; workspace data stays'
+
+# The janitor (spec §8.3): --janitor BUNDLE_DIR installs the script, its env, its token and the two
+# units, enables the timer and records all of it as its own manifest kind; --uninstall-janitor
+# reverses it; uninstalling the last worker leaves it alone.
+export SBX_LIBEXEC_DIR="$TMP/libexec"
+JTOKEN="$(printf 'k%.0s' {1..64})"
+jbundle() { # jbundle [ENV_TEXT]: a janitor bundle as setup.sh writes it
+  local d="$TMP/jbundle"
+  rm -rf "$d" && mkdir -p "$d"
+  printf '%s' "${1-$'SBX_API_URL=https://sbx-api.apps.example.invalid\nSBX_JANITOR_AGE=3900\n'}" >"$d/janitor.env"
+  printf '%s' "$JTOKEN" >"$d/janitor.token"
+  echo "$d"
+}
+mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
+M="$SBX_ENV_DIR/manifest"
+
+# Refusals, before anything is written or systemd is touched.
+for bad in 'SBX_API_URL=http://sbx-api.example.invalid' 'SBX_API_URL=https://x/../y' 'SBX_JANITOR_AGE=1h' \
+  $'SBX_API_URL=https://sbx-api.example.invalid\nSBX_JANITOR_AGE=03600' $'SBX_API_URL=https://sbx-api.example.invalid\nSBX_JANITOR_AGE=0900' \
+  $'SBX_API_URL=https://sbx-api.example.invalid\nSBX_JANITOR_AGE=60' $'SBX_API_URL=https://sbx-api.example.invalid\nSBX_JANITOR_AGE=0' \
+  $'SBX_API_URL=https://sbx-api.example.invalid\nSBX_JANITOR_AGE=3900\nSBX_JANITOR_TOKEN=leaked'; do
+  : >"$MOCK_LOG"
+  ! bash "$INSTALL" --janitor "$(jbundle "$bad"$'\n')" >"$TMP/out" 2>&1 || fail "installed a janitor bundle with: $bad"
+  ! grep -q systemctl "$MOCK_LOG" || fail "touched systemd before refusing: $bad"
+  [[ ! -e "$SBX_LIBEXEC_DIR/sbx-janitor.sh" ]] || fail "wrote the janitor before refusing: $bad"
+done
+d="$(jbundle)"; printf 'tooShortSecret' >"$d/janitor.token"
+! bash "$INSTALL" --janitor "$d" >"$TMP/out" 2>&1 || fail 'installed a token under 32 characters'
+! grep -q tooShortSecret "$TMP/out" || fail 'the short-token refusal printed the token'
+d="$(jbundle)"; printf 'not a cert' >"$d/api-ca.crt"
+! bash "$INSTALL" --janitor "$d" >"$TMP/out" 2>&1 || fail 'installed an api-ca.crt that holds no certificate'
+mkdir -p "$TMP/nojq"
+for t in bash cat grep sed install mkdir chmod rm mv id tail cut touch dirname; do ln -sf "$(command -v "$t")" "$TMP/nojq/$t"; done
+ln -sf "$TMP/bin/systemctl" "$TMP/nojq/systemctl"
+! PATH="$TMP/nojq" "$TMP/nojq/bash" "$INSTALL" --janitor "$(jbundle)" >"$TMP/out" 2>&1 || fail 'installed the janitor on a host without jq and curl'
+grep -q 'needs jq' "$TMP/out" || fail 'the missing-jq refusal does not say so'
+pass '--janitor refuses a bad URL, a wait with a leading zero or of 60 s or less, a token in janitor.env, a short token, a bad CA, and a host without jq/curl'
+
+: >"$MOCK_LOG"
+d="$(jbundle)"
+printf -- '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n' >"$d/api-ca.crt"
+bash "$INSTALL" --janitor "$d" >"$TMP/out" 2>&1 || fail 'install the janitor'
+JE="$SBX_ENV_DIR/janitor.env" JT="$SBX_ENV_DIR/janitor.token" JS="$SBX_LIBEXEC_DIR/sbx-janitor.sh"
+[[ "$(mode "$JE")" == 600 && "$(mode "$JT")" == 600 && "$(mode "$JS")" == 755 ]] ||
+  fail "modes: env $(mode "$JE"), token $(mode "$JT"), script $(mode "$JS")"
+[[ "$(cat "$JT")" == "$JTOKEN" ]] || fail 'janitor.token is not the bundle token'
+! grep -qF "$JTOKEN" "$JE" || fail 'the token is in janitor.env'
+grep -qx 'SBX_API_URL=https://sbx-api.apps.example.invalid' "$JE" && grep -qx 'SBX_JANITOR_AGE=3900' "$JE" || fail "janitor.env: $(cat "$JE")"
+grep -qx "SBX_API_CA_FILE=$SBX_ENV_DIR/janitor-api-ca.crt" "$JE" || fail 'janitor.env does not point at the installed API CA'
+[[ -f "$SBX_ENV_DIR/janitor-api-ca.crt" ]] || fail 'the API CA was not installed'
+cmp -s "$JS" "$SRC/deploy/sbx/janitor.sh" || fail 'the installed script is not deploy/sbx/janitor.sh'
+S="$SBX_UNIT_DIR/sbx-janitor.service"
+grep -qx "EnvironmentFile=$SBX_ENV_DIR/janitor.env" "$S" || fail 'the service does not read the installed janitor.env'
+grep -qx "Environment=SBX_JANITOR_TOKEN_FILE=$SBX_ENV_DIR/janitor.token" "$S" || fail 'the service does not name the installed token'
+grep -qx "Environment=SBX_ENV_DIR=$SBX_ENV_DIR" "$S" && grep -qx "Environment=SBX_SRV=$SBX_SRV" "$S" || fail 'the service does not name the env dir and srv'
+grep -qx "ReadWritePaths=-$SBX_SRV/workspaces" "$S" || fail 'the service cannot write the workspace roots'
+grep -qx "ExecStart=$JS" "$S" || fail 'the service does not run the installed script'
+! grep -q '/etc/sbx\|/srv/sbx\|/usr/local/libexec' "$S" || fail "the service keeps a default path: $(grep -n '/etc/sbx\|/srv/sbx\|/usr/local/libexec' "$S")"
+cmp -s "$SBX_UNIT_DIR/sbx-janitor.timer" "$SRC/deploy/sbx/sbx-janitor.timer" || fail 'the timer is not deploy/sbx/sbx-janitor.timer'
+grep -A1 -x 'systemctl daemon-reload' "$MOCK_LOG" | grep -qx 'systemctl enable --now sbx-janitor.timer' || fail "the timer is not enabled after a daemon-reload: $(cat "$MOCK_LOG")"
+! grep -qF "$JTOKEN" "$MOCK_LOG" "$TMP/out" || fail 'the token reached systemctl argv or the log'
+for f in "$JE" "$JT" "$JS" "$S" "$SBX_UNIT_DIR/sbx-janitor.timer" "$SBX_ENV_DIR/janitor-api-ca.crt"; do
+  grep -qx "janitor $f" "$M" || fail "the manifest does not record janitor $f: $(cat "$M")"
+done
+! grep -q '^unit .*janitor' "$M" || fail 'the janitor is recorded as a shared unit (the last worker uninstall would remove it)'
+pass '--janitor installs the 0755 script, 0600 env and token, the CA and both units, enables the timer, records each as janitor'
+
+# Re-run without a CA: the CA and its env line go; nothing else changes.
+bash "$INSTALL" --janitor "$(jbundle)" >"$TMP/out" 2>&1 || fail 're-install the janitor without a CA'
+! grep -q SBX_API_CA_FILE "$JE" && [[ ! -e "$SBX_ENV_DIR/janitor-api-ca.crt" ]] || fail 'a re-install without a CA keeps it'
+! grep -qx "janitor $SBX_ENV_DIR/janitor-api-ca.crt" "$M" || fail 'the manifest keeps the dropped CA'
+[[ "$(grep -c "^janitor $JE\$" "$M")" == 1 ]] || fail 'a re-install records janitor.env twice'
+pass 'a re-install without api-ca.crt drops it and records nothing twice'
+
+# The installed janitor runs from its unit's environment: SBX_ENV_DIR's env file and token.
+mkdir -p "$TMP/jbin"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>%q\necho %q\n' "$TMP/jcurl.log" '{"live":[],"terminated":[]}' >"$TMP/jbin/curl"
+chmod +x "$TMP/jbin/curl"
+(
+  set -a
+  # shellcheck disable=SC1090 # the installed env file
+  . "$JE"
+  set +a
+  SBX_JANITOR_TOKEN_FILE="$JT" PATH="$TMP/jbin:$PATH" "$JS"
+) >"$TMP/out" 2>&1 || fail 'the installed janitor does not run from its env file'
+grep -q '"janitor":"summary"' "$TMP/out" || fail 'the installed janitor printed no summary'
+pass 'the installed janitor runs from the installed env file and token'
+
+# Uninstalling the last worker leaves the janitor; --uninstall-janitor removes exactly it.
+bash "$INSTALL" "$(bundle sbx_default)" --snapshot default >"$TMP/out" 2>&1 || fail 'install sbx_default beside the janitor'
+bash "$INSTALL" --uninstall sbx_default >"$TMP/out" 2>&1 || fail 'uninstall the last worker'
+[[ ! -e "$SBX_UNIT_DIR/sbx-worker@.service" ]] || fail 'the last worker uninstall left the template unit'
+[[ -f "$S" && -f "$SBX_UNIT_DIR/sbx-janitor.timer" && -f "$JS" && -f "$JE" && -f "$JT" ]] || fail 'the last worker uninstall removed the janitor'
+grep -q '^janitor ' "$M" || fail 'the last worker uninstall dropped the janitor from the manifest'
+bash "$INSTALL" "$(bundle sbx_py312)" --snapshot py312 >"$TMP/out" 2>&1 || fail 'install sbx_py312 beside the janitor'
+: >"$MOCK_LOG"
+bash "$INSTALL" --uninstall-janitor >"$TMP/out" 2>&1 || fail '--uninstall-janitor'
+[[ -f "$SBX_ENV_DIR/workers/sbx_py312.env" && -f "$SBX_UNIT_DIR/sbx-worker@.service" && -f "$SBX_UNIT_DIR/sbx-sbx_py312.slice" ]] ||
+  fail "--uninstall-janitor removed a worker's files"
+grep -q '^worker sbx-worker@sbx_py312 ' "$M" && grep -q '^unit ' "$M" || fail "--uninstall-janitor dropped worker lines: $(cat "$M")"
+! grep -q 'disable --now sbx-worker' "$MOCK_LOG" || fail '--uninstall-janitor stopped a worker'
+grep -qx 'systemctl disable --now sbx-janitor.timer' "$MOCK_LOG" || fail 'the timer was not disabled'
+[[ "$(tail -1 "$MOCK_LOG")" == 'systemctl daemon-reload' ]] || fail 'daemon-reload is not the last step of --uninstall-janitor'
+for f in "$S" "$SBX_UNIT_DIR/sbx-janitor.timer" "$JS" "$JE" "$JT"; do [[ ! -e "$f" ]] || fail "--uninstall-janitor left $f"; done
+! grep -q '^janitor ' "$M" || fail "--uninstall-janitor left manifest lines: $(cat "$M")"
+[[ -d "$SBX_SRV/workspaces/sbx_default" ]] || fail '--uninstall-janitor removed workspace data'
+bash "$INSTALL" --uninstall-janitor >"$TMP/out" 2>&1 || fail 'a second --uninstall-janitor fails (it should be a no-op)'
+bash "$INSTALL" --uninstall sbx_py312 >"$TMP/out" 2>&1 || fail 'uninstall sbx_py312'
+[[ ! -s "$M" ]] || fail "the manifest is not empty once the janitor and every worker are gone: $(cat "$M")"
+! bash "$INSTALL" --janitor "$(jbundle)" --uninstall sbx_py312 >"$TMP/out" 2>&1 || fail 'accepted --janitor with --uninstall'
+pass 'the last worker uninstall leaves the janitor; --uninstall-janitor removes exactly its files and lines, never a worker'

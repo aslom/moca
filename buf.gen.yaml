@@ -14,6 +14,15 @@ plugins:
       - esModuleInterop=true
       - forceLong=number
       - useOptionals=none
+  # TypeScript (SBX0 clients) -- the same stubs for @moca/sandbox-client, which mocactl bundles
+  # without depending on @moca/k8s-sandbox (ADR-0042).
+  - remote: buf.build/community/stephenh-ts-proto:v2.6.1
+    out: packages/sandbox-client/src/gen
+    opt:
+      - outputServices=grpc-js
+      - esModuleInterop=true
+      - forceLong=number
+      - useOptionals=none
   # Go (worker) — messages + gRPC service stubs.
   - remote: buf.build/protocolbuffers/go:v1.36.4
     out: gen/go

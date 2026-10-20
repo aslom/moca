@@ -6,6 +6,11 @@ resource), **attach** (passthrough, KVM hosts' workers dial in) and **exec** (pa
 `Exec` calls). Design:
 [`docs/specs/2026-10-15-sbx0-internal-sandbox-service-design.md`](../../docs/specs/2026-10-15-sbx0-internal-sandbox-service-design.md).
 
+This page is the install reference. Day-to-day operation (users, templates, key rotation, outages,
+disk, status and upgrades) is [the runbook](RUNBOOK.md); users have
+[the user guide](../../docs/sbx/user-guide.md); the security gate's checklist is
+[the security review](../../docs/sbx/security-review.md).
+
 ## 1. Cluster side
 
 Needs `kubectl` logged in with edit rights in an **existing** namespace, `jq`, and an `openssl` that
@@ -42,6 +47,8 @@ Optional inputs:
 | `SBX_MAX_INFLIGHT`                     | 2       | 1-8: `Exec` calls one sandbox may have in flight at the relay               |
 | `SBX_WORKSPACE_IMAGE_MB`               | 2048    | each workspace's image size (`microvm-worker`'s `SH_WORKSPACE_IMAGE_MB`)    |
 | `SBX_{API,ATTACH,EXEC}_TLS_{CERT,KEY}` | none    | the Route's certificate; otherwise the router's (api) or a self-signed one  |
+| `SBX_JANITOR_WAIT_MINUTES`             | 60      | how long after a sandbox ends the janitor frees its workspace (below)       |
+| `SBX_API_CA_FILE`                      | none    | a PEM CA the host janitor trusts for the API Route (below)                  |
 
 The templates file lists one template per worker in `SBX_WORKERS`. A template id is lower-case
 letters, digits and dashes, and unique; `tools` is what `mocactl sbx` shows:
@@ -111,9 +118,12 @@ default certificate. If that certificate is not publicly trusted (a self-signed 
 wildcard), `mocactl sbx login` fails its TLS check: users then need `NODE_EXTRA_CA_CERTS=<ca.pem>`
 in their environment.
 
-**No janitor yet:** 1b has none (increment 1c adds it). A deleted or expired sandbox's workspace stays
-on the host's disk until the worker's own idle sweep (`SH_WORKSPACE_IDLE`, the lifetime plus two
-days) reclaims it, so size `SBX_WORKSPACE_FS_GIB` with that in mind.
+**The janitor's wait** (`SBX_JANITOR_WAIT_MINUTES`) defaults to 60 minutes, or
+`SBX_TOKEN_TTL_MINUTES` + 5 when that is longer. The run refuses a wait that does not exceed the
+token lifetime plus 30 s: a deleted sandbox's last token must have expired before its workspace is
+freed. The janitor calls the API Route from the KVM host. If that Route's certificate is not
+publicly trusted, set `SBX_API_CA_FILE` to its CA, which is shipped in the janitor bundle.
+Otherwise every janitor run logs `skipped`.
 
 ## 2. KVM host side
 
@@ -134,11 +144,45 @@ a host also removes the shared `sbx-worker@.service` and `sbx.slice`. Workspace 
 `/srv/sbx/workspaces/<id>` and `/srv/sbx/jail/<id>` is kept; remove it by hand when no sandbox needs
 it.
 
-## 3. Users
+**The janitor** frees the workspaces of ended sandboxes (spec §8.3). Install it once per host, from
+the bundle `setup.sh` writes to `deploy/sbx/.generated/janitor`:
 
-Users log in with GitHub and create sandboxes from a template:
+    scp -r deploy/sbx/.generated/janitor <host>:sbx-janitor
+    ssh <host> sudo <checkout>/deploy/sbx/install-host.sh --janitor sbx-janitor
+    ssh <host> rm -r sbx-janitor
+
+It needs `jq` and `curl` on the host. It installs `/usr/local/libexec/sbx-janitor.sh`,
+`/etc/sbx/janitor.env` and `/etc/sbx/janitor.token` (0600; the token is in that file only) and
+enables `sbx-janitor.timer`, which runs every 15 minutes. Each run asks the control plane for its
+live and terminated sandboxes, then, in each of this host's worker roots, it removes:
+
+- the workspace of a sandbox terminated more than the wait ago;
+- an unknown workspace (no record at all) left unmodified for longer than the worker's
+  `SH_WORKSPACE_IDLE`;
+- `.reclaiming-*` trees older than an hour.
+
+It renames each tree out of the workspace name space before removing it. It keeps everything else,
+and touches nothing when the control plane is unreachable. Each run logs one JSON summary line:
+
+    journalctl -u sbx-janitor -o cat | grep '"janitor":"summary"' | tail -1
+
+Uninstalling the last worker leaves the janitor in place. `install-host.sh --uninstall-janitor`
+removes it. Re-run `--janitor` with a new bundle after changing `SBX_JANITOR_WAIT_MINUTES`,
+`SBX_API_HOST` or `SBX_API_CA_FILE`.
+
+## 3. Status
+
+`deploy/sbx/status.sh --env-file <file>` reports, read-only, which workers are attached, the live
+and retained sandboxes, and the last hour's Exec latency and error rate from the relay's audit lines.
+On a KVM host, `sudo deploy/sbx/status.sh --host` reports the units, the workspace disk and the
+janitor's last run (see [the runbook](RUNBOOK.md#8-status-and-the-audit-lines)).
+
+## 4. Users
+
+Users log in with GitHub, then bring a repository up in a sandbox; [the user guide](../../docs/sbx/user-guide.md)
+covers it end to end:
 
     mocactl sbx login --control-plane-url https://<api host>
-    mocactl sbx create --template <id>
+    cd <repository> && mocactl sbx up
 
 To call the gRPC API directly, see [the direct-client guide](../../docs/api/sandbox-v1-direct-client.md).

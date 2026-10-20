@@ -4,6 +4,8 @@
 #
 #   sudo deploy/sbx/install-host.sh BUNDLE_DIR --snapshot IMAGE [--budget-mb N]
 #   sudo deploy/sbx/install-host.sh --uninstall WORKER_ID
+#   sudo deploy/sbx/install-host.sh --janitor JANITOR_BUNDLE_DIR
+#   sudo deploy/sbx/install-host.sh --uninstall-janitor
 #
 # BUNDLE_DIR is deploy/sbx/.generated/workers/<id> from deploy/sbx/setup.sh. IMAGE names a golden
 # snapshot under $SBX_SRV/snapshots (deploy/microvm/build-snapshot.sh --out $SBX_SRV/snapshots/IMAGE).
@@ -14,12 +16,19 @@
 # is listed in $SBX_ENV_DIR/manifest, and --uninstall is the undo (spec §8.2): it removes the
 # worker's files and, once no worker is left in the manifest, the shared template unit and
 # sbx.slice too. It leaves workspace data in place (the janitor, or the operator, removes that).
+#
+# --janitor takes deploy/sbx/.generated/janitor (janitor.env, janitor.token [+ api-ca.crt]) and
+# installs the host janitor (spec §8.3): $SBX_LIBEXEC_DIR/sbx-janitor.sh, $SBX_ENV_DIR/janitor.env
+# and janitor.token (0600), sbx-janitor.service and .timer (enabled). Its files are their own
+# manifest kind, `janitor <path>`, so uninstalling the last worker leaves the janitor running (it
+# still has workspaces to free); --uninstall-janitor removes exactly them.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${SBX_UNIT_DIR:=/etc/systemd/system}"
 : "${SBX_ENV_DIR:=/etc/sbx}"
 : "${SBX_SRV:=/srv/sbx}"
+: "${SBX_LIBEXEC_DIR:=/usr/local/libexec}"
 : "${SBX_ATTACH_TIMEOUT:=120}"
 : "${SBX_ATTACH_SETTLE:=5}"
 # A bundle from deploy/sbx/setup.sh carries SH_WORKSPACE_IDLE (the sandbox lifetime plus two days,
@@ -33,13 +42,15 @@ die() { echo "deploy/sbx/install-host.sh: $*" >&2; exit 1; }
 
 env_value() { (grep -E "^$1=" "$2" 2>/dev/null || true) | tail -1 | cut -d= -f2-; }
 
-BUNDLE='' SNAPSHOT='' BUDGET_MB="$DEFAULT_BUDGET_MB" UNINSTALL=''
+BUNDLE='' SNAPSHOT='' BUDGET_MB="$DEFAULT_BUDGET_MB" UNINSTALL='' JANITOR='' UNINSTALL_JANITOR=''
 parse_args() {
   while (($#)); do
     case "$1" in
     --snapshot) [[ $# -ge 2 ]] || die '--snapshot needs a value'; SNAPSHOT="$2"; shift 2 ;;
     --budget-mb) [[ $# -ge 2 ]] || die '--budget-mb needs a value'; BUDGET_MB="$2"; shift 2 ;;
     --uninstall) [[ $# -ge 2 ]] || die '--uninstall needs a worker id'; UNINSTALL="$2"; shift 2 ;;
+    --janitor) [[ $# -ge 2 ]] || die '--janitor needs the janitor bundle directory'; JANITOR="$2"; shift 2 ;;
+    --uninstall-janitor) UNINSTALL_JANITOR=1; shift ;;
     -*) die "unknown flag: $1" ;;
     *) [[ -z "$BUNDLE" ]] || die 'one bundle directory at a time'; BUNDLE="$1"; shift ;;
     esac
@@ -187,6 +198,91 @@ remove_shared_units() {
   done < <(grep '^unit ' "$SBX_ENV_DIR/manifest" || true)
 }
 
+# The janitor's paths go into sed replacements and a unit file: plain absolute paths only.
+PLAIN_PATH_RE='^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$'
+JANITOR_URL_RE='^https://[A-Za-z0-9.-]+(:[0-9]+)?$' # janitor.sh's own rule
+
+install_janitor() {
+  local b="$JANITOR" url age v line ca=''
+  local t
+  for t in jq curl; do command -v "$t" >/dev/null || die "needs $t on PATH: the janitor (deploy/sbx/janitor.sh) calls it"; done
+  for v in SBX_ENV_DIR SBX_SRV SBX_LIBEXEC_DIR SBX_UNIT_DIR; do
+    [[ "${!v}" =~ $PLAIN_PATH_RE ]] || die "$v='${!v}' must be a plain absolute path"
+  done
+  [[ -f "$b/janitor.env" && -f "$b/janitor.token" ]] ||
+    die "no $b/janitor.env and janitor.token: pass the bundle directory deploy/sbx/setup.sh wrote (janitor/)"
+  # Only the two settings: the token belongs in janitor.token alone (spec §8.1), never an env line.
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" || "$line" == SBX_API_URL=* || "$line" == SBX_JANITOR_AGE=* ]] ||
+      die "$b/janitor.env has a line other than SBX_API_URL= or SBX_JANITOR_AGE= (${line%%=*}): re-run deploy/sbx/setup.sh and copy the new bundle"
+  done <"$b/janitor.env"
+  url="$(env_value SBX_API_URL "$b/janitor.env")"
+  [[ "$url" =~ $JANITOR_URL_RE ]] || die "SBX_API_URL in $b/janitor.env must be https://<api host>"
+  age="$(env_value SBX_JANITOR_AGE "$b/janitor.env")"
+  # Decimal without a leading zero (the janitor's own rule: bash reads 03600 as octal), and above a
+  # floor of 60 s. setup.sh's own minimum is 60 minutes; the real check against the token lifetime
+  # stays there (spec §8.1), where the lifetime is known.
+  [[ "$age" =~ ^(0|[1-9][0-9]{0,8})$ ]] || die "SBX_JANITOR_AGE in $b/janitor.env must be whole seconds, in decimal without a leading zero"
+  ((10#$age > 60)) || die "SBX_JANITOR_AGE in $b/janitor.env is ${age} s: it must exceed 60 s (re-run deploy/sbx/setup.sh and copy the new bundle)"
+  [[ "$(<"$b/janitor.token")" =~ ^[!-~]{32,}$ ]] || die "$b/janitor.token does not hold a token of 32+ printable characters: copy the bundle again"
+  if [[ -f "$b/api-ca.crt" ]]; then
+    grep -q -- '-----BEGIN CERTIFICATE-----' "$b/api-ca.crt" || die "$b/api-ca.crt holds no PEM certificate"
+    ca="$SBX_ENV_DIR/janitor-api-ca.crt"
+  fi
+
+  install -d -m 0700 "$SBX_ENV_DIR"
+  install -d -m 0755 "$SBX_LIBEXEC_DIR" "$SBX_UNIT_DIR"
+  if [[ -n "$ca" ]]; then
+    install -m 0644 "$b/api-ca.crt" "$ca"
+    record "janitor $ca"
+  else
+    rm -f "$SBX_ENV_DIR/janitor-api-ca.crt"
+    [[ ! -f "$SBX_ENV_DIR/manifest" ]] || drop_manifest_lines -x -e "janitor $SBX_ENV_DIR/janitor-api-ca.crt"
+  fi
+  (
+    umask 077
+    printf 'SBX_API_URL=%s\nSBX_JANITOR_AGE=%s\n' "$url" "$age" >"$SBX_ENV_DIR/janitor.env"
+    [[ -z "$ca" ]] || printf 'SBX_API_CA_FILE=%s\n' "$ca" >>"$SBX_ENV_DIR/janitor.env"
+  )
+  chmod 0600 "$SBX_ENV_DIR/janitor.env"
+  install -m 0600 "$b/janitor.token" "$SBX_ENV_DIR/janitor.token"
+  install -m 0755 "$SCRIPT_DIR/janitor.sh" "$SBX_LIBEXEC_DIR/sbx-janitor.sh"
+  # The installed unit drops the source's comments (they name the default paths) and takes this
+  # host's: the validated paths hold no sed metacharacter.
+  {
+    printf '# Installed by deploy/sbx/install-host.sh --janitor from deploy/sbx/sbx-janitor.service.\n'
+    sed -e '/^#/d' -e "s#/etc/sbx#$SBX_ENV_DIR#g" -e "s#/srv/sbx#$SBX_SRV#g" \
+      -e "s#/usr/local/libexec#$SBX_LIBEXEC_DIR#g" "$SCRIPT_DIR/sbx-janitor.service"
+  } >"$SBX_UNIT_DIR/sbx-janitor.service"
+  chmod 0644 "$SBX_UNIT_DIR/sbx-janitor.service"
+  install -m 0644 "$SCRIPT_DIR/sbx-janitor.timer" "$SBX_UNIT_DIR/sbx-janitor.timer"
+  for v in "$SBX_ENV_DIR/janitor.env" "$SBX_ENV_DIR/janitor.token" "$SBX_LIBEXEC_DIR/sbx-janitor.sh" \
+    "$SBX_UNIT_DIR/sbx-janitor.service" "$SBX_UNIT_DIR/sbx-janitor.timer"; do
+    record "janitor $v"
+  done
+  systemctl daemon-reload
+  systemctl enable --now sbx-janitor.timer
+  log "sbx-janitor.timer enabled (every 15 min); its runs: journalctl -u sbx-janitor -o cat | grep '\"janitor\"'"
+}
+
+# Exactly the files the manifest lists as `janitor <path>`; a host whose manifest is gone keeps
+# whatever is there, as remove_shared_units does.
+uninstall_janitor() {
+  local kind path
+  systemctl disable --now sbx-janitor.timer || true
+  systemctl stop sbx-janitor.service || true
+  if [[ -f "$SBX_ENV_DIR/manifest" ]]; then
+    while read -r kind path; do
+      [[ "$kind" == janitor && -n "$path" ]] || continue
+      rm -f "$path"
+      drop_manifest_lines -x -e "janitor $path"
+      log "removed $path"
+    done < <(grep '^janitor ' "$SBX_ENV_DIR/manifest" || true)
+  fi
+  systemctl daemon-reload
+  log "the janitor is removed; workspace data under $SBX_SRV/workspaces is left in place"
+}
+
 uninstall_worker() {
   local id="$1"
   valid_id "$id" || die "not a worker id: $id"
@@ -206,14 +302,19 @@ uninstall_worker() {
 main() {
   parse_args "$@"
   [[ -n "${SBX_SKIP_ROOT_CHECK:-}" || "$(id -u)" == 0 ]] || die 'must run as root'
+  local modes=0 m
+  for m in "$BUNDLE" "$UNINSTALL" "$JANITOR" "$UNINSTALL_JANITOR"; do [[ -z "$m" ]] || modes=$((modes + 1)); done
+  ((modes <= 1)) || die 'one of BUNDLE_DIR, --uninstall, --janitor or --uninstall-janitor at a time'
   if [[ -n "$UNINSTALL" ]]; then uninstall_worker "$UNINSTALL"; return; fi
+  if [[ -n "$UNINSTALL_JANITOR" ]]; then uninstall_janitor; return; fi
+  if [[ -n "$JANITOR" ]]; then install_janitor; return; fi
   [[ "$SBX_ATTACH_TIMEOUT" =~ ^[1-9][0-9]*$ ]] ||
     die "SBX_ATTACH_TIMEOUT='$SBX_ATTACH_TIMEOUT' must be a whole number of seconds, at least 1"
   # At least 1: the hold must outlast the worker's first reconnect backoff (at most 750ms), or a
   # refused token's attached -> stream ended -> attached cycle could fall outside the window.
   [[ "$SBX_ATTACH_SETTLE" =~ ^[1-9][0-9]*$ ]] ||
     die "SBX_ATTACH_SETTLE='$SBX_ATTACH_SETTLE' must be a whole number of seconds, at least 1, to outlast the worker's first reconnect backoff (at most 750ms)"
-  [[ -n "$BUNDLE" ]] || die 'usage: install-host.sh BUNDLE_DIR --snapshot IMAGE [--budget-mb N] | --uninstall ID'
+  [[ -n "$BUNDLE" ]] || die 'usage: install-host.sh BUNDLE_DIR --snapshot IMAGE [--budget-mb N] | --uninstall ID | --janitor DIR | --uninstall-janitor'
   install_units
   install_worker
 }

@@ -1,6 +1,5 @@
-import { createHmac, generateKeyPairSync } from 'node:crypto';
+import { createHmac } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { makeSigner } from '@moca/control-plane';
 import { armDeadline, makeExecAuth } from '../src/main.js';
 import {
   DEFAULT_SANDBOX_MAX_INFLIGHT,
@@ -8,15 +7,7 @@ import {
   sandboxMaxInflight,
   workerReqId,
 } from '../src/sandbox-auth.js';
-
-const ISS = 'sbx-control-plane';
-
-function keypair() {
-  const { privateKey } = generateKeyPairSync('ed25519');
-  const signer = makeSigner(privateKey.export({ format: 'pem', type: 'pkcs8' }).toString());
-  return { signer, keyset: `${signer.kid}:${signer.publicKeyBase64}` };
-}
-const K = keypair();
+import { ISS, K } from './helpers/sandbox-relay.js';
 
 function thrown(fn: () => unknown): Error {
   try {
@@ -381,12 +372,15 @@ describe('the sandbox Exec handler after its token expires', () => {
     expect((await exec(9).errors)[0]?.code).toBe(status.RESOURCE_EXHAUSTED);
     expect(await abort(8)).toBeNull();
     pending[1]!(); // the grace passes
-    expect(JSON.parse(lines.at(-1)!)).toMatchObject({
-      outcome: 'released',
-      call: 'exec',
-      sub: 'github:1',
-      sbx: 'sbx-aaaa',
-    });
+    expect(lines.map((l) => JSON.parse(l))).toContainEqual(
+      expect.objectContaining({
+        audit: 'sandbox_release',
+        outcome: 'released',
+        req_id: 8,
+        sub: 'github:1',
+        sbx: 'sbx-aaaa',
+      }),
+    );
     expect((await abort(8))?.code).toBe(status.PERMISSION_DENIED);
     exec(10);
     expect(worker.written.map((f) => f.exec?.reqId)).toContain(workerReqId(KEY, 'sbx-aaaa', 10));

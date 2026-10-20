@@ -89,13 +89,22 @@ export async function main(
      * and `credentials add` wants its secret piped.
      */
     stdinIsTTY?: boolean;
-    /** All of stdin; `credentials add` reads its secret from it. */
+    /** All of stdin; `credentials add` reads its secret from it, `sbx run` its script. */
     readStdin?: () => Promise<string>;
+    /** All of stdin, byte for byte (at least `limit` bytes when given): `sbx put`'s content. */
+    readStdinBytes?: (limit?: number) => Promise<Buffer>;
   } = {},
 ): Promise<number> {
   // `mocactl sbx` (SBX0) is its own command group with its own flags and its own control plane, so
   // it is dispatched before the global flag table rather than widening it.
-  if (argv[0] === 'sbx') return sbxMain(argv.slice(1), env, io, { signal: deps.signal });
+  if (argv[0] === 'sbx') {
+    return sbxMain(argv.slice(1), env, io, {
+      signal: deps.signal,
+      stdinIsTTY: deps.stdinIsTTY,
+      readStdin: deps.readStdin,
+      readStdinBytes: deps.readStdinBytes,
+    });
+  }
   let parsed;
   try {
     parsed = parseArgs({

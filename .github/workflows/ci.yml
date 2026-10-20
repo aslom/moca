@@ -61,6 +61,11 @@ jobs:
       - name: Typecheck
         run: pnpm -r typecheck
 
+      # @moca/sandbox-client's grep/find tests run the real ripgrep; under CI they fail, not skip,
+      # without it.
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
       - name: Test
         run: pnpm -r test
 
@@ -212,8 +217,8 @@ jobs:
 
       - name: Verify no codegen drift
         run: |
-          git add -A -- packages/k8s-sandbox/src/gen gen
-          git diff --cached --exit-code -- packages/k8s-sandbox/src/gen gen \
+          git add -A -- packages/k8s-sandbox/src/gen packages/sandbox-client/src/gen gen
+          git diff --cached --exit-code -- packages/k8s-sandbox/src/gen packages/sandbox-client/src/gen gen \
             || { echo "::error::Generated stubs are out of date or untracked. Run 'buf generate' and commit."; exit 1; }
 
       # A module left out of go.work falls back to standalone resolution and brings

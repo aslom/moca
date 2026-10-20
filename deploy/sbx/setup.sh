@@ -27,6 +27,11 @@
 #   SBX_WORKSPACE_IMAGE_MB  optional; default 2048 (microvm-worker's SH_WORKSPACE_IMAGE_MB)
 #   SBX_{ATTACH,EXEC,API}_TLS_{CERT,KEY}   optional; otherwise self-signed (attach, exec) or the
 #                           router's default certificate (API)
+#   SBX_JANITOR_WAIT_MINUTES optional; default max(60, SBX_TOKEN_TTL_MINUTES + 5): how long after a
+#                           sandbox ends the host janitor frees its workspace. Must exceed the token
+#                           lifetime plus the relay's 30 s leeway (spec §8.1, §8.3)
+#   SBX_API_CA_FILE         optional; a PEM CA the janitor trusts for the API Route, when that Route's
+#                           certificate (the router's default, say) is not publicly trusted
 # SBX_CLIENTS, increment 1a's static client tokens, is gone and refused.
 #
 # Re-runnable: every token, password, key and certificate is generated once and kept. A worker
@@ -36,8 +41,9 @@
 # any change to them rolls both. Secret values never reach argv or the log: they travel through jq's
 # environment or a builtin printf into a pipe, and messages name keys only.
 #
-# Writes deploy/sbx/.generated/: the applied overlay and workers/<id>/ (worker.env [+ relay-ca.crt],
-# for deploy/sbx/install-host.sh on the KVM host). Copy each bundle straight to its host and delete
+# Writes deploy/sbx/.generated/: the applied overlay, workers/<id>/ (worker.env [+ relay-ca.crt],
+# for deploy/sbx/install-host.sh on the KVM host) and janitor/ (janitor.env, janitor.token
+# [+ api-ca.crt], for install-host.sh --janitor). Copy each bundle straight to its host and delete
 # the copy. Users log in with `mocactl sbx login`; nothing here is handed to them.
 set -euo pipefail
 
@@ -50,23 +56,11 @@ log() { printf '==> %s\n' "$*" >&2; }
 die() { echo "deploy/sbx/setup.sh: $*" >&2; exit 1; }
 kc() { kubectl "$@"; }
 
-parse_args() {
-  while (($#)); do
-    case "$1" in
-    --env-file)
-      [[ $# -ge 2 && -f "$2" ]] || die '--env-file needs a readable file'
-      set -a
-      # shellcheck disable=SC1090 # the operator's own settings file
-      . "$2"
-      set +a
-      shift 2
-      ;;
-    *) die "unknown argument: $1 (usage: setup.sh [--env-file FILE])" ;;
-    esac
-  done
-}
+# parse_args (--env-file), WORKER_RE and NS_RE, shared with status.sh.
+USAGE='setup.sh [--env-file FILE]'
+# shellcheck source=deploy/sbx/lib.sh
+. "$SBX_DIR/lib.sh"
 
-WORKER_RE='^[A-Za-z_][A-Za-z0-9_]*$'
 SUBJECTS_RE='^github:[0-9]+(,github:[0-9]+)*$'
 # Positive whole numbers. The disk check multiplies SBX_MAX_TOTAL x SBX_WORKSPACE_IMAGE_MB x 10 and
 # SBX_WORKSPACE_FS_GIB x 1024 x 8 in 64-bit shell arithmetic: six digits for the factors of the first
@@ -74,7 +68,6 @@ SUBJECTS_RE='^github:[0-9]+(,github:[0-9]+)*$'
 COUNT6_RE='^[1-9][0-9]{0,5}$'
 COUNT9_RE='^[1-9][0-9]{0,8}$'
 HOST_RE='^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'
-NS_RE='^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
 
 validate() {
   [[ -z "${SBX_CLIENTS:-}" ]] ||
@@ -117,6 +110,19 @@ validate() {
   [[ "$SBX_RETENTION_DAYS" =~ ^([1-9]|[1-8][0-9]|90)$ ]] || die 'SBX_RETENTION_DAYS must be a whole number of days, 1-90'
   TOKEN_TTL_S=$((SBX_TOKEN_TTL_MINUTES * 60))
   RETENTION_S=$((SBX_RETENTION_DAYS * 86400))
+  # The janitor frees a terminated sandbox's workspace only once its last token has expired: no Exec
+  # outlives its token (spec §3.6), so the wait must exceed the lifetime plus the relay's 30 s
+  # leeway (§8.1). The default keeps a margin at the longest lifetime (60 min -> 65 min).
+  local wait_default=$((SBX_TOKEN_TTL_MINUTES + 5))
+  ((wait_default >= 60)) || wait_default=60
+  : "${SBX_JANITOR_WAIT_MINUTES:=$wait_default}"
+  [[ "$SBX_JANITOR_WAIT_MINUTES" =~ $COUNT6_RE ]] ||
+    die 'SBX_JANITOR_WAIT_MINUTES must be a positive whole number of minutes (at most six digits)'
+  JANITOR_AGE_S=$((SBX_JANITOR_WAIT_MINUTES * 60))
+  ((JANITOR_AGE_S > TOKEN_TTL_S + 30)) ||
+    die "SBX_JANITOR_WAIT_MINUTES ($JANITOR_AGE_S s) must exceed the token lifetime plus the 30 s leeway ($((TOKEN_TTL_S + 30)) s): the janitor would free a workspace a still-valid token can reach"
+  [[ -z "${SBX_API_CA_FILE:-}" ]] || { [[ -f "$SBX_API_CA_FILE" && -r "$SBX_API_CA_FILE" ]] && grep -q -- '-----BEGIN CERTIFICATE-----' "$SBX_API_CA_FILE"; } ||
+    die 'SBX_API_CA_FILE must name a readable PEM certificate file (the CA the janitor trusts for the API Route)'
   [[ "$SBX_MAX_INFLIGHT" =~ ^[1-8]$ ]] || die 'SBX_MAX_INFLIGHT must be 1-8'
   local v
   for v in SBX_MAX_PER_SUBJECT SBX_MAX_TOTAL SBX_WORKSPACE_IMAGE_MB; do
@@ -309,8 +315,11 @@ remove_client_tokens() {
 # <kid>:<base64 SPKI>). Generated once and kept. The kid is sha256(SPKI DER)[:16] hex -- token.ts's
 # keyIdFor -- so the keyset parses with parseKeyset. The private key lives only in a 0700 temp dir
 # and apply_secret's environment.
+# moca-mu1 also holds the host janitor's bearer, SH_JANITOR_TOKEN (spec §8.1: generated once and
+# kept). Both keys ride in the one apply: with one field manager, an apply that omitted a key would
+# prune it.
 ensure_signing_key() {
-  local json priv dir foreign='' published
+  local json priv dir jtok foreign='' published
   json="$(secret_json moca-mu1)"
   # A moca-mu1 this script did not write is a MOCA control plane's key (a shared namespace, or a
   # copied Secret), and signing with it would tie the two stacks together: refused, below, unless
@@ -320,6 +329,14 @@ ensure_signing_key() {
     published="$(json_value "$(secret_json sbx-token-keys)" PUBLIC_KEYS)"
   fi
   priv="$(json_value "$json" SH_SESSION_TOKEN_PRIVATE_KEY)"
+  jtok="$(json_value "$json" SH_JANITOR_TOKEN)"
+  if [[ -z "$jtok" ]]; then
+    log 'generating the janitor token (SH_JANITOR_TOKEN)'
+    jtok="$(rand_hex)"
+  fi
+  # The control plane refuses one under 32 characters; it travels in an HTTP header file, so no space.
+  [[ "$jtok" =~ ^[!-~]{32,}$ ]] ||
+    die 'moca-mu1 SH_JANITOR_TOKEN is not 32+ printable characters: delete the key and re-run (this rotates it)'
   dir="$(mktemp -d)"
   (
     trap 'rm -rf "$dir"' EXIT
@@ -338,8 +355,8 @@ ensure_signing_key() {
     spki="$(base64 <"$dir/pub.der" | tr -d '\n')"
     [[ -z "$foreign" || "$published" == "$kid:$spki" ]] ||
       die 'moca-mu1 exists but was not created by deploy/sbx/setup.sh: SBX0 needs a namespace of its own (or delete the Secret, which rotates the key)'
-    export S_0="$priv"
-    apply_secret moca-mu1 SH_SESSION_TOKEN_PRIVATE_KEY
+    export S_0="$priv" S_1="$jtok"
+    apply_secret moca-mu1 SH_SESSION_TOKEN_PRIVATE_KEY SH_JANITOR_TOKEN
     export S_0="$kid:$spki"
     apply_secret sbx-token-keys PUBLIC_KEYS
   )
@@ -519,9 +536,34 @@ write_bundles() {
     done
     chmod 700 "$GEN" "$GEN"/workers "$GEN"/workers/* 2>/dev/null || true
   )
+  write_janitor_bundle
   log "worker bundles: $GEN/workers/<id>  (copy to the KVM host, run deploy/sbx/install-host.sh, delete the copy)"
+  log "janitor bundle: $GEN/janitor  (copy to every KVM host, run deploy/sbx/install-host.sh --janitor, delete the copy)"
   [[ -z "${HOSTS_TO_REINSTALL:-}" ]] ||
     log "WARNING: the SH_WORKSPACE_IDLE changed: re-run deploy/sbx/install-host.sh now on the host of each of: $HOSTS_TO_REINSTALL"
+}
+
+# The host janitor's bundle (spec §8.1, §8.3): janitor.env (the API URL and the wait, in seconds;
+# no secret), janitor.token (the bearer alone, no newline) and, with SBX_API_CA_FILE, api-ca.crt.
+# The token is re-read from the Secret: ensure_signing_key ran in a subshell. It reaches the file
+# through the printf builtin, never argv.
+write_janitor_bundle() {
+  local d="$GEN/janitor" jtok
+  jtok="$(json_value "$(secret_json moca-mu1)" SH_JANITOR_TOKEN)"
+  [[ -n "$jtok" ]] || die 'moca-mu1 has no SH_JANITOR_TOKEN: re-run setup.sh'
+  (
+    umask 077
+    mkdir -p "$d"
+    chmod 700 "$d"
+    printf 'SBX_API_URL=https://%s\nSBX_JANITOR_AGE=%s\n' "$SBX_API_HOST" "$JANITOR_AGE_S" >"$d/janitor.env"
+    printf '%s' "$jtok" >"$d/janitor.token"
+    chmod 600 "$d/janitor.env" "$d/janitor.token"
+    if [[ -n "${SBX_API_CA_FILE:-}" ]]; then
+      cp "$SBX_API_CA_FILE" "$d/api-ca.crt.new" && chmod 600 "$d/api-ca.crt.new" && mv "$d/api-ca.crt.new" "$d/api-ca.crt"
+    else
+      rm -f "$d/api-ca.crt"
+    fi
+  )
 }
 
 main() {

@@ -1,6 +1,7 @@
 import { createHmac, type KeyObject } from 'node:crypto';
 import {
   CpError,
+  KeysetError,
   parseKeyset,
   verifySandboxToken,
   type SandboxTokenClaims,
@@ -23,10 +24,17 @@ export type SandboxVerifier = (presented: string | undefined) => SandboxVerdict;
 
 const KEYSET_VAR = 'SH_SANDBOX_TOKEN_PUBLIC_KEYS';
 
+const KEYSET_DEFECT: Record<KeysetError['kind'], string> = {
+  format: `is not '<kid>:<base64 SPKI>'`,
+  key: 'is not a base64 Ed25519 SPKI',
+  kid: 'has a kid that does not match its key',
+};
+
 /**
  * parseKeyset's errors name SH_SESSION_TOKEN_PUBLIC_KEYS and quote the offending entry. Neither is
  * right here: the operator must fix the variable this relay reads, and a boot error never echoes a
- * configured value. So each entry is parsed alone and a failure is reported by position and kind.
+ * configured value. So each entry is parsed alone and a failure is reported by position and by its
+ * KeysetError kind.
  */
 function keysetFromEnv(raw: string): Map<string, KeyObject> {
   const keys = new Map<string, KeyObject>();
@@ -39,13 +47,8 @@ function keysetFromEnv(raw: string): Map<string, KeyObject> {
     try {
       one = parseKeyset(entry);
     } catch (err) {
-      const m = (err as Error).message;
-      const kind = / is not '<kid>:/.test(m)
-        ? `is not '<kid>:<base64 SPKI>'`
-        : /does not match its key/.test(m)
-          ? 'has a kid that does not match its key'
-          : 'is not a base64 Ed25519 SPKI';
-      throw new Error(`${KEYSET_VAR} entry ${i + 1} ${kind}`);
+      const kind = err instanceof KeysetError ? err.kind : 'key';
+      throw new Error(`${KEYSET_VAR} entry ${i + 1} ${KEYSET_DEFECT[kind]}`);
     }
     for (const [kid, key] of one) keys.set(kid, key);
   });
