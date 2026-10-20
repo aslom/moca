@@ -126,8 +126,14 @@ export class UnpulledError extends PushError {
  * `file.~1~` or `notes~2.markdown` is not one; `notes~2.md` is, and is refused.
  */
 const isShortName = (seg: string): boolean =>
-  // Windows resolves a short name case-insensitively, so `claude~1` is `CLAUDE~1`: fold first.
-  /^[^.~]{1,6}~\d+(\.[^.]{0,3})?$/.test(seg.normalize('NFKC').toUpperCase());
+  // Windows resolves a short name case-insensitively (`claude~1` is `CLAUDE~1`) and drops a
+  // trailing dot or space (`CLAUDE~1 ` is `CLAUDE~1`, as `folds` strips): fold both first.
+  /^[^.~]{1,6}~\d+(\.[^.]{0,3})?$/.test(
+    seg
+      .normalize('NFKC')
+      .replace(/[. ]+$/, '')
+      .toUpperCase(),
+  );
 /**
  * Whether a path is in the binding's directory as a case-insensitive or normalizing filesystem
  * (macOS, Windows) would resolve it: `.SBX/` and `.ſbx/` are `.sbx/` there.
