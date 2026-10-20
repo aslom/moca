@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -179,5 +181,26 @@ func TestTokenSourceRereadsTheFileOnEveryCall(t *testing.T) {
 	os.Remove(path)
 	if _, err := next(); err == nil {
 		t.Error("a missing token file must be an error")
+	}
+}
+
+func TestRetryLineNamesATokenFileFailure(t *testing.T) {
+	get := func(k string) string {
+		return map[string]string{"SANDBOX_TOKEN_FILE": filepath.Join(t.TempDir(), "absent")}[k]
+	}
+	_, tokenErr := tokenSource(get, os.ReadFile)()
+	if tokenErr == nil {
+		t.Fatal("a missing token file must be an error")
+	}
+	got := retryLine(tokenErr, nil, 1500*time.Millisecond)
+	if !strings.HasPrefix(got, "worker: cannot read SANDBOX_TOKEN_FILE: ") || !strings.HasSuffix(got, "; retrying in 1.5s") {
+		t.Errorf("token failure: got %q", got)
+	}
+	if strings.Contains(got, "stream ended") {
+		t.Errorf("a token read failure is not a stream end: %q", got)
+	}
+	got = retryLine(nil, errors.New("EOF"), time.Second)
+	if got != "worker: stream ended (EOF); reconnecting in 1s" {
+		t.Errorf("stream end: got %q", got)
 	}
 }

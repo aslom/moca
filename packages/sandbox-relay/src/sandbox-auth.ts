@@ -34,9 +34,9 @@ const KEYSET_DEFECT: Record<KeysetError['kind'], string> = {
  * parseKeyset's errors name SH_SESSION_TOKEN_PUBLIC_KEYS and quote the offending entry. Neither is
  * right here: the operator must fix the variable this relay reads, and a boot error never echoes a
  * configured value. So each entry is parsed alone and a failure is reported by position and by its
- * KeysetError kind.
+ * KeysetError kind. Shared with the attach keyset (MOCA_ATTACH_PUBLIC_KEYS), hence `varName`.
  */
-function keysetFromEnv(raw: string): Map<string, KeyObject> {
+export function keysetFromEnv(varName: string, raw: string): Map<string, KeyObject> {
   const keys = new Map<string, KeyObject>();
   const entries = raw
     .split(',')
@@ -48,11 +48,11 @@ function keysetFromEnv(raw: string): Map<string, KeyObject> {
       one = parseKeyset(entry);
     } catch (err) {
       const kind = err instanceof KeysetError ? err.kind : 'key';
-      throw new Error(`${KEYSET_VAR} entry ${i + 1} ${KEYSET_DEFECT[kind]}`);
+      throw new Error(`${varName} entry ${i + 1} ${KEYSET_DEFECT[kind]}`);
     }
     for (const [kid, key] of one) keys.set(kid, key);
   });
-  if (keys.size === 0) throw new Error(`${KEYSET_VAR} lists no key`);
+  if (keys.size === 0) throw new Error(`${varName} lists no key`);
   return keys;
 }
 
@@ -64,7 +64,7 @@ function keysetFromEnv(raw: string): Map<string, KeyObject> {
 export function makeSandboxTokenVerifier(env: NodeJS.ProcessEnv): SandboxVerifier | undefined {
   const raw = env[KEYSET_VAR]?.trim();
   if (!raw) return undefined;
-  const keys = keysetFromEnv(raw);
+  const keys = keysetFromEnv(KEYSET_VAR, raw);
   const issuer = env.SH_SANDBOX_TOKEN_ISSUER?.trim();
   if (!issuer) throw new Error(`SH_SANDBOX_TOKEN_ISSUER is required with ${KEYSET_VAR}`);
   return (presented) => {

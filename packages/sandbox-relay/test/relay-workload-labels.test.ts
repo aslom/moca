@@ -386,6 +386,25 @@ describe('makeAttachVerifier boot rule', () => {
     }
   });
 
+  it('names what is wrong with the entry, by position, without echoing it', () => {
+    const { signer, keysEnv } = attachSigner();
+    for (const [raw, defect] of [
+      [`${keysEnv},nope-value-xyz`, /entry 2 is not '<kid>:<base64 SPKI>'/],
+      ['kidvalue1234:QUFBQQ==', /entry 1 is not a base64 Ed25519 SPKI/],
+      [`wrongkid9876:${signer.publicKeyBase64}`, /entry 1 has a kid that does not match its key/],
+    ] as const) {
+      let msg = '';
+      try {
+        makeAttachVerifier({ MOCA_ATTACH_PUBLIC_KEYS: raw });
+      } catch (e) {
+        msg = (e as Error).message;
+      }
+      expect(msg).toMatch(/^MOCA_ATTACH_PUBLIC_KEYS /);
+      expect(msg).toMatch(defect);
+      for (const part of raw.split(/[,:]/)) expect(msg).not.toContain(part);
+    }
+  });
+
   it('accepts a list, so a key can be rotated in before the signer switches', async () => {
     const a = attachSigner();
     const b = attachSigner();

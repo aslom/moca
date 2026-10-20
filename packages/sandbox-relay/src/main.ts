@@ -1,4 +1,4 @@
-import { randomBytes, timingSafeEqual, type KeyObject } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import {
   Server,
@@ -29,7 +29,6 @@ import {
   ATTACH_CLOCK_LEEWAY_S,
   CpError,
   SANDBOX_CLOCK_LEEWAY_S,
-  parseKeyset,
   verifyAttachToken,
   type SandboxTokenClaims,
 } from '@moca/control-plane';
@@ -43,6 +42,7 @@ import {
 } from './relay.js';
 import {
   DEFAULT_SANDBOX_MAX_INFLIGHT,
+  keysetFromEnv,
   makeSandboxTokenVerifier,
   sandboxMaxInflight,
   type SandboxVerifier,
@@ -458,32 +458,6 @@ async function stopGracefully(servers: Server[], relay: Relay, close?: () => Pro
 const ATTACH_KEYS_VAR = 'MOCA_ATTACH_PUBLIC_KEYS';
 
 /**
- * parseKeyset's errors name SH_SESSION_TOKEN_PUBLIC_KEYS and quote the entry. Neither is right
- * here: the operator must fix the variable this relay reads, and a boot error names variables, not
- * values. So each entry is parsed alone and a failure is reported by position.
- */
-function attachKeysetFromEnv(raw: string): Map<string, KeyObject> {
-  const keys = new Map<string, KeyObject>();
-  const entries = raw
-    .split(',')
-    .map((e) => e.trim())
-    .filter(Boolean);
-  entries.forEach((entry, i) => {
-    let one: Map<string, KeyObject>;
-    try {
-      one = parseKeyset(entry);
-    } catch {
-      throw new Error(
-        `${ATTACH_KEYS_VAR} entry ${i + 1} is not '<kid>:<base64 Ed25519 SPKI>' with a kid matching its key`,
-      );
-    }
-    for (const [kid, key] of one) keys.set(kid, key);
-  });
-  if (keys.size === 0) throw new Error(`${ATTACH_KEYS_VAR} lists no key`);
-  return keys;
-}
-
-/**
  * The attach-token verifier (workload sandboxes spec §3.1-3.2), or undefined when
  * MOCA_ATTACH_PUBLIC_KEYS is unset or blank. Undefined is the whole "no keys, nothing changes"
  * guarantee: createRelay consults none of the workload-label rules without it. Set, it must parse,
@@ -492,7 +466,7 @@ function attachKeysetFromEnv(raw: string): Map<string, KeyObject> {
 export function makeAttachVerifier(env: NodeJS.ProcessEnv): AttachVerifier | undefined {
   const raw = env[ATTACH_KEYS_VAR]?.trim();
   if (!raw) return undefined;
-  const keys = attachKeysetFromEnv(raw);
+  const keys = keysetFromEnv(ATTACH_KEYS_VAR, raw);
   return (presented) => {
     if (!presented) return { reason: 'no bearer token' };
     try {

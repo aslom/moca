@@ -102,7 +102,9 @@ reaches no other workload or user. The tier and capability labels a sandbox send
 keeps workload runs on sandboxes whose workload and owner labels both match the run's, keeps other runs off them,
 and the relay refuses an Exec whose `workload` does not match its sandbox's. That
 check catches routing bugs, not a compromised worker: the worker fills in the field
-([workload sandboxes spec §3.3](../specs/2026-10-16-workload-sandboxes-design.md)).
+([workload sandboxes spec §3.3](../specs/2026-10-16-workload-sandboxes-design.md)). The relay ignores a sandbox
+caller's `workload` field, so its Exec is refused on every workload sandbox: by design, sandbox
+callers cannot reach workload sandboxes.
 
 ## Model credentials
 

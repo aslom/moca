@@ -1,7 +1,7 @@
 import { status } from '@grpc/grpc-js';
 import { afterEach, describe, expect, it } from 'vitest';
-import { SANDBOX_TOKEN_TYP } from '@moca/control-plane';
-import { makeExecAuth, startRelay } from '../src/main.js';
+import { SANDBOX_TOKEN_TYP, mintAttachToken } from '@moca/control-plane';
+import { makeAttachVerifier, makeExecAuth, startRelay } from '../src/main.js';
 import {
   HARNESS,
   K,
@@ -222,6 +222,47 @@ describe('the relay sandbox caller (SBX0 §3.2)', () => {
     w.release(wid('sbx-aaaa', 66));
     expect((await running.done).code).toBe(status.OK);
   });
+});
+
+describe('sandbox callers and workload sandboxes (workload sandboxes spec §3.3)', () => {
+  // Deliberate: a sandbox caller's Exec carries no workload (sandbox-caller.ts passes none to
+  // pumpExec), so with attach keys set it can never reach a workload sandbox, even one its token's
+  // `wrk` names and even when its request fills in the workload field.
+  it.each([
+    ['no workload', undefined],
+    ["the sandbox's own workload", `w-${'a'.repeat(32)}`],
+  ])(
+    'refuses an Exec naming %s on a workload sandbox, PERMISSION_DENIED, before routing',
+    async (_name, workload) => {
+      const WL = `w-${'a'.repeat(32)}`;
+      const A = keypair();
+      const attachToken = mintAttachToken(A.signer, {
+        wl: WL,
+        own: 'b'.repeat(32),
+        gen: 'g1',
+        tr: 'container',
+        n: 1,
+        now: now(),
+        ttlSeconds: 600,
+      });
+      const r = await relay(
+        {},
+        {
+          validateToken: () => false,
+          verifyAttach: makeAttachVerifier({ MOCA_ATTACH_PUBLIC_KEYS: A.keyset })!,
+        },
+      );
+      const w = await worker(r.attach, `${WL}-0`, 'auto', 0, undefined, attachToken);
+      const res = await exec(r.exec, {
+        token: token({ wrk: `${WL}-0` }),
+        sandboxId: `${WL}-0`,
+        ...(workload ? { workload } : {}),
+      }).done;
+      expect(res.code).toBe(status.PERMISSION_DENIED);
+      expect(res.details).toMatch(/belongs to a workload this Exec does not name/);
+      expect(w.execs).toHaveLength(0);
+    },
+  );
 });
 
 describe('sandbox Execs: per-sandbox request ids (SBX0 §3.6)', () => {

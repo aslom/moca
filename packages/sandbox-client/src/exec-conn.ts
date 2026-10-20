@@ -358,6 +358,8 @@ export class SandboxExecConn {
     const call = this.client.exec(
       {
         sandboxId: this.o.sandboxId,
+        // A sandbox caller names no workload: the relay refuses it on a workload sandbox (§3.3).
+        workload: '',
         exec: {
           reqId,
           command,

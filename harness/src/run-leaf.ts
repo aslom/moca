@@ -281,6 +281,19 @@ export function emptyConfigRefFailure(env: LeafEnvelope): LeafResult | null {
   };
 }
 
+/**
+ * Workload sandboxes are selected by the prompt leaf only (workload sandboxes spec §3.3). A solve
+ * or verdict leaf naming a workload is refused before it selects, never run on the shared pool.
+ */
+function nonPromptWorkloadFailure(env: LeafEnvelope): LeafResult | null {
+  if (env.internalContext?.workload === undefined) return null;
+  return {
+    status: 'failed',
+    reason: 'error',
+    message: 'a workload sandbox runs prompt leaves only',
+  };
+}
+
 export function validateItem(o: unknown): LeafItem | null {
   if (typeof o !== 'object' || o === null) return null;
   const x = o as Record<string, unknown>;
@@ -325,6 +338,8 @@ export async function runLeaf(
 ): Promise<LeafResult> {
   if (env.kind === 'solve') return runSolveLeaf(env, config, deps);
   if (env.kind === 'prompt') return runPromptLeaf(env, config, deps);
+  const noWorkload = nonPromptWorkloadFailure(env);
+  if (noWorkload) return noWorkload;
   const item = validateItem(env.item);
   if (!item) return { status: 'failed', reason: 'bad_inputs' };
 
@@ -372,6 +387,8 @@ export async function runSolveLeaf(
   // Catch an empty-or-whitespace configRef before leasing a sandbox (shared with runPromptLeaf).
   const emptyRef = emptyConfigRefFailure(env);
   if (emptyRef) return emptyRef;
+  const noWorkload = nonPromptWorkloadFailure(env);
+  if (noWorkload) return noWorkload;
   const capture: SolveCapture = {};
   const produce = deps?.produceSolve ?? realProduceSolve;
   // Forward only the overlay-related slice of deps; undefined when none set so existing 3-arg

@@ -203,3 +203,46 @@ describe('frozen context on a prompt leaf', () => {
     expect(selectPoolSandboxMock).not.toHaveBeenCalled();
   });
 });
+
+describe('a workload on a non-prompt leaf', () => {
+  it.each([
+    [
+      'solve',
+      { kind: 'solve', problemStatement: 'Fix it.', repoUrl: 'https://x/r.git', ref: 'main' },
+    ],
+    ['verdict', { kind: undefined }],
+    ['converge', { kind: 'converge' }],
+  ] as const)(
+    'refuses a %s leaf naming a workload before selecting, never falling back to the shared pool',
+    async (_name, over) => {
+      selectPoolSandboxMock.mockReset();
+      const produceSolve = vi.fn();
+      const produceVerdict = vi.fn();
+      const e = { ...env(vi.fn()), ...over } as LeafEnvelope;
+      e.internalContext!.workload = `w-${'a'.repeat(32)}`;
+      e.internalContext!.ownerScope = 'b'.repeat(32);
+      const r = await runLeaf(e, undefined, { produceSolve, produceVerdict });
+      expect(r).toEqual({
+        status: 'failed',
+        reason: 'error',
+        message: 'a workload sandbox runs prompt leaves only',
+      });
+      expect(produceSolve).not.toHaveBeenCalled();
+      expect(produceVerdict).not.toHaveBeenCalled();
+      expect(selectPoolSandboxMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it('still runs a solve leaf whose context names no workload', async () => {
+    const produceSolve = vi.fn(async () => {});
+    const e = {
+      ...env(vi.fn()),
+      kind: 'solve',
+      problemStatement: 'Fix it.',
+      repoUrl: 'https://x/r.git',
+      ref: 'main',
+    } as LeafEnvelope;
+    expect(await runLeaf(e, undefined, { produceSolve })).toMatchObject({ status: 'solved' });
+    expect(produceSolve).toHaveBeenCalledOnce();
+  });
+});

@@ -139,10 +139,20 @@ func tokenSource(get func(string) string, readFile func(string) ([]byte, error))
 		}
 		token := strings.TrimSpace(string(b))
 		if token == "" {
-			return "", fmt.Errorf("SANDBOX_TOKEN_FILE %s is empty", path)
+			return "", fmt.Errorf("SANDBOX_TOKEN_FILE: %s is empty", path)
 		}
 		return token, nil
 	}
+}
+
+// retryLine is the log line before a reconnect wait. A token file that cannot be read gets its own
+// line: no stream ended, and the fix is the file, not the relay.
+func retryLine(tokenErr, streamErr error, wait time.Duration) string {
+	w := wait.Round(time.Millisecond)
+	if tokenErr != nil {
+		return fmt.Sprintf("worker: cannot read %v; retrying in %s", tokenErr, w)
+	}
+	return fmt.Sprintf("worker: stream ended (%v); reconnecting in %s", streamErr, w)
 }
 
 func nextBackoff(d time.Duration) time.Duration { return min(d*2, backoffMax) }
@@ -226,10 +236,11 @@ func main() {
 	for ctx.Err() == nil {
 		// Re-read before every dial, so a rotated token file is picked up on the next reconnect.
 		// A read that fails after boot backs off and retries like a failed dial.
-		bearer, err := token()
+		bearer, tokenErr := token()
 		var stream pb.SandboxWorker_AttachClient
 		var attachCtx context.Context
-		if err == nil {
+		var err error
+		if tokenErr == nil {
 			attachCtx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+bearer)
 			stream, err = client.Attach(attachCtx)
 		}
@@ -257,7 +268,7 @@ func main() {
 			break
 		}
 		wait := jitter(backoff)
-		log.Printf("worker: stream ended (%v); reconnecting in %s", err, wait.Round(time.Millisecond))
+		log.Print(retryLine(tokenErr, err, wait))
 		select {
 		case <-ctx.Done():
 		case <-time.After(wait):
