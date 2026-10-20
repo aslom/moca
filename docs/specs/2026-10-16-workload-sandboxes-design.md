@@ -85,7 +85,8 @@ writable copy. That leaves three gaps:
 ```
 [Flow diagram placeholder: create, activate, provision, register, run and delete, with the
 numbered calls between mocactl, the worker, the provisioner, Context Service (#40), the
-Kubernetes API, the sandbox pods and the relay. An SVG replaces this block.]
+Kubernetes API, the sandbox pods and the relay. The SVG follows in a separate docs change, before
+PR 2 (§8).]
 ```
 
 In short: a new `moca-provisioner` (§4, ADR-0043), the only MOCA component with Kubernetes
@@ -98,20 +99,43 @@ optional fields (§7).
 
 ### 3.1 The binding token
 
-The provisioner holds an Ed25519 key. For each workload it mints one **attach token**, a JWT with
-`typ: moca-attach+jwt` and these claims:
+The provisioner holds an Ed25519 key. For each workload it mints one **attach token**, a JWT whose
+header has `alg: EdDSA`, `typ: moca-attach+jwt` and a `kid`, with these claims, all required:
 
 | Claim | Meaning                                                                            |
 | ----- | ---------------------------------------------------------------------------------- |
+| `iss` | `moca-provisioner`                                                                 |
+| `aud` | `moca-relay-attach`, so it never passes as a session, API or sandbox token         |
 | `wl`  | the workload key: the record's existing Context name, `w-<32 hex>` per reservation |
 | `own` | the owner scope: `recordScope(owner)`, the hash the record key already uses        |
 | `gen` | the workload generation, so a re-created workload gets a different binding         |
 | `tr`  | the tier, `container`                                                              |
+| `n`   | the workload's `sandboxes.count`; the relay accepts only ordinals below it         |
+| `iat` | issued at                                                                          |
+| `exp` | expiry, `iat` + `MOCA_ATTACH_TOKEN_TTL_S` (default 86400, one day)                 |
+| `jti` | a random id, for logs                                                              |
 
-The token goes into a per-workload Secret in `moca-sandbox`, read by the pods as `SANDBOX_TOKEN`.
-The relay verifies it with public keys only (`MOCA_ATTACH_PUBLIC_KEYS`), so the relay cannot mint
-one and a sandbox cannot forge one. The name `moca-attach+jwt` stays clear of SBX0's
+The token goes into a per-workload Secret in `moca-sandbox`. The pods mount that Secret as a file
+(`SANDBOX_TOKEN_FILE`, not an env var and not a `subPath`, so the kubelet refreshes it in place).
+The relay verifies the token with public keys only (`MOCA_ATTACH_PUBLIC_KEYS`, a
+`<kid>:<base64 SPKI>` list in the format of `SH_SESSION_TOKEN_PUBLIC_KEYS`), so the relay cannot
+mint one and a sandbox cannot forge one. The name `moca-attach+jwt` stays clear of SBX0's
 `moca-sandbox+jwt` client token (#546, SBX0 sandbox service), which authorizes callers, not workers.
+
+**Expiry and rotation.** The provisioner re-mints a workload's token once less than half its
+lifetime remains, on its reconciler loop (§6.2), and updates the Secret. The worker re-reads the
+file whenever it dials, and when the file changes it reconnects with the new token at its next
+idle moment (no Exec in flight). The relay closes an attach stream when its token's `exp` passes,
+so no stream outlives its token. Rotating the provisioner's key is the usual overlap: add the new
+`<kid>` to `MOCA_ATTACH_PUBLIC_KEYS`, switch the provisioner to it (every token is re-minted within
+half a TTL), and drop the old key one TTL later. A projected, pod-bound credential (a
+ServiceAccount token with the relay as audience, checked through TokenReview) would bind the token
+to one pod; it needs the relay to call the Kubernetes API and is left as a later option.
+
+**The worker can read its own token.** `commandEnv` keeps the token out of a command's environment,
+but model code runs as the same UID (1001) in the same container as the worker process, so it can
+read the token from the mounted file or from `/proc/<worker pid>/`. The design assumes model code
+holds its workload's token; §9 records what that is worth to it.
 
 **Why a signed token and not a store lookup.** The proposal was a trusted
 `sandboxId → {workload, owner}` store. In this deployment the only shared store is Redis, and the
@@ -122,31 +146,34 @@ itself, adds no store, and keeps the relay's attach path synchronous.
 
 **One token per workload, not per sandbox.** A StatefulSet's pods share one template, so they
 cannot each read a different Secret. All of a workload's sandboxes belong to one owner, so a token
-stolen from one of them lets the thief register only another sandbox of that same workload. That
-crosses no user boundary: MI1 §9.2's argument for per-sandbox tokens, applied one level up.
+stolen from one of them lets the thief register only another sandbox of that same workload, under
+an ordinal below `n`, until `exp`. That crosses no user boundary: MI1 §9.2's argument for
+per-sandbox tokens, applied one level up.
 
 ### 3.2 What the relay does on `Hello`
 
-- **Token is an attach token.** The relay requires `sandboxId` to match `^<wl>-[0-9]+$`, then
-  writes the record with `moca.dev/workload=<wl>`, `moca.dev/owner=<own>` and
-  `moca.dev/tier=<tr>`, overwriting whatever `Hello` sent for those three keys. Other labels and
-  capabilities pass through as today.
+- **Token is an attach token.** The relay requires an unexpired token, and a `sandboxId` matching
+  `^<wl>-(0|[1-9][0-9]*)$` whose ordinal is below `n`, then writes the record with
+  `moca.dev/workload=<wl>`, `moca.dev/owner=<own>` and `moca.dev/tier=<tr>`, overwriting whatever
+  `Hello` sent for those three keys. Other labels and capabilities pass through as today.
 - **Token is a shared or per-id token (today's path).** The relay **removes** any
   `moca.dev/workload` or `moca.dev/owner` label from `Hello`. Without this, a shared-pool sandbox
   could claim to be Alice's.
 - The duplicate-id refusal is unchanged, so a stolen token cannot take over a live sandbox's id.
 
-A deleted workload's token stays valid. A copy kept by its model code can register only a sandbox
-labelled with a workload key that no record has any more; re-creating the same name gives a new
-`gen` and therefore a new `wl`. No run routes there, so the token is harmless after delete.
+A deleted workload's token stays valid until its `exp`, and nothing re-mints it. Until then, a copy
+kept by its model code can register only a sandbox labelled with a workload key that no record has
+any more; re-creating the same name gives a new `gen` and therefore a new `wl`. No run routes
+there, so the token is harmless after delete.
 
 ### 3.3 Selection and the relay's Exec check
 
 - **Selection** (`select-sandbox.ts`, in the worker). A run that names a workload considers only
-  records whose `moca.dev/workload` equals the workload's key. A run without one excludes every
-  record that carries the label. When the workload has no live sandbox, the run waits for the
-  P6.3 affinity grace and then fails with `503 workload_sandbox_unavailable`. It never falls back
-  to the shared pool.
+  records whose `moca.dev/workload` equals the workload's key **and** whose `moca.dev/owner`
+  equals `recordScope` of the run's owner, a second check on the same signed binding. A run
+  without one excludes every record that carries the label. When the workload has no live sandbox,
+  the run waits for the P6.3 affinity grace and then fails with
+  `503 workload_sandbox_unavailable`. It never falls back to the shared pool.
 - **Relay check (defense in depth).** The SandboxExec request gains an additive `workload` field
   (ADR-0024's rules). The relay refuses an Exec to a sandbox with a `moca.dev/workload` label unless
   the field matches, and refuses a non-empty `workload` on a sandbox without one.
@@ -162,13 +189,13 @@ grants (MI1 §4.2 I2). Until then the worker remains the trust root for routing,
 `moca-provisioner` is a small HTTP service in the `moca` namespace (`packages/provisioner`,
 `@moca/provisioner`). Its ServiceAccount is bound to one Role in `moca-sandbox`:
 
-| Resource                 | Verbs                            | Why                                          |
-| ------------------------ | -------------------------------- | -------------------------------------------- |
-| `apps/statefulsets`      | create, get, list, patch, delete | one per workload                             |
-| `secrets`                | create, get, list, delete        | the workload's attach token                  |
-| `services`               | create, get, delete              | the StatefulSet's headless governing Service |
-| `pods`                   | get, list                        | readiness, and the reconciler's view         |
-| `persistentvolumeclaims` | get                              | check that a resolved claim exists           |
+| Resource                 | Verbs                             | Why                                          |
+| ------------------------ | --------------------------------- | -------------------------------------------- |
+| `apps/statefulsets`      | create, get, list, patch, delete  | one per workload                             |
+| `secrets`                | create, get, list, update, delete | the workload's attach token, re-minted       |
+| `services`               | create, get, delete               | the StatefulSet's headless governing Service |
+| `pods`                   | get, list                         | readiness, and the reconciler's view         |
+| `persistentvolumeclaims` | get                               | check that a resolved claim exists           |
 
 No create on bare pods. The governing Service is headless with no ports, as the shared pool's is:
 a workload sandbox accepts no connections. The provisioner has no rights outside `moca-sandbox`,
@@ -178,17 +205,22 @@ supervisor and relay stay without a Kubernetes token.
 Its internal API is reached only by the supervisor's workers (NetworkPolicy):
 
 ```
-PUT    /internal/v1/workloads/{wl}    # create or update; idempotent by (wl, gen)
-GET    /internal/v1/workloads/{wl}    # replicas wanted and ready
-DELETE /internal/v1/workloads/{wl}    # delete; 200 once no pod of the workload remains
+PUT    /internal/v1/workloads/{name}/{generation}   # create or update; idempotent by (wl, gen)
+GET    /internal/v1/workloads/{name}/{generation}   # replicas wanted and ready
+DELETE /internal/v1/workloads/{name}/{generation}   # delete; 200 once no pod of it remains
 ```
+
+The `PUT` body carries `count`, `tier`, `mount` and the frozen revision; no request carries a
+workload key.
 
 **Caller authentication.** The worker presents a service token (`MOCA_PROVISIONER_TOKEN`, one
 caller credential per `/internal` endpoint, MI1 I8) **and** forwards the caller's own API token.
 The provisioner verifies that token with `SH_SESSION_TOKEN_PUBLIC_KEYS`, as the supervisor already
-does, and takes the owner from it. A compromised worker can then provision only for users whose
-tokens it currently holds, rather than for any owner it names. The reconciler acts without a user
-token, but it only deletes.
+does, and takes the owner from it. It then derives the workload key itself, exactly as
+`workloads.ts` names the Context: `wl = "w-" + sha256(owner \0 name \0 generation)`, first 32 hex
+characters. A worker cannot name another user's `wl`, so a compromised worker can provision, and
+mint bindings, only for workloads of users whose tokens it currently holds. The reconciler acts
+without a user token, but it only deletes.
 
 ### 4.2 What it creates
 
@@ -261,9 +293,27 @@ The run's working directory is the mount, rooted at its `workspace/` directory u
 exactly what export streams. A writable mount of the revision directory, or of the claim root,
 would let model code change a revision behind its id or rewrite revision history. So "writes stop
 being copies" holds per run, not per workload: an init container (MOCA's image, not model code)
-copies the frozen revision into `moca-workspace/` once, when that directory has no
-`.moca-seeded` marker, and every later run writes that tree in place. The main container mounts only
-`moca-workspace`.
+copies the frozen revision into `moca-workspace/` once, and every later run writes that tree in
+place. The main container mounts only `moca-workspace`.
+
+**The seed cannot be steered into `.context-service/`.** Model code can write `moca-workspace/`,
+delete things there and plant symlinks such as `a -> ../.context-service/materialized/<rev>/a`.
+Three rules keep a later seed from following them:
+
+- **No claim root in the init container.** It mounts the revision read-only through its own
+  `subPath: .context-service/materialized/<revision>`, and `moca-workspace` as a separate
+  read-write mount. Nothing under `.context-service/` is writable in any container, and a symlink
+  in `moca-workspace` resolves inside the container's own mounts, never to the claim root.
+- **The seeded flag is not a file.** The provisioner creates the StatefulSet with the pod-template
+  annotation `moca.dev/seed-revision=<revision>`, which the init container reads through the
+  downward API; without it, the init container does nothing. Once the first pod's init container
+  has completed (the provisioner reads pod status), the provisioner removes the annotation. The
+  StatefulSet uses `updateStrategy: OnDelete`, so that patch restarts no pod, and pods that restart
+  later come back without it. Model code cannot delete its way to a re-seed.
+- **Seed into a temp dir, never into existing content.** The init container refuses to seed when
+  `moca-workspace` holds anything except a leftover temp dir of its own, which it removes. It copies
+  into a fresh `mkdtemp` directory under the mount without following symlinks, then renames the
+  entries into place, so a crash mid-seed leaves no half-seeded tree that looks complete.
 
 This puts MOCA's writes outside `.context-service/` on a claim Context Service owns. The #40
 companion must state that the claim outside `.context-service/` belongs to the attacher. On a BYO
@@ -327,8 +377,10 @@ Each step tolerates "already gone", so a retried delete finishes what a failed o
 
 A loop in the provisioner, every `MOCA_PROVISIONER_RECONCILE_S` (default 300). It lists the
 workload StatefulSets, Services and Secrets in `moca-sandbox` and reads each one's record key from
-its annotation, using a read-only Redis connection. It deletes the objects when the record is
-missing, `deleted`, or of another generation, and the objects are older than a 10-minute grace.
+its annotation, reading Redis with the deployment's one credential (there are no ACL users,
+§3.1). It deletes the objects when the record is missing, `deleted`, or of another generation, and
+the objects are older than a 10-minute grace. The same loop re-mints attach tokens nearing expiry
+(§3.1) and removes `moca.dev/seed-revision` once seeding is done (§5.3).
 Contexts left by a failed rollback are out of its reach: Context Service owns them.
 
 ### 6.3 Caps and ceilings
@@ -364,7 +416,7 @@ shared pool, unchanged; `CREATE_FIELDS` and `WORKSPACE_FIELDS` still refuse ever
 ```
 
 - `sandboxes` selects phase 2. `count` is 1 to `MOCA_WORKLOAD_MAX_SANDBOXES`; `tier` defaults to
-  the deployment's default tier.
+  `container`, whatever the deployment's default tier, until a host-side provisioner exists.
 - `tier` accepts `container` only. The provisioner creates pods in the cluster; P4 (microVM)
   sandboxes run on a KVM host outside it (P6.2), which a Role cannot reach. `microvm` answers
   `400 sandbox_tier_unavailable` until a host-side provisioner exists.
@@ -380,12 +432,15 @@ shared pool, unchanged; `CREATE_FIELDS` and `WORKSPACE_FIELDS` still refuse ever
 
 ## 8. Implementation, as four PRs
 
-1. **Relay trusted labels and the selection filter.** Attach-token verification and label
-   stamping, stripping the two labels from shared-pool `Hello`s, the additive `workload` field and
-   the relay's Exec check, and the selection filter. Testable with a hand-minted token and a
-   static StatefulSet; changes nothing for a deployment with no attach keys.
+1. **Relay trusted labels and the selection filter.** Attach-token verification (`kid`, `iss`,
+   `aud`, required `exp`, and `n`) and label stamping, the ordinal bound (`< n`), closing an attach
+   stream at its token's `exp`, the worker reading `SANDBOX_TOKEN_FILE` on every dial, stripping the
+   two labels from shared-pool `Hello`s, the additive `workload` field and the relay's Exec check,
+   and the selection filter, which matches both workload and owner. Testable with a hand-minted
+   token and a static StatefulSet; changes nothing for a deployment with no attach keys.
 2. **The provisioner and its RBAC, without a PVC.** `@moca/provisioner`, the Role, NetworkPolicies
-   and ResourceQuota in `deploy/k8s/base`, the internal API and caps, `sandboxes` on
+   and ResourceQuota in `deploy/k8s/base`, the internal API with `wl` derived from the verified
+   owner, token minting and re-minting, and caps, `sandboxes` on
    `POST /workloads`, `provisioning`, and the delete order. Context still arrives by copy, now onto
    the workload's own sandboxes. This PR alone delivers acceptance 2 and 3.
 3. **The context-service#40 companion and the mount.** The resolve call, the namespace move,
@@ -409,6 +464,15 @@ on this path for phase 2 workloads.
   node, other workloads' pods and, with `local-path`, every PVC on that node's disk.
 - **The brain.** Workers still multiplex users and choose the sandbox (§3.3). Until MI1 S2 grants,
   a compromised worker can route any run anywhere and read Redis.
+- **A workload's own token, inside the workload.** Model code can read its workload's attach token
+  (§3.1). With it, from any host that reaches the relay's attach endpoint, it can register an
+  ordinal below `n` whose real pod is down (a restart) and receive that workload's later runs. The
+  capture lasts until the token's `exp`, at most one TTL, because the relay closes the stream then
+  and nothing re-mints the token for it. It never reaches another workload or another user.
+- **The reconciler's inputs.** It trusts workload records in Redis, which workers can write. A
+  compromised worker can delete or forge a record so that the reconciler deletes another
+  workload's objects. That is denial of service only: the reconciler creates nothing and mints
+  nothing.
 - **Context Service's trust in MOCA.** It takes the subject from `X-Context-Subject` and from the
   provisioner's resolve call. A compromised provisioner can attach any Context to any pod in
   `moca-sandbox`.
@@ -456,13 +520,21 @@ Ours:
 ## 11. Testing
 
 - Relay: an attach token sets the three labels whatever `Hello` sends; a shared-token `Hello`
-  loses its `moca.dev/workload`; a bad signature or id prefix is refused; both Exec mismatches fail.
-- Selection: workload and shared runs never cross; no live sandbox gives
+  loses its `moca.dev/workload`; a bad signature, unknown `kid`, wrong `aud` or `iss`, missing or
+  past `exp`, wrong id prefix, or an ordinal `>= n` is refused; a stream is closed at `exp`; both
+  Exec mismatches fail.
+- Selection: workload and shared runs never cross; a record with the right workload but another
+  owner is never selected; no live sandbox gives
   `workload_sandbox_unavailable`, never a fallback.
 - Provisioner: caps on both sides, idempotent `PUT`, delete waits for pods, the owner comes from the
-  verified user token, and a Kind check that its ServiceAccount cannot touch `moca`.
+  verified user token and `wl` is derived from it (Alice's token cannot touch Bob's `wl`), tokens
+  are re-minted before expiry, and a Kind check that its ServiceAccount cannot touch `moca`.
 - Storage: a read-only mount refuses writes, a writable mount never shows `.context-service/`, and
-  resolving another user's Context fails closed. The Kind demo (PR 4) is the acceptance gate.
+  resolving another user's Context fails closed.
+- Re-seed: model code deletes the tree's contents and plants symlinks into
+  `../.context-service/materialized/<rev>/`; after a pod restart the revision directory's digest is
+  unchanged, no seed ran (the annotation is gone), and a seed into a non-empty `moca-workspace`
+  is refused. The Kind demo (PR 4) is the acceptance gate.
 
 ---
 
