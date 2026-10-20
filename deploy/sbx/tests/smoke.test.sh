@@ -43,7 +43,11 @@ n="${1%%.*}"
 [[ "$n" != 900 ]] || exec "$REAL_SLEEP" "$@"
 # MOCK_REAL_SLEEP_300=1: the silent command really blocks, so a TERM can arrive during it.
 [[ "$n" != 300 || "${MOCK_REAL_SLEEP_300:-}" != 1 ]] || exec "$REAL_SLEEP" 30
-echo $(($(cat "$MOCK_CLOCK") + n)) >"$MOCK_CLOCK"
+# Under a lock, written whole by a rename: two steps' parallel sleeps must not interleave their
+# writes and leave a torn clock behind.
+until mkdir "$MOCK_CLOCK.lock" 2>/dev/null; do "$REAL_SLEEP" 0.01; done
+echo $(($(cat "$MOCK_CLOCK") + n)) >"$MOCK_CLOCK.$$" && mv -f "$MOCK_CLOCK.$$" "$MOCK_CLOCK"
+rmdir "$MOCK_CLOCK.lock"
 MOCK
 
 # mocactl: `sbx` only. The user is the HOME's .user; sandboxes are $MOCK_DIR/sb/<id> ("owner state"),

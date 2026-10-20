@@ -94,6 +94,9 @@ function local() {
             truncated: false,
           }),
       );
+      // A command may exit without reading its stdin (a refused write): the pipe then closes, and
+      // the EPIPE is the command's business, as it is on the real transport, not the test's.
+      child.stdin!.on('error', () => {});
       if (o.stdin) child.stdin!.end(Buffer.from(o.stdin));
       else child.stdin!.end();
     });

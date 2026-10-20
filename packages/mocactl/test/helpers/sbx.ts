@@ -193,6 +193,8 @@ export function localWorkspace(o: { capBytes?: number; without?: string[] } = {}
           });
         },
       );
+      // A command that exits without reading its stdin closes the pipe: that EPIPE is not the test's.
+      child.stdin!.on('error', () => {});
       child.stdin!.end(x.stdin ? Buffer.from(x.stdin) : undefined);
     });
   return { ws, exec, sent };
