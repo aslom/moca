@@ -165,7 +165,8 @@ export async function cmdPull(
       return SBX_EXIT.ok;
     }
     if (f.out !== undefined && f.out !== '-') {
-      writeFileSync(resolve(cwd, f.out), patch);
+      // 0600 when created: the patch is the repository's code, for no one else on the machine.
+      writeFileSync(resolve(cwd, f.out), patch, { mode: 0o600 });
       c.io.err(`wrote the sandbox's changes to ${f.out} (${patch.length} bytes)`);
     } else if (f.out === '-' || !f.apply) {
       if (c.io.outBytes) c.io.outBytes(patch);

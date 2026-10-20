@@ -104,7 +104,7 @@ export function writeFileCommand(path: string, o: { expectSha256?: string } = {}
     want === undefined
       ? ''
       : '{ [ -f "$p" ] && h=$({ sha256sum -- "$p" 2>/dev/null || shasum -a 256 -- "$p"; } | ' +
-        `cut -d ' ' -f 1) && [ "$h" = ${want} ] || ` +
+        `cut -d ' ' -f 1) && [ "$h" = ${q(want)} ] || ` +
         `{ rm -f -- "$t"; echo "$p: changed since it was read" >&2; exit ${WRITE_CONFLICT_EXIT}; }; } && `;
   return (
     `p=${q(path)}; if [ -L "$p" ]; then ` +

@@ -1,10 +1,14 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readlinkSync,
   realpathSync,
@@ -66,10 +70,24 @@ function snapshot(d: string): Record<string, string> {
     .filter((f) => f && f !== '.' && f !== './.git');
   for (const f of files) {
     const p = join(d, f);
-    const st = lstatSync(p);
     const key = f.slice(2).normalize('NFC');
-    if (st.isSymbolicLink()) out[key] = `link:${readlinkSync(p).normalize('NFC')}`;
-    else if (st.isFile()) out[key] = `${st.mode & 0o111 ? 'x' : '-'}:${readFileSync(p, 'hex')}`;
+    // Opened without following a link, then read and stat'ed through the one descriptor.
+    let fd: number;
+    try {
+      fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ELOOP' || code === 'EMLINK')
+        out[key] = `link:${readlinkSync(p).normalize('NFC')}`;
+      else if (code !== 'EISDIR') throw err;
+      continue;
+    }
+    try {
+      const st = fstatSync(fd);
+      if (st.isFile()) out[key] = `${st.mode & 0o111 ? 'x' : '-'}:${readFileSync(fd, 'hex')}`;
+    } finally {
+      closeSync(fd);
+    }
   }
   return out;
 }

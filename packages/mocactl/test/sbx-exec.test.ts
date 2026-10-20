@@ -668,10 +668,10 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
       { tool: 'sandbox_info', execs: 0 },
     ]);
     const file = join(paths.stateDir, 'sbx', `${SBX}.log`);
+    // Never command text, command output or a token. Read first, then its mode.
+    const raw = readFileSync(file, 'utf8');
     expect(statSync(file).mode & 0o777).toBe(0o600);
     expect(statSync(join(paths.stateDir, 'sbx')).mode & 0o777).toBe(0o700);
-    // Never command text, command output or a token.
-    const raw = readFileSync(file, 'utf8');
     expect(raw).not.toContain('echo');
     expect(raw).not.toContain('hi\\n');
     expect(raw).not.toContain(TOKEN.token);

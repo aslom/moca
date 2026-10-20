@@ -1104,7 +1104,13 @@ export function writeBinding(
   const controlPlaneUrl = bindingUrl(b.controlPlaneUrl);
   const exclude = excludeFile(root);
   mkdirSync(dirname(exclude), { recursive: true });
-  const cur = existsSync(exclude) ? readFileSync(exclude, 'utf8') : '';
+  // Read, not tested then read: a missing file is the only case that means "empty".
+  let cur = '';
+  try {
+    cur = readFileSync(exclude, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
   if (!cur.split('\n').some((l) => l.trim() === '.sbx/' || l.trim() === '/.sbx/')) {
     appendFileSync(exclude, `${cur && !cur.endsWith('\n') ? '\n' : ''}.sbx/\n`);
   }
