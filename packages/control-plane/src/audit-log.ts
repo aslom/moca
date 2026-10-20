@@ -1,8 +1,5 @@
-// ADR-0044 / spec 2026-10-20-audit-log-mirror-design.md: mirror audit decisions to stdout.
-//
-// Shape matches packages/supervisor/src/main.ts:49's opts.log so a future consolidation ADR can
-// unify the two. Call sites construct the line object with keys from the identifier-only
-// whitelist in the spec; the three enforcement tests in test/audit-log.test.ts catch drift.
+// Stdout mirror for audit decisions. Shape matches the supervisor's opts.log for easy future
+// consolidation; call sites compose lines from the identifiers-only field whitelist.
 
 export type AuditLog = (line: Record<string, unknown>) => void;
 

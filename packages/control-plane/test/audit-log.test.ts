@@ -1,11 +1,6 @@
-// ADR-0044: audit-log mirror. One file, four invariants:
-//  1. unit: defaultAuditLog emits one JSON line.
-//  2. no-tokens: planted secret never appears in any emitted line, across every auditing route.
-//  3. no-user-content: planted prompt / display-name / filename never appears.
-//  4. field-whitelist: no off-whitelist keys drift in across emitted lines.
-//  5. attribution: concurrent handlers for different subjects produce correctly-attributed lines.
-//
-// Model: Shape B from test/sandbox-handlers.test.ts:312-329 — in-process capture, no stdout stub.
+// Enforcement tests for ADR-0044 (identifiers-only audit-log mirror). Captures emitted lines
+// in-process via makeDeps's push-to-array log; see sandbox-handlers.test.ts for the console-stub
+// variant.
 
 import { describe, expect, it, vi } from 'vitest';
 import { defaultAuditLog } from '../src/audit-log.js';
@@ -18,7 +13,7 @@ const PLANTED_FILENAME = 'PLANTED-FILENAME.txt';
 const PLANTED_DISPLAY = 'PLANTED-DISPLAY-NAME';
 const PLANTED_SKILL = 'PLANTED-SKILL-BODY';
 
-// The closed field whitelist from docs/specs/2026-10-20-audit-log-mirror-design.md.
+// Closed field whitelist for emitted lines; drift here fails this test.
 const ALLOWED_KEYS = new Set([
   'event',
   'decision',
@@ -207,7 +202,7 @@ describe('data-handling policy across the auditing surface', () => {
 });
 
 describe('concurrent-subject attribution', () => {
-  it('two sessions created in parallel attribute to the right subjects (#359)', async () => {
+  it('two sessions created in parallel attribute to the right subjects', async () => {
     const deps = makeDeps();
     await seedCredential(deps, alice.sub);
     await seedCredential(deps, bob.sub);

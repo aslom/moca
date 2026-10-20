@@ -14,12 +14,30 @@ Builds on these; reuses them:
 ## 1. Problem
 
 For a server deployment that already records lifecycle decisions in Redis (`sh:cp:audit`), the
-operator-visible side-effect of a dispatched session via `kubectl logs` is **nothing**. Verified on
-`edge-12536a6` against the `moca_chained_subagents` demo with every pod tailed through a dispatch
-cycle. Incident response has no grep surface short of cluster-admin Redis access.
+operator-visible side-effect of a dispatched session via `kubectl logs` is **nothing**. Incident
+response has no grep surface short of cluster-admin Redis access.
 
 Issue #359 names the same gap from a different angle: every log line must carry subject and
 sessionId. The two concerns share a single fix.
+
+### 1.1 Facts this design rests on
+
+- **Audit stream.** The control plane writes decisions to the Redis stream `sh:cp:audit`
+  (`packages/control-plane/src/ownership.ts`, constant `AUDIT_STREAM`) with the field schema
+  `ts, subject, decision, sessionId?, sandboxId?, credential?, configRef?, bytes?, reason?,
+  model?, fromModel?, family?`.
+- **Shared entry point.** All control-plane handlers that audit go through `auditBestEffort`
+  (`packages/control-plane/src/handler-util.ts`), which `XADD`s to that stream.
+- **No data-plane audit.** `handleRunLeafParsed` (`packages/knative-server/src/server.ts`) runs
+  leaves on the P6 sync-run path without a per-run audit decision.
+- **Baseline log volume.** The supervisor emits `supervisor_listening`, `worker_ready`, and
+  `over_admission` events (`packages/supervisor/src/pool.ts`); the control plane uses
+  `console.error` only for the loud-swallow diagnostics (`handler-util.ts:51`); the knative-server
+  uses prefixed `console.*` for `[turn]`/`[redis]`/`cron-dispatch:`; the harness is runtime-silent.
+  Nothing per request.
+- **Deprecated path.** The Knative/KEDA drain (`packages/knative-server/src/leaf-job.ts` +
+  `harness/src/leaf-job-runner.ts`) is marked `@deprecated ADR-0041`; `LeafEnvelope` on that path
+  does not carry `subject` (`harness/src/run-leaf.ts`).
 
 ## 2. Design
 
@@ -105,28 +123,18 @@ invariant must survive new audit decisions being added later.
 
 ### 3.2 Explicitly prohibited
 
-Regardless of field name — enforced by the three tests in `test/audit-log.test.ts`:
+Regardless of field name — enforced by the tests in §4:
 
-1. **Credentials / secrets.** No `token`, `secret`, `password`, `apiKey`, `credentialValue`,
-   `Authorization` header values, JWT-shaped substrings (`eyJ[A-Za-z0-9_-]{10,}`), refresh token
-   values, Anthropic/OpenAI key shapes.
-2. **Prompt text.** The leaf's prompt (the operator's question) must never appear — not truncated,
-   not hashed. The user asked a specific thing; that content is not ours to log.
-3. **Leaf response text.** The subagent's final message, intermediate turns, tool-call outputs,
-   file contents it read — none go near a log line. Transcript retrieval is a separate opt-in API
-   if it ever exists.
-4. **Workload contents.** File names, file contents, directory listings inside a workload. The
-   `revision` digest is the handle.
-5. **Config bundle contents.** Names of skills in a bundle, their text, directory layout — only
-   the digest.
-6. **PII beyond `subject`.** No email addresses, display names (even though Redis stores one on
-   `sh:cp:refresh:family:<fam>`), org affiliations, IP addresses, device labels.
-7. **Error messages verbatim.** Only short enum codes in `reason`. If Redis call fails, emit
-   `reason: "redis_unavailable"` — never `reason: "ECONNREFUSED 10.96.176.141:6379"` and never
-   the exception stack.
-
-The existing `console.error` loud-swallow in `handler-util.ts:51` is a diagnostic, not an audit
-emission; it stays separate and off the audit-log channel.
+- **Credentials / secrets.** No `token`, `secret`, `password`, `apiKey`, `Authorization`
+  values, JWT-shaped substrings, refresh token values, Anthropic/OpenAI key shapes.
+- **Prompt and response text.** Never — not truncated, not hashed. Transcripts belong to a
+  separate opt-in API, if one is ever added.
+- **Workload or bundle contents.** No file names, file contents, directory listings, skill text.
+  The sha256 digest is the handle.
+- **PII beyond `subject`.** No email, display name, org affiliation, IP, device label — even
+  though some of these live elsewhere in Redis.
+- **Error messages verbatim.** Only short enum codes in `reason`. The existing `console.error`
+  loud-swallow in `handler-util.ts` is a diagnostic, not an audit emission, and stays separate.
 
 ## 4. Enforcement
 
@@ -175,7 +183,7 @@ fields. Adding `severity_text` / `severity_number` / `service.name` later is als
 - Unit (P6 path): `cd packages/knative-server && npx vitest run test/run-leaf-audit-log.test.ts`
   — asserts `run_started` once before `runLeaf`, `run_finalized` once after, no re-emit on
   saturation retry.
-- E2E: build and deploy to the `moca_chained_subagents` demo cluster, tail `kubectl logs -f` on
-  all five server pods through a full dispatch, confirm per-request lines land for the dispatched
+- E2E: build and deploy to a kind cluster, dispatch a leaf via `mocactl spawn`, tail
+  `kubectl logs -f` on all five server pods, confirm per-request lines land for the dispatched
   sessionId.
 - Secret-leak: grep each pod's logs for the planted token / Anthropic key — must return zero.

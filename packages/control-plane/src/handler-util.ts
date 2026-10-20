@@ -47,8 +47,7 @@ export async function auditBestEffort(
   target: string,
   entry: Parameters<OwnershipIndex['audit']>[0],
 ): Promise<void> {
-  // Mirror to stdout BEFORE the Redis write so the line still appears when Redis is down
-  // (ADR-0044). The entry's field shape is the audit stream's -- identifiers only.
+  // Mirror to stdout BEFORE the Redis write so the line still appears when Redis is down.
   (deps.log ?? defaultAuditLog)({ event: 'audit', ...entry });
 
   try {

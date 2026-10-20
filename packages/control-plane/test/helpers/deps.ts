@@ -20,7 +20,7 @@ export type TestDeps = CpDeps & {
   refreshAudit: AuditFields[];
   /** ...and its separate stream for refusals of a token nobody issued. */
   refreshAnonAudit: AuditFields[];
-  /** Captured audit log lines (ADR-0044). Lines land here instead of stdout under tests. */
+  /** Captured audit log lines; land here instead of stdout under tests. */
   logLines: Array<Record<string, unknown>>;
 };
 

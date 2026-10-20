@@ -158,7 +158,7 @@ export interface CpDeps {
   close?: () => Promise<void>;
   /** The sandbox resource (SBX0 §5); present on the sandbox profile only. */
   sandboxes?: SandboxStore;
-  /** Stdout mirror of audit decisions (ADR-0044); defaults to `defaultAuditLog` in depsFromEnv. */
+  /** Stdout mirror of audit decisions; defaults to `defaultAuditLog` in depsFromEnv. */
   log?: AuditLog;
 }
 

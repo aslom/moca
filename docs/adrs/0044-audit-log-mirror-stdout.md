@@ -1,4 +1,4 @@
-# ADR-0044: Mirror audit decisions to component stdout as structured JSON, identifiers-only
+# ADR-0044: Mirror audit decisions to component stdout as structured JSON, carrying subject and sessionId
 
 - **Status:** Proposed <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
 - **Date:** 2026-10-20
@@ -7,85 +7,54 @@
 
 ## Context
 
-MOCA records lifecycle decisions in Redis via the `sh:cp:audit` stream — `session_created`,
-`credential_issued`, `bundle_promoted`, `sandbox_created`, `refresh_rotated`, and so on. The stream
-is keyed by subject and sessionId and has the information an operator needs for incident response.
-It is not surfaced to `kubectl logs`.
+MOCA records lifecycle decisions in the Redis stream `sh:cp:audit` — `session_created`,
+`credential_issued`, `bundle_promoted`, `sandbox_created`, `refresh_rotated`, and so on, keyed by
+subject and sessionId. The stream has what incident response needs and is not surfaced to
+`kubectl logs`: control-plane audit sites `XADD` without a stdout mirror, and the data plane's
+run path has no audit helper at all. A full `mocactl spawn` dispatch cycle emits ~zero
+per-request lines across the server pods.
 
-Running the `moca_chained_subagents` demo (kagenti-demos) on `edge-12536a6` and tailing
-`kubectl logs -f` on every server pod through a full dispatch cycle emits **~zero per-request
-lines**: supervisor emits one pool-admission line, control plane / context-service / both sandbox
-pods emit nothing per request. The ownership-plane audit lives in Redis; the data plane
-(`handleRunLeafParsed`) has no audit helper at all and never records a per-run decision.
-
-Issue #359 ("Attribute every harness/worker log line to its subject and session") separately
-requires per-line subject/sessionId attribution on all log output. The two concerns share a fix.
+#359 separately asks for subject and sessionId on every log line. The two concerns share one fix.
 
 ## Decision
 
-Mirror every audit decision to component stdout as **one JSON line per decision**:
+Mirror every audit decision to component stdout as one JSON line, carrying subject and sessionId.
 
-- **Control plane.** `auditBestEffort` (`packages/control-plane/src/handler-util.ts`) emits the
-  mirror before awaiting the Redis `XADD`, so the line still appears when Redis is down. The three
-  raw `index.audit` call sites (`handlers.ts:createSession`, `updateSession`, `deleteSession`),
-  `exchange.ts`, and `refresh-redis.ts` get sibling emits. The sandbox routes
-  (`sandbox-handlers.ts`) inherit the fix through their local wrapper over `auditBestEffort`.
-- **Data plane.** `knative-server/src/server.ts handleRunLeafParsed` (the P6 sync-run path) emits
-  `run_started` once before `runLeaf` and `run_finalized` once after — carrying `auth.subject`,
-  `body.sessionId`, `body.workloadId`, `kind`, final `status`, and (where applicable) `reason`.
-- **Shape.** Flat JSON. `(line: Record<string, unknown>) => void` — deliberately the same signature
-  as the supervisor's local `opts.log` (`packages/supervisor/src/main.ts:49`) so a future
-  consolidation ADR could unify them trivially.
+- **Control plane.** `auditBestEffort` emits the line before the Redis `XADD`, so it still appears
+  when Redis is down. Call sites that bypass that helper (three in `handlers.ts`, one in
+  `exchange.ts`, five Lua-XADD paths in `refresh-redis.ts`) get sibling emits.
+- **Data plane.** The P6 run path (`handleRunLeafParsed`) emits `run_started` once before
+  `runLeaf` and `run_finalized` once after; saturation retries don't re-emit. The deprecated
+  Knative/KEDA drain (ADR-0041) stays silent — its envelope does not carry `subject` and the path
+  is being removed.
+- **Shape.** Flat JSON via `(line: Record<string, unknown>) => void`, matching the supervisor's
+  existing `opts.log`.
+- **Attribution.** Explicit parameters at every emit site; no AsyncLocalStorage.
 - **Policy.** Identifiers only. Never prompts, responses, filenames, display names, credential
-  values, error-message bodies, PII beyond `subject`. Enforced by three tests
-  (`test/audit-log.test.ts` covers no-tokens, no-user-content, field-whitelist) so new audit
-  decisions can't drift the invariant.
+  values, or raw error strings. The field whitelist and the three enforcement tests
+  (`no-tokens`, `no-user-content`, `field-whitelist`) are in the spec.
 
-### Not in this ADR
+### Alternatives considered
 
-- Tool-call transcript retrieval (separate upstream request).
-- Log levels / filtering / aggregator shipping.
-- OTel SDK dependency. The flat JSON shape is ingestible by OTel's Filelog receiver; a future ADR
-  could re-key to OTel semconv (`enduser.id`, `moca.session.id`, `severity_text`, `service.name`)
-  additively, without renames on the consumer side.
-- AsyncLocalStorage / request-scoped context. Not needed — `subject` and `sessionId` are already
-  locals at every emit site; concurrent-turn attribution follows from explicit params alone.
-- The deprecated Knative/KEDA drain (`leaf-job.ts` + `leaf-job-runner.ts`, ADR-0041, removal no
-  earlier than end of Oct 2026). `LeafEnvelope` doesn't carry `subject`; the P6 path is where the
-  demo and the current cluster deploy run.
+- **AsyncLocalStorage request context** — greenfield in this repo; explicit params already carry
+  subject and sessionId at every emit site.
+- **OTel SDK (`@opentelemetry/*`) now** — larger scope than #359 asks for. The flat JSON shape is
+  ingestible by OTel's Filelog receiver; a future ADR can commit to semconv additively.
+- **pino / winston** — new runtime dependency for the same JSON-per-line shape.
+- **Extract the supervisor's `opts.log` into a shared module now** — scope creep. A 6-line
+  duplication is cheaper and the signature matches, so a future consolidation ADR is trivial.
 
 ## Consequences
 
-**Gained.**
+- Positive: `kubectl logs | jq 'select(.event=="audit")'` is now a grep surface for session
+  lifecycle, without cluster-admin Redis access. #359's attribution test is satisfied by
+  construction. Future OTel adoption remains open.
+- Negative / accepted cost: one small log line per audit decision, under the per-pod log budget.
+  Pod stdout retention is governed by the kubelet rotation and whatever aggregator the operator
+  runs — MOCA cannot retract an emitted line, and a `session_deleted` entry is appended, not
+  applied retroactively. The identifiers-only rule is the compensating control: emitted lines
+  are effectively permanent.
+- Not covered: tool-call transcript retrieval (separate upstream request); the deprecated
+  KEDA/Knative drain, silent per-request until it is removed; the sandbox pods and the
+  context-service pod, out of scope for #359.
 
-- `kubectl logs | jq 'select(.event=="audit")'` is now a grep surface for session lifecycle.
-- Platform engineers can correlate "what happened to session X" against pod logs without
-  cluster-admin Redis access.
-- Future OTel adoption is unblocked (not pre-committed).
-- #359's attribution test is satisfied by construction — every emit site carries `subject` by
-  explicit parameter.
-
-**Accepted.**
-
-- One Redis-write worth of log output per audit decision. At current volumes, well under the
-  per-pod log budget.
-- The deprecated KEDA path remains silent per request. ADR-0041 removes it in a few weeks;
-  investing in its attribution is not worth the envelope-widening cost.
-- **Pod stdout retention is governed by the operator's log infrastructure, not by MOCA.** Once
-  a line is written to stdout it is subject to the kubelet's container-log rotation and to any
-  log aggregator (Elasticsearch, Datadog, Loki, …) the operator has configured — including its
-  retention and deletion policies, over which MOCA has no control. `teardown.sh` and
-  `mocactl sessions delete` do **not** retract prior audit lines; a `session_deleted` entry is
-  appended, not applied retroactively. This is the right policy — audit trails that disappear
-  on teardown aren't audit trails — and it is why the identifiers-only data-handling rule
-  (see the spec) is strict: emitted lines are effectively permanent.
-
-## Alternatives considered
-
-- **AsyncLocalStorage request context.** Greenfield in this repo (no existing usage). Overkill —
-  explicit params already carry subject and sessionId everywhere they are needed.
-- **OTel SDK (`@opentelemetry/*`) now.** Bigger scope than #359 asks for. Our flat JSON is
-  Filelog-ingestible; a future ADR can commit to OTel semconv additively.
-- **pino / winston.** New runtime dependency for the same JSON-per-line shape.
-- **Extracting the supervisor's `opts.log` into a shared module.** Scope creep; touches supervisor
-  startup and tests. The 5-line duplication in `audit-log.ts` is cheaper and the signature matches.

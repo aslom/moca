@@ -1009,7 +1009,7 @@ async function handleRunLeafParsed(
   body = await resolveRunWorkload(body, auth, res);
   if (!body) return;
 
-  // ADR-0044: run_started once (saturation retries don't re-emit), run_finalized once.
+  // run_started once (saturation retries don't re-emit), run_finalized once.
   // subject is omitted when auth is null; sh:cp:audit carries it via session_created.
   const emitLifecycle = (decision: 'run_started' | 'run_finalized', extra: Record<string, unknown>) =>
     defaultAuditLog({
