@@ -99,17 +99,17 @@ writable copy. That leaves three gaps:
    headless Service `<wl>` and Secret `<wl>-attach` (the attach token, mounted as a file) in
    `moca-sandbox`.
 6. **Mount the context:** the sandbox pods `<wl>-<n>` mount the Context PVC at `/workspace/context`:
-   read-only at `subPath: .context-service/materialized/<revision>`, or writable at `subPath:
-   moca-workspace`, seeded once by an init container.
+   read-only at `subPath: .context-service/materialized/<revision>`, or writable at
+   `subPath: moca-workspace`, seeded once by an init container.
 7. **Register with the relay:** each pod attaches to the relay with `Hello` + attach token; the
    relay stamps the trusted `moca.dev/workload` and `moca.dev/owner` labels, whatever `Hello` sent.
    Once `count` sandboxes are registered the record is `ready`.
 8. **Run a task:** `POST /v1/runs` names the workload; selection keeps only records whose
    `moca.dev/workload` and `moca.dev/owner` match, and the worker runs the task with
    `SandboxExec.Exec` carrying the `workload` field, which the relay checks.
-9. **Delete:** `DELETE /workloads/{id}` removes the sandboxes first (`DELETE
-   /internal/v1/workloads/{name}/{generation}`, `200` once no pod remains), then the Context and its
-   managed PVC (`DELETE /internal/v1/namespaces/{ns}/contexts/{name}`), because Context Service
+9. **Delete:** `DELETE /workloads/{id}` removes the sandboxes first
+   (`DELETE /internal/v1/workloads/{name}/{generation}`, `200` once no pod remains), then the
+   Context and its managed PVC (`DELETE /internal/v1/namespaces/{ns}/contexts/{name}`), because Context Service
    refuses to delete a mounted claim.
 
 In short: a new `moca-provisioner` (§4, ADR-0043), the only MOCA component with Kubernetes
