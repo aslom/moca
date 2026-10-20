@@ -374,3 +374,93 @@ rm -rf deploy/sbx/.generated
 The Redis volume (the StatefulSet's `data` claim, `data-redis-0`) is kept by the delete. Remove it
 with `kubectl delete pvc data-redis-0 -n <namespace>` to delete every sandbox record and every
 login (the refresh families live there too).
+
+## 13. Live smoke
+
+`deploy/sbx/smoke.sh` runs the spec's live checks (§10.6) against a deployed service. Run it after
+a deploy or an upgrade, and once for the 1c acceptance. Without `SBX_LIVE_SMOKE=1` it prints one
+`SKIP` line and does nothing. It reads only the environment. It never logs in, never prints a
+token, and deletes only the sandboxes it created in that run, even when it fails or is
+interrupted.
+
+**Prepare two logins, once.** You need two GitHub accounts, both enrolled (§4), because step 2
+checks that one user cannot reach the other's sandbox. Each login lives in its own `HOME`:
+
+```bash
+mocactl sbx login --control-plane-url https://<api host>          # user A, in your own HOME
+mkdir -p ~/sbx-smoke-b
+HOME=~/sbx-smoke-b mocactl sbx login --control-plane-url https://<api host>   # user B
+```
+
+Log user B in from a browser session signed in to B's GitHub account (a private window works).
+Both logins refresh themselves, so this lasts as long as a login normally does. Leave
+`XDG_CONFIG_HOME` and `XDG_STATE_HOME` unset: the smoke runs `mocactl` with them unset.
+
+**Run it:**
+
+```bash
+SBX_LIVE_SMOKE=1 SBX_API_URL=https://<api host> \
+  SBX_SMOKE_HOME_A="$HOME" SBX_SMOKE_HOME_B=~/sbx-smoke-b \
+  SBX_SMOKE_HOST=<host> deploy/sbx/smoke.sh
+```
+
+```
+ok 1 - round trip: sbx up, run, put, pull --apply on a sample repository
+ok 2 - two users: B is refused A's sandbox (404, PERMISSION_DENIED); one req_id from both gets each its own result
+ok 3 - a command silent for 5 minutes completes
+ok 4 - delete: the mint is refused at once; the kept token is cancelled at exp + leeway, then refused
+ok 5 - claude fixes the failing test through mocactl sbx mcp; the tree is unchanged until pull --apply
+ok 5 - opencode fixes the failing test through mocactl sbx mcp; the tree is unchanged until pull --apply # SKIP opencode not on PATH
+ok 6 - the janitor frees a deleted sandbox's directory
+```
+
+It exits 0 when every step is `ok` or skipped, and 1 when any step is `not ok`; the line gives the
+reason. On a failure it keeps its logs and prints their path. A full run takes about 25 minutes:
+step 3 runs a command that is silent for 5 minutes, and step 4 waits for a token to expire (one
+token lifetime plus the 30 s leeway).
+
+| Variable                                                                 | Default                                      | What it is                                                                                                                                                                            |
+| ------------------------------------------------------------------------ | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SBX_API_URL`                                                            | (required)                                   | `https://<api host>`                                                                                                                                                                  |
+| `SBX_SMOKE_HOME_A`, `SBX_SMOKE_HOME_B`                                   | (required)                                   | the two logged-in `HOME`s; they must be two different users                                                                                                                           |
+| `SBX_SMOKE_TEMPLATE`                                                     | `default`                                    | the template every sandbox is created from                                                                                                                                            |
+| `SBX_SMOKE_STEPS`                                                        | `1,2,3,4,5,6`                                | the steps to run; `1,2,5` leaves out the slow ones                                                                                                                                    |
+| `SBX_SMOKE_AGENTS`                                                       | `claude,opencode`                            | the agents step 5 runs, headless; one not on `PATH` is a SKIP. Each needs its own login and model configured                                                                          |
+| `SBX_SMOKE_HOST`                                                         | (unset: step 6 is a SKIP)                    | an ssh target (`[user@]host`) for the template's KVM host, with passwordless `sudo`                                                                                                   |
+| `SBX_SMOKE_HOST_ENV_DIR`, `SBX_SMOKE_HOST_SRV`, `SBX_SMOKE_HOST_LIBEXEC` | `/etc/sbx`, `/srv/sbx`, `/usr/local/libexec` | that host's `SBX_ENV_DIR`, `SBX_SRV` and `SBX_LIBEXEC_DIR`, if `install-host.sh` was given others                                                                                     |
+| `SBX_SMOKE_JANITOR_AGE`                                                  | `0`                                          | the janitor wait for step 6's one run. `0` frees **every** terminated sandbox's workspace on the host at once; on a shared host, use the token lifetime + 30 s or more, such as `930` |
+| `MOCACTL`                                                                | (unset: installed from the `edge` channel)   | a `mocactl` to test instead, such as a local build (`packages/mocactl/dist/mocactl.mjs`)                                                                                              |
+| `SBX_SMOKE_PYTHON`                                                       | `python3`                                    | Python 3.10+ with `grpcio` and `grpcio-tools` (steps 2 and 4 use `docs/api/examples/sandbox_v1_client.py`). It also runs the sample repository's tests locally                        |
+
+What each step does:
+
+1. Creates a sample repository with one failing test, runs `sbx up`, and checks that `sbx run`
+   fails the suite. It `sbx put`s the fix and checks that the suite passes in the sandbox, that
+   the local tree is unchanged and its suite still fails, and that the local suite passes after
+   `sbx pull --apply`.
+2. Checks that user B's `sbx token` and `sbx env` for A's sandbox both say `no such sandbox`, and
+   that B's token with A's sandbox and workspace key is `PERMISSION_DENIED`. Then A and B each send
+   the same `req_id` and the same command at once, each to a sandbox of their own from the same
+   template, and each must read its own sandbox's file.
+3. Runs `sbx run --timeout 400 -- sh -c 'sleep 300; echo survived'`, which must print `survived`.
+4. Mints a token and keeps it, deletes the sandbox, and checks that the next mint is refused
+   (`sandbox was deleted`) while the kept token still runs `true`. 20 s before the token's `exp` it
+   starts a command that would run past `exp`. That command must be cancelled
+   (`DEADLINE_EXCEEDED`) at `exp` plus 30 s. By this machine's clock, anything from 15 to 60 s after
+   `exp` passes, to allow for clock skew.
+   After that, the token must be refused (`UNAUTHENTICATED`).
+5. For each agent, in a fresh sample repository after `sbx up`: `sbx doctor`'s agent-config check
+   must pass. Then
+   `claude -p "…" --mcp-config .mcp.json --strict-mcp-config` or `opencode run "…"` runs, with the
+   smoke's `mocactl` first on `PATH` (logged in as user A) for the `mocactl sbx mcp` it starts. The
+   flight recorder must show the agent's calls, and `git status --porcelain` must be the same as
+   right after `sbx up`. The local suite must still fail, then pass after `sbx pull --apply`.
+6. Deletes a sandbox (step 4's, if that ran), checks that its directory
+   `<SBX_SRV>/workspaces/<worker>/<id>` exists on the host, and runs the installed janitor once:
+   `ssh <host> sudo -n bash -s`, which sources `janitor.env` and then runs
+   `env SBX_JANITOR_AGE=<age> … /usr/local/libexec/sbx-janitor.sh`. The installed timer and its
+   settings are not changed. After the run, the directory must be gone.
+
+What it cannot check for you: the agents' own logs (kept on a failure) show whether an agent
+fixed the test by the shortest route, or tried its local tools first and was denied. The
+`no network in the guest` claim is not one of its steps (`docs/sbx/security-review.md` §2).
