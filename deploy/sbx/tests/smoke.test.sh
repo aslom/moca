@@ -339,7 +339,7 @@ grep -q "^mocactl user=a .* sbx run --sandbox sbx-[0-9a-f]* --timeout 400 -- sh 
 grep -A1 '^mocactl user=a .* sbx rm --force sbx-0*5$' "$MOCK_LOG" | grep -q ' sbx token sbx-0*5$' || fail 'no mint right after the delete'
 grep -q '^client user=a wsk=sbx-[0-9a-f]* req_id=[0-9]* cmd=sleep 120; echo not-cancelled$' "$MOCK_LOG" || fail 'no command started before exp'
 # Step 5: claude headless with the project MCP config, the agent's mocactl as user A.
-grep -qx "claude -p The test suite fails (python3 -m unittest). Fix it with a minimal change and run the tests. --mcp-config .mcp.json --strict-mcp-config" "$MOCK_LOG" || fail 'claude not run headless with --mcp-config .mcp.json --strict-mcp-config'
+grep -qx "claude -p The test suite fails (python3 -m unittest). Fix it with a minimal change and run the tests. --mcp-config .mcp.json --strict-mcp-config --allowedTools mcp__sandbox__\*" "$MOCK_LOG" || fail 'claude not run headless with --mcp-config .mcp.json --strict-mcp-config and only the sandbox MCP tools allowed'
 grep -q '^mocactl user=a url=https://api.sbx.example xdg= sbx mcp$' "$MOCK_LOG" || fail "the agent's mocactl sbx mcp did not run as user A"
 # Step 6: the janitor with the env file sourced, the host's own wait kept, and the host's paths.
 grep -q '^ssh -o BatchMode=yes kvm.example sudo -n bash -s -- sbx_default sbx-[0-9a-f]* ' "$MOCK_LOG" || fail 'no ssh for the janitor'
