@@ -1,4 +1,4 @@
-import { createHash, generateKeyPairSync } from 'node:crypto';
+import { createHmac, generateKeyPairSync } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { makeSigner } from '@moca/control-plane';
 import { armDeadline, makeExecAuth } from '../src/main.js';
@@ -27,31 +27,39 @@ function thrown(fn: () => unknown): Error {
   throw new Error('expected a throw');
 }
 
+const KEY = Buffer.alloc(32, 7);
+
 describe('workerReqId (SBX0 §3.6)', () => {
-  it('is the first 53 bits of SHA-256(sbx, 0x00, reqId as 8 big-endian bytes)', () => {
+  it('is the first 53 bits of HMAC-SHA-256(key, sbx, 0x00, reqId as 8 big-endian bytes)', () => {
     const be = Buffer.alloc(8);
     be.writeBigUInt64BE(4242n);
-    const digest = createHash('sha256')
+    const digest = createHmac('sha256', KEY)
       .update(Buffer.concat([Buffer.from('sbx-aaaa', 'utf8'), Buffer.from([0]), be]))
       .digest();
     const want = Number(digest.readBigUInt64BE(0) >> 11n);
-    expect(workerReqId('sbx-aaaa', 4242)).toBe(want);
+    expect(workerReqId(KEY, 'sbx-aaaa', 4242)).toBe(want);
   });
 
-  it('is deterministic, so a retry of the same req_id reaches the worker dedup', () => {
-    expect(workerReqId('sbx-aaaa', 7)).toBe(workerReqId('sbx-aaaa', 7));
+  it('is deterministic for one key, so a retry of the same req_id reaches the worker dedup', () => {
+    expect(workerReqId(KEY, 'sbx-aaaa', 7)).toBe(workerReqId(KEY, 'sbx-aaaa', 7));
+  });
+
+  it("depends on the key, so a sandbox cannot compute another sandbox's worker id", () => {
+    expect(workerReqId(KEY, 'sbx-aaaa', 7)).not.toBe(
+      workerReqId(Buffer.alloc(32, 8), 'sbx-aaaa', 7),
+    );
   });
 
   it('differs for two sandboxes sending the same req_id', () => {
-    expect(workerReqId('sbx-aaaa', 7)).not.toBe(workerReqId('sbx-bbbb', 7));
+    expect(workerReqId(KEY, 'sbx-aaaa', 7)).not.toBe(workerReqId(KEY, 'sbx-bbbb', 7));
     // The 0x00 separator: ('sbx-a', …) and ('sbx-', …) cannot meet by shifting a byte across.
-    expect(workerReqId('sbx-a', 7)).not.toBe(workerReqId('sbx-', 7));
+    expect(workerReqId(KEY, 'sbx-a', 7)).not.toBe(workerReqId(KEY, 'sbx-', 7));
   });
 
   it('stays in 1 <= id < 2^53 across the whole uint64-as-number range', () => {
     for (const reqId of [0, 1, 2, 255, 2 ** 32, 2 ** 52, Number.MAX_SAFE_INTEGER]) {
       for (const sbx of ['sbx-aaaa', 'sbx-bbbb', 'x']) {
-        const id = workerReqId(sbx, reqId);
+        const id = workerReqId(KEY, sbx, reqId);
         expect(Number.isSafeInteger(id)).toBe(true);
         expect(id).toBeGreaterThanOrEqual(1);
         expect(id).toBeLessThan(2 ** 53);
@@ -61,7 +69,7 @@ describe('workerReqId (SBX0 §3.6)', () => {
 
   it('refuses a req_id that is not a uint64 the wire could carry as a number', () => {
     for (const bad of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN]) {
-      expect(() => workerReqId('sbx-aaaa', bad)).toThrow(RangeError);
+      expect(() => workerReqId(KEY, 'sbx-aaaa', bad)).toThrow(RangeError);
     }
   });
 });
@@ -244,16 +252,15 @@ describe('armDeadline', () => {
 describe('the sandbox Exec handler after its token expires', () => {
   const records = { put: async () => {}, remove: async () => {}, list: async () => [] };
 
-  function handler(server: unknown, path: string): (call: unknown) => unknown {
-    return (server as { handlers: Map<string, { func: (call: unknown) => unknown }> }).handlers.get(
-      path,
-    )!.func;
+  function handler(server: unknown, path: string): (call: unknown, cb?: unknown) => unknown {
+    type Func = (call: unknown, cb?: unknown) => unknown;
+    return (server as { handlers: Map<string, { func: Func }> }).handlers.get(path)!.func;
   }
 
-  it('writes nothing, and ends the call only once, after the expiry fired', async () => {
+  /** A relay with one fake worker attached, every timer captured in `pending` to fire by hand. */
+  async function rig(opts: { maxInflight?: number } = {}) {
     const { EventEmitter } = await import('node:events');
     const { buildServer } = await import('../src/main.js');
-    const { status } = await import('@grpc/grpc-js');
     const claims = {
       iss: ISS,
       aud: 'moca-sandbox',
@@ -268,12 +275,15 @@ describe('the sandbox Exec handler after its token expires', () => {
       jti: 'j',
     };
     const pending: Array<() => void> = [];
+    const lines: string[] = [];
     const { server } = buildServer({
       records,
       validateToken: () => true,
       validateExecToken: () => false,
       verifySandboxToken: () => ({ claims }),
-      log: () => {},
+      sandboxReqIdKey: KEY,
+      ...(opts.maxInflight ? { sandboxMaxInflight: opts.maxInflight } : {}),
+      log: (l) => lines.push(l),
       timers: {
         setTimeout: (fn) => (pending.push(fn), pending.length),
         clearTimeout: () => {},
@@ -291,22 +301,41 @@ describe('the sandbox Exec handler after its token expires', () => {
     worker.emit('data', {
       hello: { sandboxId: 'sbx_default', labels: {}, capabilities: [], capacityMax: 1 },
     });
-    const errors: Array<{ code: number; details: string }> = [];
-    const call = Object.assign(new EventEmitter(), {
-      request: {
-        sandboxId: 'sbx_default',
-        exec: { reqId: 5, command: 'true', workspaceKey: 'sbx-aaaa' },
-      },
-      metadata: { get: () => ['Bearer x'] },
-      written: [] as unknown[],
-      write(ev: unknown) {
-        this.written.push(ev);
-      },
-      end() {},
-    });
-    call.on('error', (e: { code: number; details: string }) => errors.push(e));
-    const done = handler(server, '/sandbox.v1.SandboxExec/Exec')(call) as Promise<void>;
-    const wid = workerReqId('sbx-aaaa', 5);
+    const exec = (reqId: number, cancelled = false) => {
+      const errors: Array<{ code: number; details: string }> = [];
+      const call = Object.assign(new EventEmitter(), {
+        request: {
+          sandboxId: 'sbx_default',
+          exec: { reqId, command: 'true', workspaceKey: 'sbx-aaaa' },
+        },
+        metadata: { get: () => ['Bearer x'] },
+        cancelled,
+        written: [] as unknown[],
+        write(ev: unknown) {
+          this.written.push(ev);
+        },
+        end() {},
+      });
+      call.on('error', (e: { code: number; details: string }) => errors.push(e));
+      const done = handler(server, '/sandbox.v1.SandboxExec/Exec')(call) as Promise<void>;
+      return { call, errors, done };
+    };
+    const abort = (reqId: number) =>
+      new Promise<{ code: number } | null>((resolve) =>
+        handler(server, '/sandbox.v1.SandboxExec/Abort')(
+          { request: { sandboxId: 'sbx_default', reqId }, metadata: { get: () => ['Bearer x'] } },
+          (err: { code: number } | null) => resolve(err),
+        ),
+      );
+    const aborts = () => worker.written.map((f) => f.abort?.reqId).filter(Boolean);
+    return { worker, pending, lines, exec, abort, aborts };
+  }
+
+  it('writes nothing, and ends the call only once, after the expiry fired', async () => {
+    const { status } = await import('@grpc/grpc-js');
+    const { worker, pending, exec, aborts } = await rig();
+    const { call, errors, done } = exec(5);
+    const wid = workerReqId(KEY, 'sbx-aaaa', 5);
     expect(worker.written.map((f) => f.exec?.reqId)).toEqual([wid]);
     expect(pending).toHaveLength(1);
     pending[0]!(); // the token expires
@@ -316,12 +345,50 @@ describe('the sandbox Exec handler after its token expires', () => {
         details: 'sandbox token expired during the Exec',
       }),
     ]);
-    expect(worker.written.map((f) => f.abort?.reqId).filter(Boolean)).toEqual([wid]);
+    expect(aborts()).toEqual([wid]);
     // The worker acknowledges the Abort; the frame is drained, never written, never re-classified.
     worker.emit('data', { chunk: { reqId: wid, data: Buffer.from('late'), stream: 1 } });
     worker.emit('data', { error: { reqId: wid, message: 'aborted' } });
     await done;
     expect(call.written).toEqual([]);
     expect(errors).toHaveLength(1);
+  });
+
+  it('aborts at expiry even when the call was already cancelled', async () => {
+    // A call cancelled before pumpExec's listener existed never fires 'cancelled', so the expiry
+    // timer is the only path left that tells the worker.
+    const { pending, exec, aborts } = await rig();
+    const { call, errors } = exec(6);
+    call.cancelled = true;
+    pending[0]!();
+    expect(aborts()).toEqual([workerReqId(KEY, 'sbx-aaaa', 6)]);
+    expect(errors).toEqual([]);
+  });
+
+  it('routes nothing for a call already cancelled when its handler runs', async () => {
+    const { worker, exec } = await rig();
+    await exec(7, true).done;
+    expect(worker.written).toEqual([]);
+  });
+
+  it('gives back the slot and the Abort ownership once the drain grace passes with no answer', async () => {
+    const { status } = await import('@grpc/grpc-js');
+    const { worker, pending, lines, exec, abort } = await rig({ maxInflight: 1 });
+    exec(8);
+    pending[0]!(); // expiry: Abort sent, call ended; the worker never answers
+    expect(pending).toHaveLength(2);
+    // Still held during the grace.
+    expect((await exec(9).errors)[0]?.code).toBe(status.RESOURCE_EXHAUSTED);
+    expect(await abort(8)).toBeNull();
+    pending[1]!(); // the grace passes
+    expect(JSON.parse(lines.at(-1)!)).toMatchObject({
+      outcome: 'released',
+      call: 'exec',
+      sub: 'github:1',
+      sbx: 'sbx-aaaa',
+    });
+    expect((await abort(8))?.code).toBe(status.PERMISSION_DENIED);
+    exec(10);
+    expect(worker.written.map((f) => f.exec?.reqId)).toContain(workerReqId(KEY, 'sbx-aaaa', 10));
   });
 });

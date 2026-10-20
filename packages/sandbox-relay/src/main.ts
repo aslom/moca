@@ -1,4 +1,4 @@
-import { timingSafeEqual } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import {
   Server,
@@ -102,6 +102,13 @@ export interface RelayServerDeps extends RelayDeps {
   sandboxMaxInflight?: number;
   /** Seconds past a token's `exp` at which its running Exec is cancelled. Defaults to 30; tests set 0. */
   sandboxLeewayS?: number;
+  /**
+   * Seconds after that cancel at which an Exec the worker never acknowledged gives back its in-flight
+   * slot and its Abort ownership anyway. Defaults to 60.
+   */
+  sandboxDrainGraceS?: number;
+  /** The key of the per-sandbox req_id mapping (workerReqId). Defaults to 32 random bytes per boot. */
+  sandboxReqIdKey?: Buffer;
   /** Where sandbox-caller refusal lines go (SBX0 §3.5). Defaults to stdout. */
   log?: (line: string) => void;
 }
@@ -191,6 +198,8 @@ type ExecAuth = Pick<
   | 'verifySandboxToken'
   | 'sandboxMaxInflight'
   | 'sandboxLeewayS'
+  | 'sandboxDrainGraceS'
+  | 'sandboxReqIdKey'
   | 'log'
   | 'timers'
 >;
@@ -215,6 +224,13 @@ function execCaller(md: Metadata, auth: ExecAuth): ExecCaller {
 
 /** setTimeout's delay is a signed 32-bit ms count; a longer one fires at once (Node clamps to 1). */
 const MAX_TIMER_MS = 2 ** 31 - 1;
+
+/**
+ * How long after an expiry Abort an unacknowledged sandbox Exec keeps its in-flight slot. The Go
+ * worker always sends a terminal frame; this bounds a wedged guest or a lost frame, which would
+ * otherwise hold the slot for as long as the attach stream lives.
+ */
+export const SANDBOX_DRAIN_GRACE_S = 60;
 
 /**
  * Runs `fn` once at the absolute time `deadlineMs`, re-arming across setTimeout's 24.8-day ceiling
@@ -375,6 +391,10 @@ function withReqId(ev: ExecEvent, reqId: number): ExecEvent {
 
 function addExecService(server: Server, relay: Relay, auth: ExecAuth): void {
   const leewayS = auth.sandboxLeewayS ?? SANDBOX_CLOCK_LEEWAY_S;
+  const drainGraceS = auth.sandboxDrainGraceS ?? SANDBOX_DRAIN_GRACE_S;
+  // Never leaves this process. A new one at each boot changes every wid, which costs nothing: a
+  // sandbox client re-sends a req_id only for a call that never started (SBX0 §6.5).
+  const reqIdKey = auth.sandboxReqIdKey ?? randomBytes(32);
   const maxInflight = auth.sandboxMaxInflight ?? DEFAULT_SANDBOX_MAX_INFLIGHT;
   // Refusal lines (SBX0 §3.5) only on a relay with sandbox keys, so a MOCA relay's output is
   // unchanged. Fixed reasons, the token's sub and sbx when it verified; never the token itself.
@@ -405,6 +425,9 @@ function addExecService(server: Server, relay: Relay, auth: ExecAuth): void {
     e: Exec,
   ): Promise<void> {
     // Exact equality on both (SBX0 §3.2): never a prefix, so sbx-a cannot reach sbx-ab.
+    // A call cancelled before its handler ran never fires 'cancelled' again, so nothing would abort
+    // what it started: route nothing.
+    if (call.cancelled) return;
     const denied =
       sandboxId !== claims.wrk
         ? "exec not permitted: sandbox_id is not this token's worker"
@@ -436,7 +459,7 @@ function addExecService(server: Server, relay: Relay, auth: ExecAuth): void {
     }
     let wid: number;
     try {
-      wid = workerReqId(claims.sbx, e.reqId);
+      wid = workerReqId(reqIdKey, claims.sbx, e.reqId);
     } catch {
       failExecStream(call, grpcError(status.INVALID_ARGUMENT, 'req_id out of range'));
       return;
@@ -444,21 +467,52 @@ function addExecService(server: Server, relay: Relay, auth: ExecAuth): void {
     const entry = { wrk: sandboxId, wid };
     // No Exec outlives its token (SBX0 §3.6): at exp + leeway the worker is told to abort and
     // the call ends at once. The handler then drains the worker's acknowledgement without
-    // writing it, so the slot and the ownership entry are held until the worker lets go.
+    // writing it, so the slot and the ownership entry are held until the worker lets go -- or,
+    // if it never does (a wedged guest, a lost frame), until the drain grace has passed.
     let expired = false;
     let disarm: ReturnType<typeof armDeadline> | undefined;
+    let disarmGrace: ReturnType<typeof armDeadline> | undefined;
+    let freed = false;
+    const free = () => {
+      if (freed) return;
+      freed = true;
+      if (owned.get(key) === entry) owned.delete(key);
+      const left = (inflight.get(claims.sbx) ?? 1) - 1;
+      if (left > 0) inflight.set(claims.sbx, left);
+      else inflight.delete(claims.sbx);
+    };
     try {
       owned.set(key, entry);
       inflight.set(claims.sbx, n + 1);
       disarm = armDeadline(
         (claims.exp + leewayS) * 1000,
         () => {
-          if (call.cancelled) return;
           expired = true;
+          // Always, even on a call already cancelled: a second Abort is a no-op on the worker, and
+          // a missed one leaves the command running to its own timeout.
           relay.routeAbort(sandboxId, wid);
-          failExecStream(
-            call,
-            grpcError(status.DEADLINE_EXCEEDED, 'sandbox token expired during the Exec'),
+          if (!call.cancelled) {
+            failExecStream(
+              call,
+              grpcError(status.DEADLINE_EXCEEDED, 'sandbox token expired during the Exec'),
+            );
+          }
+          disarmGrace = armDeadline(
+            Date.now() + drainGraceS * 1000,
+            () => {
+              write?.(
+                JSON.stringify({
+                  ts: new Date().toISOString(),
+                  outcome: 'released',
+                  call: 'exec',
+                  reason: `the worker did not end the Exec within ${drainGraceS} s of its expiry abort`,
+                  sub: claims.sub,
+                  sbx: claims.sbx,
+                }),
+              );
+              free();
+            },
+            auth.timers,
           );
         },
         auth.timers,
@@ -483,10 +537,8 @@ function addExecService(server: Server, relay: Relay, auth: ExecAuth): void {
       );
     } finally {
       if (disarm) disarm();
-      if (owned.get(key) === entry) owned.delete(key);
-      const left = (inflight.get(claims.sbx) ?? 1) - 1;
-      if (left > 0) inflight.set(claims.sbx, left);
-      else inflight.delete(claims.sbx);
+      if (disarmGrace) disarmGrace();
+      free();
     }
   }
 

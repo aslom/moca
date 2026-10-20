@@ -1,4 +1,4 @@
-import { createHash, type KeyObject } from 'node:crypto';
+import { createHmac, type KeyObject } from 'node:crypto';
 import {
   CpError,
   parseKeyset,
@@ -94,21 +94,23 @@ export function sandboxMaxInflight(env: NodeJS.ProcessEnv): number {
 
 /**
  * The worker-side req_id of a sandbox caller's Exec (SBX0 §3.6): the first 53 bits of
- * SHA-256(utf8(sbx) || 0x00 || reqId as 8 big-endian bytes), with 0 mapped to 1.
+ * HMAC-SHA-256(key, utf8(sbx) || 0x00 || reqId as 8 big-endian bytes), with 0 mapped to 1.
  *
  * Every sandbox of a template shares one worker, whose dedup cache and in-flight registry key on
  * req_id with a fingerprint that leaves out the workspace key. Without this, two sandboxes sending
  * the same req_id and command would share one result, and one could block or abort the other's
- * Exec. Deterministic, so a client retrying its own req_id still reaches the worker's dedup; 53
- * bits, so the id survives the generated client's uint64-as-number mapping.
+ * Exec. Keyed with a secret only the relay holds, so a sandbox cannot search offline for a req_id
+ * of its own that lands on another sandbox's id and plant a result in the worker's dedup cache.
+ * Deterministic for one key, so a client retrying its own req_id still reaches the worker's dedup;
+ * 53 bits, so the id survives the generated client's uint64-as-number mapping.
  */
-export function workerReqId(sbx: string, reqId: number): number {
+export function workerReqId(key: Buffer, sbx: string, reqId: number): number {
   if (!Number.isSafeInteger(reqId) || reqId < 0) {
     throw new RangeError('req_id must be a non-negative safe integer');
   }
   const be = Buffer.alloc(8);
   be.writeBigUInt64BE(BigInt(reqId));
-  const digest = createHash('sha256')
+  const digest = createHmac('sha256', key)
     .update(Buffer.from(sbx, 'utf8'))
     .update(Buffer.from([0]))
     .update(be)
