@@ -233,4 +233,3 @@ describe('concurrent-subject attribution', () => {
     expect(bySubject.get(bob.sub)!.subject).toBe(bob.sub);
   });
 });
-
