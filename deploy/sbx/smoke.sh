@@ -21,10 +21,11 @@
 #   SBX_SMOKE_HOST_ENV_DIR, SBX_SMOKE_HOST_SRV, SBX_SMOKE_HOST_LIBEXEC
 #                           that host's SBX_ENV_DIR, SBX_SRV and SBX_LIBEXEC_DIR, as given to
 #                           install-host.sh (default /etc/sbx, /srv/sbx, /usr/local/libexec)
-#   SBX_SMOKE_JANITOR_AGE   the SBX_JANITOR_AGE for step 6's run (default 0, which frees EVERY
-#                           terminated sandbox's workspace on the host at once; on a host other
-#                           users share, give the token lifetime + 30 s or more, e.g. 930: step 6
-#                           then waits until its deletion is that old (step 4's, if it ran, mostly is)
+#   SBX_SMOKE_JANITOR_AGE   the SBX_JANITOR_AGE for step 6's run (default 930, the default token
+#                           lifetime + 30 s: it frees only workspaces terminated that long ago, and
+#                           step 6 waits until its own deletion is that old). 0 frees EVERY
+#                           terminated sandbox's workspace on the host at once: only on a host
+#                           nobody else uses
 #   MOCACTL                 a mocactl to test (a local build: packages/mocactl/dist/mocactl.mjs);
 #                           unset: installed into a temp dir from the edge channel the user guide
 #                           names (MOCACTL_VERSION=edge scripts/install-mocactl.sh)
@@ -51,9 +52,8 @@
 #      `mocactl sbx mcp` (the flight recorder shows its calls). `git status --porcelain` is the same
 #      as right after sbx up, and the local suite still fails, until sbx pull --apply; then it passes.
 #   6. janitor (SBX_SMOKE_HOST): a deleted sandbox's workspace directory exists on the host; one
-#      janitor run (`sudo env SBX_JANITOR_AGE=0 ... sbx-janitor.sh`, janitor.env sourced) frees it.
-#      AGE=0 frees EVERY terminated sandbox's workspace on that host now, not only this run's
-#      (see SBX_SMOKE_JANITOR_AGE).
+#      janitor run (`sudo env SBX_JANITOR_AGE=<age> ... sbx-janitor.sh`, janitor.env sourced) frees
+#      it once its deletion is that old (see SBX_SMOKE_JANITOR_AGE).
 #
 # What it creates: temp directories (sample repositories, a mocactl install, token files) and
 # sandboxes it records as it creates them. Each step deletes its own; an EXIT trap deletes whatever
@@ -125,7 +125,7 @@ HOST="${SBX_SMOKE_HOST:-}"
 [[ -z "$HOST" || "$HOST" =~ ^[A-Za-z0-9_][A-Za-z0-9_.@-]*$ ]] || die "SBX_SMOKE_HOST='$HOST' must be an ssh target, [user@]host"
 H_ENV="${SBX_SMOKE_HOST_ENV_DIR:-/etc/sbx}" H_SRV="${SBX_SMOKE_HOST_SRV:-/srv/sbx}" H_LIBEXEC="${SBX_SMOKE_HOST_LIBEXEC:-/usr/local/libexec}"
 for v in H_ENV H_SRV H_LIBEXEC; do [[ "${!v}" =~ $PATH_RE ]] || die "the host paths must be plain absolute paths (got '${!v}')"; done
-JANITOR_AGE="${SBX_SMOKE_JANITOR_AGE:-0}"
+JANITOR_AGE="${SBX_SMOKE_JANITOR_AGE:-930}"
 [[ "$JANITOR_AGE" =~ ^(0|[1-9][0-9]{0,8})$ ]] || die "SBX_SMOKE_JANITOR_AGE='$JANITOR_AGE' must be whole seconds, in decimal without a leading zero"
 
 PY="${SBX_SMOKE_PYTHON:-python3}"

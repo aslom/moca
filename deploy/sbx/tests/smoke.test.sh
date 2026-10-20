@@ -274,7 +274,7 @@ pass 'refuses bad settings, an argument, a missing or sbx-less mocactl, one user
 
 # 3. A full run: every step ok (opencode is not on PATH: a SKIP), in order, each sandbox deleted.
 reset_state
-smoke >"$TMP/out" 2>&1 || fail "a full run exited $?"
+smoke SBX_SMOKE_JANITOR_AGE=0 >"$TMP/out" 2>&1 || fail "a full run exited $?"
 has 'ok 1 - round trip: sbx up, run, put, pull --apply on a sample repository'
 has "ok 2 - two users: B is refused A's sandbox (404, PERMISSION_DENIED); one req_id from both gets each its own result"
 has 'ok 3 - a command silent for 5 minutes completes'
@@ -332,11 +332,12 @@ pass 'SBX_SMOKE_STEPS runs only the steps named; the others, and step 6 with no 
 
 # Step 6 alone deletes a sandbox of its own and frees it.
 reset_state
-smoke SBX_SMOKE_STEPS=6 SBX_SMOKE_JANITOR_AGE=930 >"$TMP/out" 2>&1 || fail "step 6 alone exited $?"
+smoke SBX_SMOKE_STEPS=6 -u SBX_SMOKE_JANITOR_AGE >"$TMP/out" 2>&1 || fail "step 6 alone exited $?"
 has "ok 6 - the janitor frees a deleted sandbox's directory"
-grep -q '^janitor age=930 ' "$MOCK_LOG" || fail 'SBX_SMOKE_JANITOR_AGE was not the janitor wait'
+# The default never frees other users' just-terminated workspaces: only those past one token lifetime.
+grep -q '^janitor age=930 ' "$MOCK_LOG" || fail 'the default janitor wait is not 930 s'
 all_cleaned
-pass 'step 6 alone makes, deletes and frees a sandbox of its own, with SBX_SMOKE_JANITOR_AGE as the wait'
+pass 'step 6 alone makes, deletes and frees a sandbox of its own, waiting 930 s by default'
 
 # 5. Failures: `not ok N - ...: why`, the other steps still run, exit 1, and the cleanup still
 # deletes every sandbox the run made (as its owner) and nothing else.
