@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { type AuditLog, defaultAuditLog } from './audit-log.js';
 import { CpError } from './errors.js';
 import { ANON_AUDIT_MAXLEN, AUDIT_MAXLEN } from './ownership.js';
 import {
@@ -136,6 +137,7 @@ export class RedisRefreshStore implements RefreshStore {
     private readonly redis: RefreshRedisLike,
     private readonly policy: RefreshPolicy,
     private readonly prefix: string = DEFAULT_REFRESH_PREFIX,
+    private readonly log: AuditLog = defaultAuditLog,
   ) {}
 
   private familyKey = (fid: string) => `${this.prefix}refresh:family:${fid}`;
@@ -187,6 +189,7 @@ export class RedisRefreshStore implements RefreshStore {
           String(AUDIT_MAXLEN),
         ],
       });
+      this.log({ event: 'audit', decision: 'refresh_issued', subject: input.subject, family });
       return { family, refreshToken, absExpS: Math.floor(absExp / 1000) };
     });
   }
@@ -209,6 +212,7 @@ export class RedisRefreshStore implements RefreshStore {
           },
           { TRIM: { strategy: 'MAXLEN', strategyModifier: '~', threshold: ANON_AUDIT_MAXLEN } },
         );
+        this.log({ event: 'audit', decision: 'refresh_refused', reason: 'unknown' });
         return { ok: false, reason: 'unknown' };
       }
       // Minted before the script so it can be stored atomically; discarded unless step 6 runs.
@@ -233,8 +237,14 @@ export class RedisRefreshStore implements RefreshStore {
           String(ANON_AUDIT_MAXLEN),
         ],
       })) as RotateReply;
-      if (reply[0] !== 'ok') return { ok: false, reason: reply[0] };
+      if (reply[0] !== 'ok') {
+        // Subject isn't in TS scope on refusal (Lua knows it); the full record is in sh:cp:audit.
+        const decision = reply[0] === 'reuse' ? 'refresh_reuse_detected' : 'refresh_refused';
+        this.log({ event: 'audit', decision, family: fid, reason: reply[0] });
+        return { ok: false, reason: reply[0] };
+      }
       const [, refreshToken, absExp, subject, displayName, grace] = reply;
+      this.log({ event: 'audit', decision: 'refresh_rotated', subject, family: fid, graceReplay: grace === '1' });
       return {
         ok: true,
         family: fid,
@@ -253,7 +263,12 @@ export class RedisRefreshStore implements RefreshStore {
         keys: [this.familyKey(fid), this.graceKey(fid), this.auditKey],
         arguments: [String(nowMs), fid, reason, String(AUDIT_MAXLEN)],
       })
-      .then(Number);
+      .then((n) => {
+        const result = Number(n);
+        // Only the actual-revocation case; "already revoked" / "gone" aren't state changes.
+        if (result === 1) this.log({ event: 'audit', decision: 'refresh_revoked', family: fid, reason });
+        return result;
+      });
   }
 
   revoke(

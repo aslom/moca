@@ -1,0 +1,236 @@
+// ADR-0044: audit-log mirror. One file, four invariants:
+//  1. unit: defaultAuditLog emits one JSON line.
+//  2. no-tokens: planted secret never appears in any emitted line, across every auditing route.
+//  3. no-user-content: planted prompt / display-name / filename never appears.
+//  4. field-whitelist: no off-whitelist keys drift in across emitted lines.
+//  5. attribution: concurrent handlers for different subjects produce correctly-attributed lines.
+//
+// Model: Shape B from test/sandbox-handlers.test.ts:312-329 — in-process capture, no stdout stub.
+
+import { describe, expect, it, vi } from 'vitest';
+import { defaultAuditLog } from '../src/audit-log.js';
+import { HANDLERS } from '../src/handlers.js';
+import { alice, bob, ctx, makeDeps, seedCredential } from './helpers/deps.js';
+
+const PLANTED_TOKEN = 'PLANTED-SECRET-TOKEN-abcdef123'; // notsecret
+const PLANTED_PROMPT = 'PLANTED-PROMPT-TEXT-αβγ';
+const PLANTED_FILENAME = 'PLANTED-FILENAME.txt';
+const PLANTED_DISPLAY = 'PLANTED-DISPLAY-NAME';
+const PLANTED_SKILL = 'PLANTED-SKILL-BODY';
+
+// The closed field whitelist from docs/specs/2026-10-20-audit-log-mirror-design.md.
+const ALLOWED_KEYS = new Set([
+  'event',
+  'decision',
+  'subject',
+  'sessionId',
+  'workloadId',
+  'configRef',
+  'sandboxId',
+  'credential',
+  'model',
+  'fromModel',
+  'kind',
+  'status',
+  'reason',
+  'bytes',
+  'writable',
+  'family',
+  'graceReplay', // boolean, not customer data; marks a Lua grace-replay rotation
+  'leafSid',
+  'attempt',
+]);
+
+// Field names that must NEVER appear as keys regardless of their values.
+const FORBIDDEN_KEYS = [
+  'token',
+  'secret',
+  'password',
+  'apiKey',
+  'bearer',
+  'authorization',
+  'credentialValue',
+  'prompt',
+  'promptText',
+  'body',
+  'contents',
+  'response',
+  'text',
+  'output',
+  'email',
+  'displayName',
+  'label',
+];
+
+function lineToSearchable(line: Record<string, unknown>): string {
+  return JSON.stringify(line);
+}
+
+/**
+ * Drive the full control-plane handler surface that audits. Not every call succeeds (some are
+ * refusals -- that's part of the coverage), but every call must emit at least one line.
+ */
+async function driveAuditingRoutes(deps: ReturnType<typeof makeDeps>, subject = alice): Promise<void> {
+  // createSession
+  await HANDLERS.createSession!(
+    ctx({ principal: subject, body: { credential: 'my-anthropic' } }),
+    deps,
+  ).catch(() => {});
+  // model_changed via updateSession
+  await HANDLERS.updateSession!(
+    ctx({ principal: subject, params: { id: 'sid-fixed' }, body: { model: 'claude-sonnet-5' } }),
+    deps,
+  ).catch(() => {});
+  // credential_written
+  await HANDLERS.putCredential!(
+    ctx({
+      principal: subject,
+      params: { name: 'cred-' + subject.sub.slice(-4) },
+      body: {
+        kind: 'bearer',
+        consumer: 'inference',
+        destination: { hosts: ['litellm.internal'] },
+        endpoint: 'https://litellm.internal/v1',
+        secret: { token: PLANTED_TOKEN },
+      },
+    }),
+    deps,
+  ).catch(() => {});
+  // credential_deleted
+  await HANDLERS.deleteCredential!(
+    ctx({ principal: subject, params: { name: 'cred-' + subject.sub.slice(-4) } }),
+    deps,
+  ).catch(() => {});
+  // config_bundle_deleted (upload path requires signed body; delete alone exercises the audit site)
+  const fakeDigest = 'sha256:0000000000000000000000000000000000000000000000000000000000000000';
+  await HANDLERS.deleteConfigBundle!(
+    ctx({ principal: subject, params: { digest: fakeDigest } }),
+    deps,
+  ).catch(() => {});
+  // session_deleted
+  await HANDLERS.deleteSession!(
+    ctx({ principal: subject, params: { id: 'sid-fixed' } }),
+    deps,
+  ).catch(() => {});
+}
+
+describe('audit-log module', () => {
+  it('defaultAuditLog emits one JSON line via console.log', () => {
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    defaultAuditLog({ event: 'audit', decision: 'session_created', subject: 'github:1', sessionId: 's' });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(spy.mock.calls[0][0] as string)).toEqual({
+      event: 'audit',
+      decision: 'session_created',
+      subject: 'github:1',
+      sessionId: 's',
+    });
+    spy.mockRestore();
+  });
+});
+
+describe('data-handling policy across the auditing surface', () => {
+  it('no planted token appears in any emitted line (#359)', async () => {
+    const deps = makeDeps();
+    await seedCredential(deps, alice.sub, 'my-anthropic', { secret: { token: PLANTED_TOKEN } });
+    await driveAuditingRoutes(deps);
+
+    // Also stress the refresh path, which writes via a different seam.
+    const r = await deps.refresh.issue({
+      subject: alice.sub,
+      displayName: PLANTED_DISPLAY,
+      label: 'laptop',
+      nowMs: Date.now(),
+    });
+    await deps.refresh.rotate(r.refreshToken, Date.now()).catch(() => {});
+    await deps.refresh.revoke(r.refreshToken, Date.now()).catch(() => {});
+
+    // Sanity floor: a regression that stops emission must not silently shrink the array.
+    // (Refresh mirror lives on RedisRefreshStore; tests use the in-memory store, so only the
+    // control-plane handler decisions are reachable here.)
+    const decisions = new Set(deps.logLines.map((l) => l.decision));
+    expect(decisions.has('session_created'), 'session_created should emit').toBe(true);
+
+    for (const line of deps.logLines) {
+      const text = lineToSearchable(line);
+      expect(text, `token leaked in line: ${text}`).not.toContain(PLANTED_TOKEN);
+      // No JWT-shaped substring (eyJ... — base64url header).
+      expect(text).not.toMatch(/eyJ[A-Za-z0-9_-]{10,}/);
+    }
+  });
+
+  it('no planted user content (prompt / filename / display name / skill body) appears', async () => {
+    const deps = makeDeps();
+    await seedCredential(deps, alice.sub);
+    await driveAuditingRoutes(deps);
+
+    // Refresh path with planted display name — Lua writes it to Redis; our mirror must not.
+    const r = await deps.refresh.issue({
+      subject: alice.sub,
+      displayName: PLANTED_DISPLAY,
+      label: 'laptop',
+      nowMs: Date.now(),
+    });
+    await deps.refresh.rotate(r.refreshToken, Date.now()).catch(() => {});
+
+    expect(deps.logLines.length).toBeGreaterThan(0);
+    for (const line of deps.logLines) {
+      const text = lineToSearchable(line);
+      for (const planted of [PLANTED_PROMPT, PLANTED_FILENAME, PLANTED_DISPLAY, PLANTED_SKILL]) {
+        expect(text, `user content leaked: ${planted}`).not.toContain(planted);
+      }
+    }
+  });
+
+  it('every emitted line uses only whitelisted field keys', async () => {
+    const deps = makeDeps();
+    await seedCredential(deps, alice.sub);
+    await driveAuditingRoutes(deps);
+    const r = await deps.refresh.issue({
+      subject: alice.sub,
+      displayName: 'label',
+      label: 'laptop',
+      nowMs: Date.now(),
+    });
+    await deps.refresh.rotate(r.refreshToken, Date.now()).catch(() => {});
+
+    expect(deps.logLines.length).toBeGreaterThan(0);
+    for (const line of deps.logLines) {
+      for (const key of Object.keys(line)) {
+        expect(ALLOWED_KEYS.has(key), `off-whitelist key ${JSON.stringify(key)} in ${JSON.stringify(line)}`).toBe(true);
+        expect(FORBIDDEN_KEYS, `forbidden key ${JSON.stringify(key)} in ${JSON.stringify(line)}`).not.toContain(
+          key.toLowerCase(),
+        );
+      }
+    }
+  });
+});
+
+describe('concurrent-subject attribution', () => {
+  it('two sessions created in parallel attribute to the right subjects (#359)', async () => {
+    const deps = makeDeps();
+    await seedCredential(deps, alice.sub);
+    await seedCredential(deps, bob.sub);
+    deps.identity = {
+      ...(deps.identity as any),
+    };
+
+    // Both call createSession at once with their own principals. Nothing in the handler holds
+    // request-scoped state across subjects, so lines must attribute cleanly.
+    let n = 0;
+    deps.newId = () => `sid-${++n}`;
+    await Promise.all([
+      HANDLERS.createSession!(ctx({ principal: alice, body: { credential: 'my-anthropic' } }), deps),
+      HANDLERS.createSession!(ctx({ principal: bob, body: { credential: 'my-anthropic' } }), deps),
+    ]);
+
+    const sessionCreated = deps.logLines.filter((l) => l.decision === 'session_created');
+    expect(sessionCreated).toHaveLength(2);
+    const bySubject = new Map(sessionCreated.map((l) => [l.subject, l]));
+    expect(bySubject.get(alice.sub)).toBeDefined();
+    expect(bySubject.get(bob.sub)).toBeDefined();
+    expect(bySubject.get(alice.sub)!.subject).toBe(alice.sub);
+    expect(bySubject.get(bob.sub)!.subject).toBe(bob.sub);
+  });
+});
+

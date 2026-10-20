@@ -12,6 +12,7 @@ import {
   type LeafEnvelope,
   type LeafResult,
 } from '@moca/harness/run-leaf';
+import { defaultAuditLog } from '@moca/harness/audit-log';
 import { RedisWorkQueue } from '@moca/work-queue';
 import {
   RedisResultStore,
@@ -1008,6 +1009,21 @@ async function handleRunLeafParsed(
   body = await resolveRunWorkload(body, auth, res);
   if (!body) return;
 
+  // ADR-0044: run_started once (saturation retries don't re-emit), run_finalized once.
+  // subject is omitted when auth is null; sh:cp:audit carries it via session_created.
+  const emitLifecycle = (decision: 'run_started' | 'run_finalized', extra: Record<string, unknown>) =>
+    defaultAuditLog({
+      event: 'audit',
+      decision,
+      ...(auth?.subject ? { subject: auth.subject } : {}),
+      sessionId: body.sessionId,
+      ...extra,
+    });
+  emitLifecycle('run_started', {
+    ...(body.workloadId ? { workloadId: body.workloadId } : {}),
+    kind: body.kind,
+  });
+
   // Spec §4.3: on pool saturation the sync path bounded-waits with backoff, then 503 Retry-After.
   // selectPoolSandbox throws before taking any lease or doing agent work, so re-running runLeaf on a
   // "saturated" result only re-attempts acquisition — the preceding steps (validate, model resolve,
@@ -1025,6 +1041,7 @@ async function handleRunLeafParsed(
   if (isSaturated(result)) {
     // Still saturated after the budget: tell the client to retry. Do NOT persist a result record —
     // a 503 is "retry", not a terminal failure, and /runs/status must not report it as one.
+    emitLifecycle('run_finalized', { status: 'failed', reason: 'saturated' });
     res
       .writeHead(503, { ...JSON_HEADERS, 'Retry-After': String(cfg.retryAfterS) })
       .end(JSON.stringify({ status: 'failed', reason: 'saturated' }));
@@ -1037,6 +1054,10 @@ async function handleRunLeafParsed(
     toResultRecord(result, body.sessionId, new Date().toISOString()),
     RESULT_TTL_SECONDS,
   );
+  emitLifecycle('run_finalized', {
+    status: result.status,
+    ...('reason' in result && result.reason ? { reason: result.reason } : {}),
+  });
   res.writeHead(200, JSON_HEADERS).end(JSON.stringify(result));
 }
 
