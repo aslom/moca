@@ -1006,6 +1006,9 @@ describe('pull --apply never writes local agent configuration or hooks (final re
     'sub\\.claude\\x',
     'CLAUDE~1/settings.json',
     'MCPJSO~1.JSO',
+    'ＣＬＡＵＤＥ~1/x',
+    'claude~1/settings.json',
+    'notes~2.md',
     // Anywhere in the tree: refusing below the root too is simpler, and safe.
     'sub/.claude/settings.json',
     'sub/dir/.mcp.json',
@@ -1044,6 +1047,9 @@ describe('pull --apply never writes local agent configuration or hooks (final re
       'tasks.json',
       'settings.json',
       '.envrc.example',
+      'notes~2.markdown',
+      'file.~1~',
+      'version~one/x',
       'CLAUDE.md',
       'AGENTS.md',
     ]) {

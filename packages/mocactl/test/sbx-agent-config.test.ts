@@ -26,6 +26,7 @@ import {
   takeBackAgentConfig,
   writeAgentConfig,
 } from '../src/sbx/agent-config.js';
+import { sbxDirProblem } from '../src/sbx/state.js';
 
 const made: string[] = [];
 afterEach(() => {
@@ -960,6 +961,20 @@ describe('an untrusted .sbx/ (#554 review)', () => {
     execFileSync('git', ['add', '.sbx'], { cwd: d });
     expect(conflictOf(() => writeAgentConfig(d)).message).toMatch(/^\.sbx is tracked by git/);
     expect(takeBackAgentConfig(d).warnings.join('\n')).toMatch(/tracked by git/);
+  });
+
+  it('refuses a tracked .SBX/, which a case-insensitive filesystem opens as .sbx/', () => {
+    const d = realpathSync(mkdtempSync(join(tmpdir(), 'sbx-cfg-')));
+    made.push(d);
+    execFileSync('git', ['init', '-q', d]);
+    mkdirSync(join(d, '.SBX'));
+    writeFileSync(join(d, '.SBX', 'sandbox.json'), '{}\n');
+    execFileSync('git', ['add', '.SBX'], { cwd: d });
+    // On a case-sensitive filesystem .sbx/ must exist for the check to look: make it, as the
+    // case-insensitive one already has it (the same directory as .SBX/).
+    if (!existsSync(join(d, '.sbx'))) mkdirSync(join(d, '.sbx'));
+    expect(sbxDirProblem(d)).toMatch(/tracked by git/);
+    expect(conflictOf(() => writeAgentConfig(d)).message).toMatch(/^\.sbx is tracked by git/);
   });
 
   it('refuses a target linked into .git', () => {

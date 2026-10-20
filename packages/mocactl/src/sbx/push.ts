@@ -21,7 +21,7 @@ import { gzipSync } from 'node:zlib';
 import { MAX_STDIN_BYTES, q, WORKSPACE, type Exec, type ExecResult } from '@moca/sandbox-client';
 import { sanitizeRemote } from '../core/sanitize.js';
 import { MARK_BEGIN, MARK_END } from './agent-config.js';
-import { BINDING_URL_RE, SANDBOX_ID_RE, sbxDirProblem } from './state.js';
+import { BINDING_URL_RE, SANDBOX_ID_RE, sbxDirProblem, folds, segments } from './state.js';
 import { PY_TAR_EXTRACT, tarEntries, type TarEntry } from './tar.js';
 
 /**
@@ -120,28 +120,14 @@ export class UnpulledError extends PushError {
 }
 
 /**
- * A path component as a case-folding filesystem might resolve it: NFKC (which maps U+017F `ſ` to
- * `s`, and full-width letters to ASCII), then lowercased both directly and through uppercase.
- * APFS folds `.ſbx` and `.SBX` to `.sbx`. Erring wide is safe: a look-alike is only refused.
- */
-function folds(seg: string): string[] {
-  // NTFS also drops trailing dots and spaces (`.claude.`, `.envrc `), as Windows resolves a name.
-  const k = seg.normalize('NFKC').replace(/[. ]+$/, '');
-  return [k.toLowerCase(), k.toUpperCase().toLowerCase()];
-}
-
-/**
- * A path's components as Windows would split them: on `\` as well as `/`. git keeps a backslash
- * as an ordinary byte in a name, which NTFS then reads as a separator.
- */
-const segments = (p: string): string[] => p.split(/[\\/]/);
-
-/**
  * An 8.3 short name (`CLAUDE~1`, `MCPJSO~1.JSO`) can stand for any long name on NTFS, guarded ones
- * included, and which one depends on the volume: a pull refuses every such component.
+ * included, and which one depends on the volume: a pull refuses every such component. Its shape
+ * is tight (up to six characters, `~N`, an extension of up to three), so a numbered backup
+ * `file.~1~` or `notes~2.markdown` is not one; `notes~2.md` is, and is refused.
  */
-const isShortName = (seg: string): boolean => /~\d/.test(seg);
-
+const isShortName = (seg: string): boolean =>
+  // Windows resolves a short name case-insensitively, so `claude~1` is `CLAUDE~1`: fold first.
+  /^[^.~]{1,6}~\d+(\.[^.]{0,3})?$/.test(seg.normalize('NFKC').toUpperCase());
 /**
  * Whether a path is in the binding's directory as a case-insensitive or normalizing filesystem
  * (macOS, Windows) would resolve it: `.SBX/` and `.ſbx/` are `.sbx/` there.

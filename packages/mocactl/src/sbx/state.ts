@@ -10,6 +10,23 @@ import { dirname, join } from 'node:path';
 export const SANDBOX_ID_RE = /^sbx-[0-9a-z]{1,64}$/;
 
 /**
+ * A path component as a case-folding filesystem might resolve it: NFKC (which maps U+017F `ſ` to
+ * `s`, and full-width letters to ASCII), then lowercased both directly and through uppercase.
+ * APFS folds `.ſbx` and `.SBX` to `.sbx`. Erring wide is safe: a look-alike is only refused.
+ */
+export function folds(seg: string): string[] {
+  // NTFS also drops trailing dots and spaces (`.claude.`, `.envrc `), as Windows resolves a name.
+  const k = seg.normalize('NFKC').replace(/[. ]+$/, '');
+  return [k.toLowerCase(), k.toUpperCase().toLowerCase()];
+}
+
+/**
+ * A path's components as Windows would split them: on `\` as well as `/`. git keeps a backslash
+ * as an ordinary byte in a name, which NTFS then reads as a separator.
+ */
+export const segments = (p: string): string[] => p.split(/[\\/]/);
+
+/**
  * Why the repository's `.sbx/` cannot be trusted as this laptop's state, or undefined when it can.
  * A symlink would have `up` write (and `rm` delete) outside the repository; a tracked one came with
  * the clone, so its binding (which names a control plane) and its record of what `up` added are
@@ -28,15 +45,21 @@ export function sbxDirProblem(root: string): string | undefined {
   if (!st.isDirectory()) return 'is not a directory';
   let tracked = '';
   try {
-    tracked = execFileSync('git', ['ls-files', '-z', '--', '.sbx'], {
+    tracked = execFileSync('git', ['ls-files', '-z'], {
       cwd: root,
       encoding: 'utf8',
+      maxBuffer: 1 << 30,
       stdio: ['ignore', 'pipe', 'ignore'],
     });
   } catch {
     return undefined; // not a git repository: nothing can be tracked
   }
-  return tracked ? 'is tracked by git (it came with the repository)' : undefined;
+  // Folded as the filesystem resolves it, not git's case-sensitive pathspec: on macOS and Windows a
+  // tracked `.SBX/sandbox.json` is the file `join(root, '.sbx', ...)` opens (#554 review).
+  const isTracked = tracked
+    .split('\0')
+    .some((p) => p !== '' && folds(segments(p)[0]!).includes('.sbx'));
+  return isTracked ? 'is tracked by git (it came with the repository)' : undefined;
 }
 
 /**
