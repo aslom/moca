@@ -125,21 +125,34 @@ export class UnpulledError extends PushError {
  * APFS folds `.ſbx` and `.SBX` to `.sbx`. Erring wide is safe: a look-alike is only refused.
  */
 function folds(seg: string): string[] {
-  const k = seg.normalize('NFKC');
+  // NTFS also drops trailing dots and spaces (`.claude.`, `.envrc `), as Windows resolves a name.
+  const k = seg.normalize('NFKC').replace(/[. ]+$/, '');
   return [k.toLowerCase(), k.toUpperCase().toLowerCase()];
 }
+
+/**
+ * A path's components as Windows would split them: on `\` as well as `/`. git keeps a backslash
+ * as an ordinary byte in a name, which NTFS then reads as a separator.
+ */
+const segments = (p: string): string[] => p.split(/[\\/]/);
+
+/**
+ * An 8.3 short name (`CLAUDE~1`, `MCPJSO~1.JSO`) can stand for any long name on NTFS, guarded ones
+ * included, and which one depends on the volume: a pull refuses every such component.
+ */
+const isShortName = (seg: string): boolean => /~\d/.test(seg);
 
 /**
  * Whether a path is in the binding's directory as a case-insensitive or normalizing filesystem
  * (macOS, Windows) would resolve it: `.SBX/` and `.ſbx/` are `.sbx/` there.
  */
 export function isBindingPath(p: string): boolean {
-  return folds(p.split('/')[0]!).includes('.sbx');
+  return folds(segments(p)[0]!).includes('.sbx');
 }
 
 /** Whether any component of a path folds to `.git` (git refuses most of these itself). */
 export function isGitPath(p: string): boolean {
-  return p.split('/').some((seg) => folds(seg).includes('.git'));
+  return segments(p).some((seg) => folds(seg).includes('.git'));
 }
 
 /**
@@ -175,8 +188,9 @@ const foldedIn = (seg: string, names: Record<string, string>): string | undefine
 
 /** Why a path is local agent configuration or a local hook; undefined when it is neither. */
 function agentConfigWhy(p: string): string | undefined {
-  const segs = p.split('/');
+  const segs = segments(p);
   for (let i = 0; i < segs.length; i++) {
+    if (isShortName(segs[i]!)) return 'an 8.3 short name, which may stand for any of these on Windows';
     const dir = foldedIn(segs[i]!, AGENT_DIRS);
     if (dir) return dir;
     if (i === segs.length - 1) {
@@ -196,7 +210,7 @@ export function isAgentConfigPath(p: string): boolean {
   return agentConfigWhy(p) !== undefined;
 }
 
-const isPromptPath = (p: string) => folds(p.split('/').at(-1)!).some((f) => PROMPT_FILES.has(f));
+const isPromptPath = (p: string) => folds(segments(p).at(-1)!).some((f) => PROMPT_FILES.has(f));
 
 /** A prompt file's text without the block `sbx up` keeps between its markers (when one pair). */
 function outsideBlock(text: string | undefined): string {
@@ -743,26 +757,37 @@ export async function advanceBaseline(
     throw new PushError(`advancing the baseline failed in the sandbox: ${outcome(r)}`);
 }
 
-/** The paths a patch touches (both sides of a rename), from `git apply --numstat -z`. */
+/**
+ * Every path a patch reads or writes: the new side from `git apply --numstat -z`, and the old side
+ * from git's own reverse read of it (`-R --numstat`). The forward read alone names only the new
+ * side, so a deletion (`+++ /dev/null`, listed as `dev/null`) or a `---` that names another file
+ * than `+++` would carry a guarded path past every check unseen (#554 review).
+ */
 async function patchPaths(root: string, file: string): Promise<string[]> {
-  let raw: Buffer;
-  try {
-    raw = await git(root, ['apply', '--numstat', '-z', file]);
-  } catch (err) {
-    throw new PushError(`the patch is not one git can read; nothing was changed (${gitText(err)})`);
-  }
-  const t = raw.toString('utf8').split('\0');
-  const out: string[] = [];
-  for (let i = 0; i < t.length; i++) {
-    const m = /^(?:\d+|-)\t(?:\d+|-)\t(.*)$/s.exec(t[i]!);
-    if (!m) continue;
-    if (m[1]) out.push(m[1]);
-    else out.push(t[++i]!, t[++i]!); // a rename: the old path, then the new
-  }
-  // --numstat names only a rename's or copy's NEW path, so a patch that renames a guarded file
-  // away (deleting it here) would pass unseen: add every source path from the patch's own headers.
+  const numstat = async (args: string[]): Promise<string[]> => {
+    let raw: Buffer;
+    try {
+      raw = await git(root, ['apply', ...args, '--numstat', '-z', file]);
+    } catch (err) {
+      throw new PushError(
+        `the patch is not one git can read; nothing was changed (${gitText(err)})`,
+      );
+    }
+    const t = raw.toString('utf8').split('\0');
+    const out: string[] = [];
+    for (let i = 0; i < t.length; i++) {
+      const m = /^(?:\d+|-)\t(?:\d+|-)\t(.*)$/s.exec(t[i]!);
+      if (!m) continue;
+      if (m[1]) out.push(m[1]);
+      else out.push(t[++i]!, t[++i]!); // a rename: the old path, then the new
+    }
+    return out;
+  };
+  const out = [...(await numstat([])), ...(await numstat(['-R']))];
+  // A backstop, should git's reading ever differ from ours: every old-side path the headers name.
   out.push(...patchSourcePaths(readFileSync(file, 'utf8')));
-  return [...new Set(out.filter(Boolean))];
+  // `dev/null` is how numstat names the missing side of a creation or a deletion, not a path.
+  return [...new Set(out.filter((p) => p && p !== 'dev/null'))];
 }
 
 /** A path as git writes it in a patch header: bare, or C-quoted ("…" with \-escapes and octal). */
@@ -799,12 +824,37 @@ function headerPath(s: string): string {
   return Buffer.from(bytes).toString('utf8');
 }
 
-/** The source paths of a patch's renames and copies, and every `diff --git a/<old>` side. */
+/**
+ * The old-side paths a patch's headers name: rename and copy sources, every `--- a/<path>`, and
+ * the `a/` side of `diff --git a/<old> b/<new>` when it can be split unambiguously.
+ */
 export function patchSourcePaths(patch: string): string[] {
   const out: string[] = [];
   for (const line of patch.split('\n')) {
-    const m = /^(?:rename|copy) from (.+)$/.exec(line);
-    if (m) out.push(headerPath(m[1]!));
+    const from = /^(?:rename|copy) from (.+)$/.exec(line);
+    if (from) {
+      out.push(headerPath(from[1]!));
+      continue;
+    }
+    const minus = /^--- (.+?)\t?$/.exec(line);
+    if (minus && minus[1] !== '/dev/null') {
+      const p = headerPath(minus[1]!);
+      out.push(p.startsWith('a/') ? p.slice(2) : p);
+      continue;
+    }
+    const dg = /^diff --git (.+)$/.exec(line);
+    if (dg) {
+      const rest = dg[1]!;
+      const quoted = /^("(?:[^"\\]|\\.)*")/.exec(rest);
+      if (quoted) out.push(headerPath(quoted[1]!).replace(/^a\//, ''));
+      else if (rest.startsWith('a/')) {
+        // Unquoted: `a/<old> b/<new>`. With a space in a path the split is ambiguous, so every
+        // candidate old side is listed: erring wide only refuses more.
+        for (let i = rest.indexOf(' b/'); i > 0; i = rest.indexOf(' b/', i + 1)) {
+          out.push(rest.slice(2, i));
+        }
+      }
+    }
   }
   return out;
 }

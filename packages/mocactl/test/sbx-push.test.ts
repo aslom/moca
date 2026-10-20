@@ -980,6 +980,14 @@ describe('pull --apply never writes local agent configuration or hooks (final re
     '.VSCode/Tasks.json',
     '.ＨUSKY/pre-push',
     '.EnvRC',
+    // Windows aliases (#554 review): trailing dots and spaces, a backslash separator, 8.3 names.
+    '.claude./settings.json',
+    '.envrc ',
+    '.mcp.json.',
+    '.vscode\\tasks.json',
+    'sub\\.claude\\x',
+    'CLAUDE~1/settings.json',
+    'MCPJSO~1.JSO',
     // Anywhere in the tree: refusing below the root too is simpler, and safe.
     'sub/.claude/settings.json',
     'sub/dir/.mcp.json',
@@ -1052,9 +1060,55 @@ describe('pull --apply never writes local agent configuration or hooks (final re
     });
   }
 
+  // #554 review: a patch's old side without rename headers. --numstat names only the new side
+  // (`dev/null` for a deletion), so these are found by git's own reverse read of the patch.
+  const body = '{"permissions":{"deny":["Bash"]}}';
+  for (const [what, patch] of [
+    [
+      'deletes a guarded file with no rename header',
+      `diff --git a/.claude/settings.json b/.claude/settings.json\n--- a/.claude/settings.json\n+++ /dev/null\n@@ -1 +0,0 @@\n-${body}\n`,
+    ],
+    [
+      'has --- naming a guarded file and +++ another',
+      `diff --git a/.claude/settings.json b/x\n--- a/.claude/settings.json\n+++ b/x\n@@ -1 +1 @@\n-${body}\n+z\n`,
+    ],
+    [
+      'has a diff --git header that disagrees with ---',
+      `diff --git a/x b/x\n--- a/.claude/settings.json\n+++ b/y\n@@ -1 +1 @@\n-${body}\n+z\n`,
+    ],
+  ] as const) {
+    it(`refuses a patch that ${what}`, async () => {
+      const r = repo();
+      mkdirSync(join(r, '.claude'), { recursive: true });
+      writeFileSync(join(r, '.claude/settings.json'), `${body}\n`);
+      writeFileSync(join(r, 'x'), `${body}\n`);
+      execFileSync('git', ['add', '-A'], { cwd: r });
+      execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'cfg'], {
+        cwd: r,
+      });
+      const tree = snapshot(r);
+      const err = await applyPatch(r, Buffer.from(patch)).catch((e: unknown) => e);
+      expect(err, what).toBeInstanceOf(PushError);
+      expect((err as Error).message).toContain('.claude/settings.json');
+      expect(snapshot(r)).toEqual(tree);
+      expect(readFileSync(join(r, '.claude/settings.json'), 'utf8')).toBe(`${body}\n`);
+    });
+  }
+
   it('reads a C-quoted rename source as git writes it', () => {
     expect(patchSourcePaths('rename from "\\303\\251.claude/x"\n')).toEqual(['é.claude/x']);
     expect(patchSourcePaths('copy from a b\nrename from "q\\"t"\n')).toEqual(['a b', 'q"t']);
+  });
+
+  it('reads every old side the headers name, as a backstop to git: ---, diff --git, quoted', () => {
+    expect(patchSourcePaths('diff --git a/x b/x\n--- a/.envrc\n+++ b/y\n')).toEqual([
+      'x',
+      '.envrc',
+    ]);
+    expect(patchSourcePaths('--- /dev/null\n+++ b/new\n')).toEqual([]);
+    expect(patchSourcePaths('diff --git "a/\\303\\251 x" "b/y"\n')).toEqual(['é x']);
+    // A space makes the unquoted split ambiguous: every candidate is listed.
+    expect(patchSourcePaths('diff --git a/p b/q b/r\n')).toEqual(['p', 'p b/q']);
   });
 
   it('still applies a normal source patch', async () => {
