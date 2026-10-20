@@ -42,9 +42,11 @@ export type ExecFailureKind = 'machinery' | 'busy' | 'template_busy' | 'token_ex
 /**
  * The machinery failed: NOT the command's outcome. `kind` says how (see `ExecFailureKind`).
  * `mayHaveRun` is set when the failure came after the command may have started: output had
- * arrived, or the connection was lost (UNAVAILABLE, the client's backstop, a stream ended without
- * its End) after the Exec went out. A refusal, or a worker error before any output (a VM that did
- * not boot, no live worker), leaves it false.
+ * arrived, the worker reported a failure of an Exec it had accepted (any in-stream ExecError but
+ * its known refusals before the start, e.g. the relay's `worker disconnected`), or the connection
+ * was lost (UNAVAILABLE, the client's backstop, a stream ended without its End) after the Exec went
+ * out. A refusal, or a worker refusal before the start (a VM that could not be restored, a bad
+ * workspace key, no live worker), leaves it false.
  */
 export class ExecMachineryError extends Error {
   constructor(
@@ -153,6 +155,15 @@ const BACKSTOP_MARGIN_S = 90;
 const TIMEOUT_MESSAGE = /^timeout:(\d+)$/;
 /** The worker's refusals when the template's shared worker is saturated (spec §6.4). */
 const TEMPLATE_BUSY = /^(?:busy: queue full|memory-budget:|max-runs:)/;
+/**
+ * The worker's ExecErrors that it sends BEFORE the command starts (remote-worker: vmpool's
+ * refusals and key checks, the container tier's workspace and spawn failures, the session's req_id
+ * collision). Every other ExecError comes from an Exec the worker ACCEPTED -- which is as precise as
+ * the wire allows, since there is no "started" frame: the relay's own `worker disconnected`, a guest
+ * that closed before End, a wait failure. Those may have run part of the command.
+ */
+const NOT_STARTED =
+  /^(?:invalid-workspace-key:|empty-workspace-key:|spawn-failure:|req_id collision:|workspace \/|start bash:|stdin pipe:|stdout pipe:|stderr pipe:|vmpool: closed|vmpool: popped VM is bound|remote-worker is unix-only)/;
 
 /** Random, unique per call, and below 2^53: the relay decodes the uint64 as a JavaScript number. */
 export function newReqId(): number {
@@ -383,14 +394,20 @@ export class SandboxExecConn {
         const m = message === undefined ? null : TIMEOUT_MESSAGE.exec(message);
         return m ? result({ exitCode: -1, truncated: false, timedOutS: Number(m[1]) }) : undefined;
       };
-      const workerFailure = (message: string, code?: number) =>
+      /**
+       * `inStream`: the message arrived as an ExecError event, so the relay routed the Exec to a
+       * worker. Unless it is one of the worker's refusals before the start (NOT_STARTED), the Exec
+       * was accepted and may have run, output or not. A failure carried only by the status (no
+       * event) may have run only if output arrived.
+       */
+      const workerFailure = (message: string, code?: number, inStream = false) =>
         TEMPLATE_BUSY.test(message)
           ? new ExecMachineryError(`template busy: ${message}`, code, 'template_busy')
           : new ExecMachineryError(
               `sandbox failure: ${message || 'exec failed'}`,
               code,
               'machinery',
-              output,
+              output || (inStream && !NOT_STARTED.test(message)),
             );
 
       call.on('data', (ev: ExecEvent) => {
@@ -412,7 +429,7 @@ export class SandboxExecConn {
         const details = e.details || e.message;
         const outcome = outcomeOf(execError ?? details);
         if (outcome) return resolve(outcome);
-        if (execError !== undefined) return reject(workerFailure(execError, e.code));
+        if (execError !== undefined) return reject(workerFailure(execError, e.code, true));
         if (!started && e.code === status.UNAUTHENTICATED) return reject(new NotStarted(details));
         if (!started && e.code === status.PERMISSION_DENIED) {
           return reject(new ExecRefusedError(details, e.code));
@@ -461,7 +478,7 @@ export class SandboxExecConn {
         if (end) return resolve(result(end));
         const outcome = outcomeOf(execError);
         if (outcome) return resolve(outcome);
-        if (execError !== undefined) return reject(workerFailure(execError));
+        if (execError !== undefined) return reject(workerFailure(execError, undefined, true));
         reject(
           new ExecMachineryError(
             'sandbox failure: the exec stream ended without an End event',

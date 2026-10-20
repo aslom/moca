@@ -233,8 +233,8 @@ describe('SandboxExecConn (SBX0 §6.5)', () => {
     await expect(conn(ended.addr).c.exec('x')).rejects.toMatchObject({ mayHaveRun: true });
     const early = await fakeRelay(fail(status.UNKNOWN, 'no live worker for sandbox sbx_default'));
     await expect(conn(early.addr).c.exec('x')).rejects.toMatchObject({ mayHaveRun: false });
-    // A worker ExecError alone (a VM that never booted) did not run the command.
-    const boot = await fakeRelay(execError('vm boot failed'));
+    // A worker refusal it sends before starting the command (a VM that could not be restored).
+    const boot = await fakeRelay(execError('spawn-failure: resume "sbx-aaaa": no snapshot'));
     await expect(conn(boot.addr).c.exec('x')).rejects.toMatchObject({ mayHaveRun: false });
     // One after output did.
     const crash = await fakeRelay((call, n) => {
@@ -242,6 +242,33 @@ describe('SandboxExecConn (SBX0 §6.5)', () => {
       execError('worker crashed')(call, n);
     });
     await expect(conn(crash.addr).c.exec('x')).rejects.toMatchObject({ mayHaveRun: true });
+  });
+
+  it('marks an ExecError after the Exec was accepted as may-have-run, even with no output (review #554)', async () => {
+    // The relay's own in-stream error when the worker's stream drops mid-command (relay.ts teardown).
+    const gone = await fakeRelay(execError('worker disconnected'));
+    await expect(conn(gone.addr).c.exec('touch f; sleep 9')).rejects.toMatchObject({
+      kind: 'machinery',
+      mayHaveRun: true,
+    });
+    // A guest that died mid-command, and any worker failure not known to precede the start.
+    for (const m of ['vsock-short-response: vmpool: guest closed before End: EOF', 'wait: oops']) {
+      const r = await fakeRelay(execError(m));
+      await expect(conn(r.addr).c.exec('x')).rejects.toMatchObject({ mayHaveRun: true });
+    }
+    // The worker's refusals before it starts anything stay not-run, and keep the one retry rule.
+    for (const m of [
+      'invalid-workspace-key: workspace_key "x" must match',
+      'empty-workspace-key: the microVM path requires',
+      'spawn-failure: restore for "k": boom',
+      'req_id collision: a different command is already in flight for this id',
+      'workspace /workspace/k: mkdir: permission denied',
+      'start bash: fork failed',
+      'vmpool: closed',
+    ]) {
+      const r = await fakeRelay(execError(m));
+      await expect(conn(r.addr).c.exec('x')).rejects.toMatchObject({ mayHaveRun: false });
+    }
   });
 
   it('reports an in-stream ExecError as a machinery failure', async () => {
