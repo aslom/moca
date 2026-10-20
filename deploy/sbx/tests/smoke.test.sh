@@ -41,6 +41,8 @@ cat >"$TMP/bin/sleep" <<'MOCK'
 #!/usr/bin/env bash
 n="${1%%.*}"
 [[ "$n" != 900 ]] || exec "$REAL_SLEEP" "$@"
+# MOCK_REAL_SLEEP_300=1: the silent command really blocks, so a TERM can arrive during it.
+[[ "$n" != 300 || "${MOCK_REAL_SLEEP_300:-}" != 1 ]] || exec "$REAL_SLEEP" 30
 echo $(($(cat "$MOCK_CLOCK") + n)) >"$MOCK_CLOCK"
 MOCK
 
@@ -72,11 +74,12 @@ mine() { # mine ID: refuse a sandbox that is not this user's, as the control pla
 live() { mine "$1"; [[ "$(cut -d' ' -f2 "$MOCK_DIR/sb/$1")" == ready || "$cmd/${MOCK_MINT_DELETED:-}" == token/1 ]] || { echo 'sbx: sandbox was deleted' >&2; exit 1; }; }
 bound() { sed -n 's/.*"id": *"\(sbx-[0-9a-f]*\)".*/\1/p' .sbx/sandbox.json 2>/dev/null; }
 cmd="$1"; shift
-id='' args=()
+id='' args=() CREATE_NAME=''
 while (($#)); do
   case "$1" in
   --sandbox) id="$2"; shift 2 ;;
-  --timeout | --template | --name) shift 2 ;;
+  --name) CREATE_NAME="$2"; shift 2 ;;
+  --timeout | --template) shift 2 ;;
   --force | --apply) shift ;;
   --) shift; args+=("$@"); break ;;
   *) args+=("$1"); shift ;;
@@ -84,14 +87,37 @@ while (($#)); do
 done
 case "$cmd" in
 --help) echo 'usage (the sandbox service, SBX0):'; echo '  mocactl sbx login ...' ;;
-ls) for f in "$MOCK_DIR"/sb/*; do [[ -e "$f" ]] && echo "$(basename "$f") $(cat "$f")"; done ;;
-create) new; echo ;;
+ls)
+  if [[ " ${args[*]:-} " == *' --json '* ]]; then
+    sep='' out='['
+    for f in "$MOCK_DIR"/sb/*; do
+      [[ -e "$f" ]] || continue
+      read -r o st <"$f"
+      [[ "$o" == "$user" ]] || continue
+      nm="$(cat "$MOCK_DIR/names/$(basename "$f")" 2>/dev/null)"
+      [[ "$st" == deleted ]] && st=terminated
+      out+="$sep{\"id\":\"$(basename "$f")\",\"name\":\"$nm\",\"state\":\"$st\"}"; sep=,
+    done
+    echo "$out]"
+  else
+    for f in "$MOCK_DIR"/sb/*; do [[ -e "$f" ]] && echo "$(basename "$f") $(cat "$f")"; done
+  fi ;;
+create)
+  nid="$(new)"
+  mkdir -p "$MOCK_DIR/names"; printf '%s' "$CREATE_NAME" >"$MOCK_DIR/names/$nid"
+  # MOCK_CREATE_LOST=1: the server made it, but the answer never arrives.
+  [[ "${MOCK_CREATE_LOST:-}" != 1 ]] || { echo 'sbx: connection reset' >&2; exit 1; }
+  echo "$nid" ;;
 token) live "${args[0]}"; echo "tok.$user.${args[0]}.$(($(now) + ${MOCK_TTL:-900}))" ;;
 env)
   live "${args[0]}"
   printf "export SBX_ADDR='exec.sbx.example:443'\nexport SBX_TLS='1'\nexport SBX_SANDBOX_ID='sbx_default'\n"
   printf "export SBX_WORKSPACE_KEY='%s'\nexport SBX_TOKEN_CMD='mocactl sbx token %s'\n" "${args[0]}" "${args[0]}" ;;
-rm) mine "${args[0]}"; echo "$user deleted" >"$MOCK_DIR/sb/${args[0]}"; echo "deleted ${args[0]}" >&2 ;;
+rm)
+  mine "${args[0]}"
+  # MOCK_RM_FAIL_ONCE=1: the first rm fails (the step's own); the cleanup's retry succeeds.
+  if [[ "${MOCK_RM_FAIL_ONCE:-}" == 1 && ! -e "$MOCK_DIR/rm-failed" ]]; then : >"$MOCK_DIR/rm-failed"; echo 'sbx: mock rm failure' >&2; exit 1; fi
+  echo "$user deleted" >"$MOCK_DIR/sb/${args[0]}"; echo "deleted ${args[0]}" >&2 ;;
 run) id="${id:-$(bound)}"; live "$id"; cd "$(ws "$id")" && "${args[@]}" ;;
 put) id="${id:-$(bound)}"; live "$id"; cat >"$(ws "$id")/${args[0]}" ;;
 up)
@@ -152,7 +178,7 @@ cat >"$TMP/bin/ssh" <<'MOCK'
 printf 'ssh %s\n' "$*" >>"$MOCK_LOG"
 [[ "$1 $2 $3" == "-o BatchMode=yes kvm.example" ]] || { echo "mock ssh: unexpected: $*" >&2; exit 98; }
 shift 3
-[[ "$1 $2 $3 $4 $5" == 'sudo -n bash -s --' && $# -eq 11 ]] || { echo "mock ssh: unexpected remote command: $*" >&2; exit 98; }
+[[ "$1 $2 $3 $4 $5" == 'sudo -n bash -s --' && $# -eq 12 ]] || { echo "mock ssh: unexpected remote command: $*" >&2; exit 98; }
 shift 4
 exec bash -s "$@"
 MOCK
@@ -166,7 +192,7 @@ for f in "$MOCK_DIR"/sb/*; do
 done
 echo '{"janitor":"summary","removed":1}'
 MOCK
-printf 'SBX_API_URL=https://api.sbx.example\nSBX_JANITOR_AGE=3600\n' >"$TMP/host/etc/janitor.env"
+printf 'SBX_API_URL=https://api.sbx.example\nSBX_JANITOR_AGE=3630\n' >"$TMP/host/etc/janitor.env"
 echo 'janitor-secret-token-0123456789abcdef' >"$TMP/host/etc/janitor.token"
 
 # claude: headless, and only with the project's MCP config; it works through `mocactl sbx mcp`, so
@@ -189,7 +215,7 @@ BASEPATH="$PATH"
 export PATH="$TMP/bin:$BASEPATH"
 
 reset_state() {
-  rm -rf "$MOCK_DIR/sb" "$MOCK_DIR/n" "$MOCK_SRV/workspaces/sbx_default" "$TMP"/home-?/.local
+  rm -rf "$MOCK_DIR/sb" "$MOCK_DIR/n" "$MOCK_DIR/names" "$MOCK_DIR/rm-failed" "$MOCK_SRV/workspaces/sbx_default" "$TMP"/home-?/.local
   mkdir -p "$MOCK_DIR/sb" "$MOCK_SRV/workspaces/sbx_default"
   # A sandbox of user A's that this run did not create: it must outlive every run.
   echo 'a ready' >"$MOCK_DIR/sb/sbx-ffffffffffffffffffffffffff"
@@ -266,6 +292,7 @@ reject 'a bad template' "SBX_SMOKE_TEMPLATE='Py 3' is not a template id" 'SBX_SM
 reject 'a bad ssh target' "SBX_SMOKE_HOST='-oProxyCommand=x' must be an ssh target" SBX_SMOKE_HOST=-oProxyCommand=x
 reject 'a relative host path' 'the host paths must be plain absolute paths' SBX_SMOKE_HOST_SRV=srv
 reject 'a bad janitor age' "SBX_SMOKE_JANITOR_AGE='03600' must be whole seconds" SBX_SMOKE_JANITOR_AGE=03600
+reject 'a zero janitor age' "SBX_SMOKE_JANITOR_AGE='0' must be whole seconds" SBX_SMOKE_JANITOR_AGE=0
 reject 'an argument' "takes no arguments (got '--steps')" -- --steps
 reject 'MOCACTL that is no file' "MOCACTL='$TMP/nope' is not a file" MOCACTL="$TMP/nope"
 reject 'a mocactl without sbx' 'has no `mocactl sbx`' MOCK_NO_SBX=1
@@ -274,7 +301,7 @@ pass 'refuses bad settings, an argument, a missing or sbx-less mocactl, one user
 
 # 3. A full run: every step ok (opencode is not on PATH: a SKIP), in order, each sandbox deleted.
 reset_state
-smoke SBX_SMOKE_JANITOR_AGE=0 >"$TMP/out" 2>&1 || fail "a full run exited $?"
+smoke >"$TMP/out" 2>&1 || fail "a full run exited $?"
 has 'ok 1 - round trip: sbx up, run, put, pull --apply on a sample repository'
 has "ok 2 - two users: B is refused A's sandbox (404, PERMISSION_DENIED); one req_id from both gets each its own result"
 has 'ok 3 - a command silent for 5 minutes completes'
@@ -310,9 +337,9 @@ grep -q '^client user=a wsk=sbx-[0-9a-f]* req_id=[0-9]* cmd=sleep 120; echo not-
 # Step 5: claude headless with the project MCP config, the agent's mocactl as user A.
 grep -qx "claude -p The test suite fails (python3 -m unittest). Fix it with a minimal change and run the tests. --mcp-config .mcp.json --strict-mcp-config" "$MOCK_LOG" || fail 'claude not run headless with --mcp-config .mcp.json --strict-mcp-config'
 grep -q '^mocactl user=a url=https://api.sbx.example xdg= sbx mcp$' "$MOCK_LOG" || fail "the agent's mocactl sbx mcp did not run as user A"
-# Step 6: the janitor with the env file sourced, AGE=0 and the host's paths.
+# Step 6: the janitor with the env file sourced, the host's own wait kept, and the host's paths.
 grep -q '^ssh -o BatchMode=yes kvm.example sudo -n bash -s -- sbx_default sbx-[0-9a-f]* ' "$MOCK_LOG" || fail 'no ssh for the janitor'
-grep -qx "janitor age=0 url=https://api.sbx.example env=$TMP/host/etc srv=$MOCK_SRV token_file=$TMP/host/etc/janitor.token" "$MOCK_LOG" || fail 'the janitor did not run with janitor.env sourced and SBX_JANITOR_AGE=0'
+grep -qx "janitor age=3630 url=https://api.sbx.example env=$TMP/host/etc srv=$MOCK_SRV token_file=$TMP/host/etc/janitor.token" "$MOCK_LOG" || fail "the janitor did not run with janitor.env sourced and the host's own SBX_JANITOR_AGE"
 pass "the calls: B's mint/env/Exec on A's sandbox, one req_id from both users, a 400 s run, the pre-exp cancel, headless claude, the janitor"
 
 # No token, API token or janitor token printed.
@@ -332,12 +359,19 @@ pass 'SBX_SMOKE_STEPS runs only the steps named; the others, and step 6 with no 
 
 # Step 6 alone deletes a sandbox of its own and frees it.
 reset_state
-smoke SBX_SMOKE_STEPS=6 -u SBX_SMOKE_JANITOR_AGE >"$TMP/out" 2>&1 || fail "step 6 alone exited $?"
+smoke SBX_SMOKE_STEPS=6 SBX_SMOKE_JANITOR_AGE=4000 >"$TMP/out" 2>&1 || fail "step 6 alone exited $?"
 has "ok 6 - the janitor frees a deleted sandbox's directory"
-# The default never frees other users' just-terminated workspaces: only those past one token lifetime.
-grep -q '^janitor age=930 ' "$MOCK_LOG" || fail 'the default janitor wait is not 930 s'
+grep -q '^janitor age=4000 ' "$MOCK_LOG" || fail 'a longer SBX_SMOKE_JANITOR_AGE was not the janitor wait'
 all_cleaned
-pass 'step 6 alone makes, deletes and frees a sandbox of its own, waiting 930 s by default'
+pass "step 6 alone makes, deletes and frees a sandbox of its own; a wait longer than the host's is used"
+
+# A wait shorter than the host's would free other users' workspaces a valid token still reaches.
+reset_state
+smoke SBX_SMOKE_STEPS=6 SBX_SMOKE_JANITOR_AGE=930 >"$TMP/out" 2>&1 && fail "a janitor wait below the host's own was accepted"
+grep -q "^not ok 6 - .*SBX_SMOKE_JANITOR_AGE=930 is below kvm.example's own wait (3630 s)" "$TMP/out" || fail "no refusal of a wait below the host's"
+! grep -q '^janitor age=' "$MOCK_LOG" || fail 'the janitor ran with a wait below the host'"'"'s'
+all_cleaned
+pass "refuses a janitor wait below the host's own, and never runs the janitor with it"
 
 # 5. Failures: `not ok N - ...: why`, the other steps still run, exit 1, and the cleanup still
 # deletes every sandbox the run made (as its owner) and nothing else.
@@ -381,3 +415,32 @@ all_cleaned
 grep -q '^# cleanup: deleted sbx-[0-9a-f]* (user A)$' "$TMP/out" || fail 'the trap did not report the deletion'
 ! pgrep -f "$TMP/bin/sleep 900" >/dev/null || fail 'the agent watchdog was left running'
 pass 'a TERM during the agent run exits 143, stops the watchdog, and the trap deletes the sandbox it was using'
+
+# 7. A TERM during a long wait (step 4's sleep until near exp) is acted on at once, not after it.
+reset_state
+smoke SBX_SMOKE_STEPS=3 MOCK_REAL_SLEEP_300=1 >"$TMP/out" 2>&1 &
+pid=$!
+for _ in $(seq 100); do grep -q 'sbx run --sandbox .* sleep 300' "$MOCK_LOG" && break; "$REAL_SLEEP" 0.1; done
+grep -q 'sbx run --sandbox .* sleep 300' "$MOCK_LOG" || fail 'the silent run never started'
+t0="$("$REAL_DATE" +%s)"
+pkill -TERM -P "$pid" -f "$SMOKE" || kill -TERM "$pid"
+rc=0
+wait "$pid" || rc=$?
+(($("$REAL_DATE" +%s) - t0 < 20)) || fail 'a TERM waited for the 5-minute command to end'
+[[ "$rc" == 143 ]] || fail "a TERM exited $rc, not 143"
+all_cleaned
+pass 'a TERM during a 5-minute command exits at once, and the trap deletes its sandbox'
+
+# 8. A create the server made but whose answer was lost is found by its run-named prefix and deleted.
+reset_state
+smoke SBX_SMOKE_STEPS=3 MOCK_CREATE_LOST=1 >"$TMP/out" 2>&1 && fail 'a lost create answer passed'
+all_cleaned
+grep -q '^# cleanup: deleted sbx-[0-9a-f]* (user A)$' "$TMP/out" || fail 'the stray sandbox was not deleted by name'
+pass 'a sandbox whose create answer was lost is found by its run prefix and deleted'
+
+# 9. A step whose own sbx rm fails is `not ok`, though the trap's retry then deletes it.
+reset_state
+smoke SBX_SMOKE_STEPS=3 MOCK_RM_FAIL_ONCE=1 >"$TMP/out" 2>&1 && fail 'a failed release passed'
+grep -q '^not ok 3 - .*sbx rm sbx-[0-9a-f]* (user A): sbx: mock rm failure' "$TMP/out" || fail 'a failed release is not reported on its step'
+all_cleaned
+pass "a step whose own sbx rm fails is not ok, and the trap still deletes the sandbox"

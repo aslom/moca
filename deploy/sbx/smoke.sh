@@ -21,11 +21,11 @@
 #   SBX_SMOKE_HOST_ENV_DIR, SBX_SMOKE_HOST_SRV, SBX_SMOKE_HOST_LIBEXEC
 #                           that host's SBX_ENV_DIR, SBX_SRV and SBX_LIBEXEC_DIR, as given to
 #                           install-host.sh (default /etc/sbx, /srv/sbx, /usr/local/libexec)
-#   SBX_SMOKE_JANITOR_AGE   the SBX_JANITOR_AGE for step 6's run (default 930, the default token
-#                           lifetime + 30 s: it frees only workspaces terminated that long ago, and
-#                           step 6 waits until its own deletion is that old). 0 frees EVERY
-#                           terminated sandbox's workspace on the host at once: only on a host
-#                           nobody else uses
+#   SBX_SMOKE_JANITOR_AGE   step 6's janitor wait (default: the host's own SBX_JANITOR_AGE, from its
+#                           janitor.env, which setup.sh keeps above the token lifetime + 30 s). The
+#                           run frees every workspace on the host terminated that long ago, not
+#                           only this run's, so a value below the host's is refused; step 6 waits
+#                           until its own deletion is that old (up to the wait, e.g. ~1 h)
 #   MOCACTL                 a mocactl to test (a local build: packages/mocactl/dist/mocactl.mjs);
 #                           unset: installed into a temp dir from the edge channel the user guide
 #                           names (MOCACTL_VERSION=edge scripts/install-mocactl.sh)
@@ -52,8 +52,8 @@
 #      `mocactl sbx mcp` (the flight recorder shows its calls). `git status --porcelain` is the same
 #      as right after sbx up, and the local suite still fails, until sbx pull --apply; then it passes.
 #   6. janitor (SBX_SMOKE_HOST): a deleted sandbox's workspace directory exists on the host; one
-#      janitor run (`sudo env SBX_JANITOR_AGE=<age> ... sbx-janitor.sh`, janitor.env sourced) frees
-#      it once its deletion is that old (see SBX_SMOKE_JANITOR_AGE).
+#      janitor run (`sudo ... sbx-janitor.sh`, janitor.env sourced, its own wait kept) frees it once
+#      its deletion is that old (see SBX_SMOKE_JANITOR_AGE).
 #
 # What it creates: temp directories (sample repositories, a mocactl install, token files) and
 # sandboxes it records as it creates them. Each step deletes its own; an EXIT trap deletes whatever
@@ -125,8 +125,8 @@ HOST="${SBX_SMOKE_HOST:-}"
 [[ -z "$HOST" || "$HOST" =~ ^[A-Za-z0-9_][A-Za-z0-9_.@-]*$ ]] || die "SBX_SMOKE_HOST='$HOST' must be an ssh target, [user@]host"
 H_ENV="${SBX_SMOKE_HOST_ENV_DIR:-/etc/sbx}" H_SRV="${SBX_SMOKE_HOST_SRV:-/srv/sbx}" H_LIBEXEC="${SBX_SMOKE_HOST_LIBEXEC:-/usr/local/libexec}"
 for v in H_ENV H_SRV H_LIBEXEC; do [[ "${!v}" =~ $PATH_RE ]] || die "the host paths must be plain absolute paths (got '${!v}')"; done
-JANITOR_AGE="${SBX_SMOKE_JANITOR_AGE:-930}"
-[[ "$JANITOR_AGE" =~ ^(0|[1-9][0-9]{0,8})$ ]] || die "SBX_SMOKE_JANITOR_AGE='$JANITOR_AGE' must be whole seconds, in decimal without a leading zero"
+JANITOR_AGE="${SBX_SMOKE_JANITOR_AGE:-}" # empty: the host's own SBX_JANITOR_AGE (janitor.env)
+[[ -z "$JANITOR_AGE" || "$JANITOR_AGE" =~ ^[1-9][0-9]{0,8}$ ]] || die "SBX_SMOKE_JANITOR_AGE='$JANITOR_AGE' must be whole seconds, in decimal without a leading zero"
 
 PY="${SBX_SMOKE_PYTHON:-python3}"
 command -v "$PY" >/dev/null || die "no $PY on PATH: set SBX_SMOKE_PYTHON to a Python 3.10+"
@@ -143,15 +143,27 @@ CREATED_A='' CREATED_B='' PIDS=''
 PASSES=0 FAILS=0 SKIPS=0
 
 cleanup() {
-  local rc=$? id
+  local rc=$? id u
   set +e
   # shellcheck disable=SC2086 # a list of pids
   [[ -z "$PIDS" ]] || kill $PIDS 2>/dev/null
   for id in $CREATED_A; do left a "$id" || rc=1; done
   for id in $CREATED_B; do left b "$id" || rc=1; done
+  # A create the server carried out but whose id never reached us (an interrupt, a lost answer):
+  # every name this run gives starts with $RUN-, so anything live by that name is ours.
+  for u in a b; do
+    for id in $(strays "$u"); do left "$u" "$id" || rc=1; done
+  done
   rm -rf "$WORK"
   if [[ "$rc" != 0 || "$FAILS" -gt 0 ]]; then echo "# logs kept in $LOGS"; else rm -rf "$LOGS"; fi
   exit "$rc"
+}
+strays() { # strays a|b: the live sandboxes of that user named by this run, from `sbx ls --json`
+  as "$1" ls --json 2>/dev/null </dev/null | "$PY" -c '
+import json, sys
+for s in json.load(sys.stdin):
+    if str(s.get("name") or "").startswith(sys.argv[1]) and s.get("state") != "terminated":
+        print(s["id"])' "$RUN-" 2>/dev/null || true
 }
 left() { # left a|b ID: delete a sandbox this run created and a step did not
   if as "$1" rm --force "$2" >>"$LOGS/cleanup.log" 2>&1 </dev/null; then
@@ -252,14 +264,27 @@ client() { "$PY" "$WORK/smoke_client.py" "$PYPATH" "$SRC/docs/api/examples" "$@"
 
 N=0
 # x NAME CMD...: run CMD with stdout and stderr in $LOGS/NAME.{out,err}; RC is its exit code.
-x() { local n="$1"; shift; RC=0; "$@" >"$LOGS/$n.out" 2>"$LOGS/$n.err" </dev/null || RC=$?; }
+# In the background, waited on: a TERM is acted on at once, not when a 5-minute command returns, so
+# a timeout's later SIGKILL never lands before the EXIT cleanup has run (bash runs a trap only
+# between foreground commands, but interrupts `wait`).
+job() { # job CMD...: run CMD as a background job, wait for it; its status
+  local p rc=0
+  # <&0: an asynchronous command's stdin would otherwise be /dev/null (no job control here).
+  "$@" <&0 &
+  p=$!
+  PIDS="$PIDS $p"
+  wait "$p" || rc=$?
+  PIDS="${PIDS% $p}"
+  return "$rc"
+}
+x() { local n="$1"; shift; RC=0; job "$@" >"$LOGS/$n.out" 2>"$LOGS/$n.err" </dev/null || RC=$?; }
 # xin NAME FILE CMD...: x, with FILE on stdin.
-xin() { local n="$1" f="$2"; shift 2; RC=0; "$@" >"$LOGS/$n.out" 2>"$LOGS/$n.err" <"$f" || RC=$?; }
+xin() { local n="$1" f="$2"; shift 2; RC=0; job "$@" >"$LOGS/$n.out" 2>"$LOGS/$n.err" <"$f" || RC=$?; }
 # lastline FILE: its last non-empty line, printable only, for a not-ok reason.
 lastline() { { grep -v '^[[:space:]]*$' "$1" 2>/dev/null || true; } | tail -n 1 | tr -cd '[:print:]' | cut -c1-200; }
 field() { sed -n "s/^$1=//p" "$2" | tail -n 1; }
 fail() { WHY="$*"; return 1; }
-sleep_until() { local d=$(($1 - $(date +%s))); if ((d > 0)); then sleep "$d"; fi; }
+sleep_until() { local d=$(($1 - $(date +%s))); if ((d > 0)); then job sleep "$d"; fi; }
 
 record() { # record a|b ID: a sandbox this run created
   [[ "$2" =~ $ID_RE ]] || return 1
@@ -271,7 +296,8 @@ forget() { # forget a|b ID: deleted by its step
 }
 release() { # release a|b ID: delete a sandbox this run created, now its step is done with it
   x "rm-$2" as "$1" rm --force "$2"
-  if [[ "$RC" == 0 ]]; then forget "$1" "$2"; fi
+  [[ "$RC" == 0 ]] || fail "sbx rm $2 (user $(upper "$1")): $(lastline "$LOGS/rm-$2.err")" || return 1
+  forget "$1" "$2"
 }
 create() { # create a|b TAG: a new sandbox from TEMPLATE; its id in SBX
   N=$((N + 1))
@@ -414,7 +440,7 @@ step2() {
     fail "A's Exec with req_id $rid: $(outcome same-a), stdout '$(field stdout "$LOGS/same-a.out")', not A's marker" || return 1
   [[ "$(outcome same-b)" == 'end 0' && "$(field stdout "$LOGS/same-b.out")" == "$mb" ]] ||
     fail "B's Exec with the same req_id: $(outcome same-b), stdout '$(field stdout "$LOGS/same-b.out")', not B's marker" || return 1
-  release a "$a"
+  release a "$a" || return 1
   release b "$b"
 }
 
@@ -513,24 +539,37 @@ step5() {
   release a "$id"
 }
 
-# Piped to `ssh HOST sudo -n bash -s -- WRK WSK ENV_DIR SRV LIBEXEC AGE` (no checkout on the host):
-# janitor.env sourced, then the installed janitor with the unit's other settings and AGE as its wait.
+# Piped to `ssh HOST sudo -n bash -s -- WRK WSK ENV_DIR SRV LIBEXEC MODE AGE` (no checkout on the
+# host). MODE probe: whether the workspace is there, and the host's own SBX_JANITOR_AGE. MODE run:
+# janitor.env sourced, then the installed janitor with the unit's other settings; AGE `-` keeps the
+# host's wait, a number (never below the host's: step6 checks) replaces it.
 REMOTE_JANITOR='set -uo pipefail
-wrk="$1" wsk="$2" envdir="$3" srv="$4" libexec="$5"
+wrk="$1" wsk="$2" envdir="$3" srv="$4" libexec="$5" mode="$6" age="$7"
 dir="$srv/workspaces/$wrk/$wsk"
-if [[ -d "$dir" ]]; then echo before=present; else echo before=absent; fi
 [[ -f "$envdir/janitor.env" ]] || { echo janitor_rc=no-janitor-env; exit 0; }
+if [[ "$mode" == probe ]]; then
+  if [[ -d "$dir" ]]; then echo before=present; else echo before=absent; fi
+  echo "host_age=$(set -a; . "$envdir/janitor.env"; printf "%s" "${SBX_JANITOR_AGE:-}")"
+  exit 0
+fi
 rc=0
 out="$(set -a; . "$envdir/janitor.env"; set +a
+  [[ "$age" == - ]] || SBX_JANITOR_AGE="$age"
   exec env SBX_ENV_DIR="$envdir" SBX_SRV="$srv" SBX_JANITOR_TOKEN_FILE="$envdir/janitor.token" \
-    SBX_JANITOR_AGE="$6" "$libexec/sbx-janitor.sh" 2>&1)" || rc=$?
+    SBX_JANITOR_AGE="$SBX_JANITOR_AGE" "$libexec/sbx-janitor.sh" 2>&1)" || rc=$?
 echo "janitor_rc=$rc"
 printf "%s\n" "$out" | sed "s/^/janitor: /"
 if [[ -e "$dir" ]]; then echo after=present; else echo after=absent; fi'
+remote_janitor() { # remote_janitor NAME WRK WSK MODE AGE: one ssh, its output in $LOGS/NAME.out
+  RC=0
+  printf '%s\n' "$REMOTE_JANITOR" >"$WORK/janitor.sh"
+  xin "$1" "$WORK/janitor.sh" ssh -o BatchMode=yes "$HOST" sudo -n bash -s -- "$2" "$3" "$H_ENV" "$H_SRV" "$H_LIBEXEC" "$4" "$5"
+  [[ "$RC" == 0 ]] || fail "ssh $HOST: exit $RC: $(lastline "$LOGS/$1.err")"
+}
 
 step6() {
   [[ -n "$HOST" ]] || { WHY='SBX_SMOKE_HOST not set'; return 3; }
-  local id="$DELETED_ID" wrk="$DELETED_WRK"
+  local id="$DELETED_ID" wrk="$DELETED_WRK" host_age age
   if [[ -z "$id" ]]; then
     create a janitor || return 1
     id="$SBX"
@@ -543,19 +582,25 @@ step6() {
     forget a "$id"
     DELETED_AT="$(date +%s)"
   fi
-  if ((JANITOR_AGE > 0)); then
-    # 15 s spare for this machine's clock against the control plane's terminatedAt.
-    echo "# step 6: waiting until the deletion is $JANITOR_AGE s old ($((DELETED_AT + JANITOR_AGE + 15 - $(date +%s))) s)..."
-    sleep_until $((DELETED_AT + JANITOR_AGE + 15))
-  fi
-  echo "# step 6: one janitor run on $HOST (SBX_JANITOR_AGE=$JANITOR_AGE)..."
-  RC=0
-  printf '%s\n' "$REMOTE_JANITOR" | ssh -o BatchMode=yes "$HOST" sudo -n bash -s -- "$wrk" "$id" "$H_ENV" "$H_SRV" "$H_LIBEXEC" "$JANITOR_AGE" \
-    >"$LOGS/janitor.out" 2>"$LOGS/janitor.err" || RC=$?
-  [[ "$RC" == 0 ]] || fail "ssh $HOST: exit $RC: $(lastline "$LOGS/janitor.err")" || return 1
   local dir="$H_SRV/workspaces/$wrk/$id"
-  [[ "$(field before "$LOGS/janitor.out")" == present ]] ||
+  remote_janitor janitor-probe "$wrk" "$id" probe - || return 1
+  [[ "$(field janitor_rc "$LOGS/janitor-probe.out")" != no-janitor-env ]] ||
+    fail "no $H_ENV/janitor.env on $HOST: install the janitor there (install-host.sh --janitor)" || return 1
+  [[ "$(field before "$LOGS/janitor-probe.out")" == present ]] ||
     fail "no $dir on $HOST before the run (is it the template's host? SBX_SMOKE_HOST_SRV?)" || return 1
+  host_age="$(field host_age "$LOGS/janitor-probe.out")"
+  [[ "$host_age" =~ ^[1-9][0-9]{0,8}$ ]] || fail "$HOST's janitor.env has no usable SBX_JANITOR_AGE ('$host_age')" || return 1
+  # The run frees every workspace on the host terminated longer ago than its wait, other users'
+  # too: a wait under the host's (which setup.sh keeps above the token lifetime + 30 s) could free
+  # one a still-valid token reaches. So the smoke may only lengthen it.
+  age="${JANITOR_AGE:-$host_age}"
+  ((age >= host_age)) ||
+    fail "SBX_SMOKE_JANITOR_AGE=$age is below $HOST's own wait ($host_age s): it would free other users' workspaces early" || return 1
+  # 15 s spare for this machine's clock against the control plane's terminatedAt.
+  echo "# step 6: waiting until the deletion is $age s old ($((DELETED_AT + age + 15 - $(date +%s))) s)..."
+  sleep_until $((DELETED_AT + age + 15))
+  echo "# step 6: one janitor run on $HOST (SBX_JANITOR_AGE=$age)..."
+  remote_janitor janitor "$wrk" "$id" run "${JANITOR_AGE:--}" || return 1
   [[ "$(field janitor_rc "$LOGS/janitor.out")" == 0 ]] ||
     fail "the janitor exited $(field janitor_rc "$LOGS/janitor.out"): $(grep '^janitor: ' "$LOGS/janitor.out" | tail -n 1 | tr -cd '[:print:]' | cut -c1-200)" || return 1
   [[ "$(field after "$LOGS/janitor.out")" == absent ]] ||
