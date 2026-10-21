@@ -51,15 +51,24 @@ export interface SandboxMcpOptions {
 /** Spec §6.4: the default wait before a call is refused as busy. */
 export const DEFAULT_BUSY_WAIT_MS = 30_000;
 
-const instructionsFor = (ws: string): string =>
-  `Every tool runs in a remote sandbox whose working directory is ${ws}. Each call runs in a fresh ` +
-  'VM: no process survives between calls, so never start background jobs or servers expecting ' +
-  `them to keep running. Files under ${ws} persist. The sandbox has no network access. Calls run ` +
-  'one at a time, so batch work into few calls (for example, one bash call that edits and then ' +
-  'runs the tests).';
+/**
+ * The sandbox rules (spec §6.3), as Markdown: the server's instructions, and the body of the block
+ * `sbx up` writes into CLAUDE.md / AGENTS.md. The instructions are what is sure to reach the agent:
+ * every MCP client receives them on connecting, while Claude Code does not load a CLAUDE.md that
+ * `sbx up`'s own `Read` deny covers (#568).
+ */
+export const sandboxRules = (ws: string): string =>
+  [
+    `The code lives in a remote sandbox at \`${ws}\`: use the \`sandbox\` MCP tools for everything.`,
+    '',
+    '- Every tool call runs in a fresh VM, and no process survives it. Never start background jobs, servers or watchers expecting them to keep running; chain the work into one command instead.',
+    `- Files under \`${ws}\` persist between calls; nothing else does.`,
+    '- There is no network: packages cannot be installed from the internet.',
+    '- Calls run one at a time, so batch the work: read several files in one `bash` call, and run the tests in one call after editing.',
+  ].join('\n');
 
-/** The server's instructions for the default workspace (spec §6.3's rules). */
-export const MCP_INSTRUCTIONS = instructionsFor(WORKSPACE);
+/** The server's instructions for the default workspace. */
+export const MCP_INSTRUCTIONS = sandboxRules(WORKSPACE);
 
 /** The tool error texts that are not the command's own (plan 1c R4). */
 export const SANDBOX_BUSY_TEXT =
@@ -218,7 +227,7 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
   const queue = line(o.busyWaitMs ?? DEFAULT_BUSY_WAIT_MS, now);
   const server = new Server(
     { name: o.name ?? 'moca-sandbox', version: o.version ?? '0.0.0' },
-    { capabilities: { tools: {} }, instructions: instructionsFor(ws) },
+    { capabilities: { tools: {} }, instructions: sandboxRules(ws) },
   );
   const listed: Tool[] = tools.map((t) => ({
     name: t.name,

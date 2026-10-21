@@ -1,9 +1,11 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { q } from '@moca/sandbox-client';
 import { ApiError } from '../api/errors.js';
 import { describeError } from '../core/messages.js';
 import { sanitizeRemote } from '../core/sanitize.js';
 import { ensureRuntimeAuth } from '../runtime.js';
-import { checkAgentConfig } from './agent-config.js';
+import { CLAUDE_MIN_VERSION, checkAgentConfig, claudeTooOld } from './agent-config.js';
 import { notEnrolledMessage, SBX_EXIT, type SbxCtx } from './commands.js';
 import { openExec, sandboxFailureText, type ExecFactory, type OpenedExec } from './exec.js';
 import { PushError, sandboxState } from './push.js';
@@ -11,9 +13,9 @@ import { readRecords } from './recorder.js';
 
 /**
  * `mocactl sbx doctor` (SBX0 §6.1): the login, the bound sandbox and its expiry, the agent
- * configuration's denied state (spec §6.3, re-checked against agent-config.ts's lists), one `true`
- * Exec and its latency, work not yet pulled, and the flight recorder's last 24 hours. One line per
- * check, and a fix for every failure.
+ * configuration's denied state (spec §6.3, re-checked against agent-config.ts's lists; and a Claude
+ * Code too old for them, listed only then), one `true` Exec and its latency, work not yet pulled,
+ * and the flight recorder's last 24 hours. One line per check, and a fix for every failure.
  */
 export interface DoctorCheck {
   name: string;
@@ -25,6 +27,7 @@ export interface DoctorCheck {
 }
 
 const DAY_MS = 86_400_000;
+const execFileAsync = promisify(execFile);
 /**
  * Each of doctor's Execs (`true`, the state check): its timeout, and the client-side backstop
  * margin beyond it, so a hung relay stalls each for about 30 s at most.
@@ -134,6 +137,41 @@ async function sandboxCheck(c: SbxCtx, id: string): Promise<{ check: DoctorCheck
     };
   }
   return { check: { name, ok: true, detail }, live: true };
+}
+
+/**
+ * `claude --version`'s output, or undefined when Claude Code is not on PATH (or did not answer).
+ * Asynchronous, so a slow `claude` never blocks the event loop. On Windows an npm-installed
+ * `claude` is a `.cmd` shim, which only a shell can start; the arguments are fixed, so the shell
+ * is safe there.
+ */
+export async function installedClaudeVersion(): Promise<string | undefined> {
+  try {
+    const { stdout } = await execFileAsync('claude', ['--version'], {
+      encoding: 'utf8',
+      timeout: 10_000,
+      shell: process.platform === 'win32',
+    });
+    return stdout.trim();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A Claude Code too old for the deny list (`CLAUDE_DENY` names only current tools, so an older
+ * one keeps `MultiEdit`, `LS` and `NotebookRead`): a failing check; undefined otherwise.
+ */
+function claudeVersionCheck(version: string | undefined): DoctorCheck | undefined {
+  if (version === undefined || !claudeTooOld(version)) return undefined;
+  return {
+    name: 'claude code',
+    ok: false,
+    detail:
+      `${version.split('\n')[0]} is older than ${CLAUDE_MIN_VERSION}: its MultiEdit, LS and ` +
+      'NotebookRead tools read or edit files on this machine and are not denied',
+    fix: 'update Claude Code (claude update)',
+  };
 }
 
 function configCheck(root: string): DoctorCheck {
@@ -269,6 +307,8 @@ export async function runDoctor(
   root: string | undefined,
   id: string | undefined,
   factory?: ExecFactory,
+  /** `claude --version`'s output (default: asked of the `claude` on PATH); tests pass their own. */
+  claudeVersion: () => Promise<string | undefined> | string | undefined = installedClaudeVersion,
 ): Promise<DoctorCheck[]> {
   const out: DoctorCheck[] = [];
   const login = await loginCheck(c);
@@ -286,7 +326,11 @@ export async function runDoctor(
     out.push(s.check);
     live = s.live;
   }
-  if (root !== undefined) out.push(configCheck(root));
+  if (root !== undefined) {
+    out.push(configCheck(root));
+    const old = claudeVersionCheck(await claudeVersion());
+    if (old) out.push(old);
+  }
   if (id && live) out.push(...(await execChecks(c, id, factory)));
   if (id) out.push(recorderCheck(c, id));
   return out;
@@ -298,8 +342,9 @@ export async function cmdDoctor(
   root: string | undefined,
   id: string | undefined,
   factory?: ExecFactory,
+  claudeVersion?: () => Promise<string | undefined> | string | undefined,
 ): Promise<number> {
-  const checks = await runDoctor(c, root, id, factory);
+  const checks = await runDoctor(c, root, id, factory, claudeVersion);
   const ok = checks.every((k) => k.ok);
   const clean = (k: DoctorCheck): DoctorCheck => ({
     ...k,
