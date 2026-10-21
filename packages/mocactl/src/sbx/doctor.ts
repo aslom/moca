@@ -1,4 +1,5 @@
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { q } from '@moca/sandbox-client';
 import { ApiError } from '../api/errors.js';
 import { describeError } from '../core/messages.js';
@@ -26,6 +27,7 @@ export interface DoctorCheck {
 }
 
 const DAY_MS = 86_400_000;
+const execFileAsync = promisify(execFile);
 /**
  * Each of doctor's Execs (`true`, the state check): its timeout, and the client-side backstop
  * margin beyond it, so a hung relay stalls each for about 30 s at most.
@@ -137,14 +139,20 @@ async function sandboxCheck(c: SbxCtx, id: string): Promise<{ check: DoctorCheck
   return { check: { name, ok: true, detail }, live: true };
 }
 
-/** `claude --version`'s output, or undefined when Claude Code is not on PATH (or did not answer). */
-export function installedClaudeVersion(): string | undefined {
+/**
+ * `claude --version`'s output, or undefined when Claude Code is not on PATH (or did not answer).
+ * Asynchronous, so a slow `claude` never blocks the event loop. On Windows an npm-installed
+ * `claude` is a `.cmd` shim, which only a shell can start; the arguments are fixed, so the shell
+ * is safe there.
+ */
+export async function installedClaudeVersion(): Promise<string | undefined> {
   try {
-    return execFileSync('claude', ['--version'], {
+    const { stdout } = await execFileAsync('claude', ['--version'], {
       encoding: 'utf8',
       timeout: 10_000,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
+      shell: process.platform === 'win32',
+    });
+    return stdout.trim();
   } catch {
     return undefined;
   }
@@ -161,7 +169,7 @@ function claudeVersionCheck(version: string | undefined): DoctorCheck | undefine
     ok: false,
     detail:
       `${version.split('\n')[0]} is older than ${CLAUDE_MIN_VERSION}: its MultiEdit, LS and ` +
-      'NotebookRead tools act on this machine and are not denied',
+      'NotebookRead tools read or edit files on this machine and are not denied',
     fix: 'update Claude Code (claude update)',
   };
 }
@@ -300,7 +308,7 @@ export async function runDoctor(
   id: string | undefined,
   factory?: ExecFactory,
   /** `claude --version`'s output (default: asked of the `claude` on PATH); tests pass their own. */
-  claudeVersion: () => string | undefined = installedClaudeVersion,
+  claudeVersion: () => Promise<string | undefined> | string | undefined = installedClaudeVersion,
 ): Promise<DoctorCheck[]> {
   const out: DoctorCheck[] = [];
   const login = await loginCheck(c);
@@ -320,7 +328,7 @@ export async function runDoctor(
   }
   if (root !== undefined) {
     out.push(configCheck(root));
-    const old = claudeVersionCheck(claudeVersion());
+    const old = claudeVersionCheck(await claudeVersion());
     if (old) out.push(old);
   }
   if (id && live) out.push(...(await execChecks(c, id, factory)));
@@ -334,7 +342,7 @@ export async function cmdDoctor(
   root: string | undefined,
   id: string | undefined,
   factory?: ExecFactory,
-  claudeVersion?: () => string | undefined,
+  claudeVersion?: () => Promise<string | undefined> | string | undefined,
 ): Promise<number> {
   const checks = await runDoctor(c, root, id, factory, claudeVersion);
   const ok = checks.every((k) => k.ok);

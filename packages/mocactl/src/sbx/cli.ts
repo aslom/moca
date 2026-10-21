@@ -89,7 +89,7 @@ export interface SbxDeps {
   /** The gRPC connection (tests pass a fake). */
   execFactory?: ExecFactory;
   /** `doctor`'s `claude --version` (default: asked of the `claude` on PATH). */
-  claudeVersion?: () => string | undefined;
+  claudeVersion?: () => Promise<string | undefined> | string | undefined;
   /** `mcp`'s transport (default stdio). */
   mcpTransport?: Transport;
 }

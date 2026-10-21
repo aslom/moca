@@ -12,7 +12,12 @@ import { saveAuth } from '../src/config.js';
 import { writeAgentConfig } from '../src/sbx/agent-config.js';
 import { openSbxRuntime, sbxMain, sbxPaths } from '../src/sbx/cli.js';
 import type { SbxCtx } from '../src/sbx/commands.js';
-import { percentile, runDoctor, type DoctorCheck } from '../src/sbx/doctor.js';
+import {
+  installedClaudeVersion,
+  percentile,
+  runDoctor,
+  type DoctorCheck,
+} from '../src/sbx/doctor.js';
 import type { ExecFactory } from '../src/sbx/exec.js';
 import { recordCall } from '../src/sbx/recorder.js';
 import { LOGIN, SBX, URL_, cleanupTmp, controlPlane, repo, sandbox, setup } from './helpers/sbx.js';
@@ -165,10 +170,25 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
     expect(c.detail).toMatch(
       /^1\.0\.128 \(Claude Code\) is older than 2\.0\.0: its MultiEdit, LS and NotebookRead/,
     );
+    expect(c.detail).toMatch(/read or edit files on this machine and are not denied$/);
     expect(c.fix).toContain('claude update');
     // Right after the agent-config check, which passes: the list itself is fine.
     expect(names(cs).indexOf('claude code')).toBe(names(cs).indexOf('agent config') + 1);
     expect(byName(cs, 'agent config').ok).toBe(true);
+  });
+
+  it("reads the installed Claude Code's version without blocking, and undefined without one (#572 review)", async () => {
+    const p = installedClaudeVersion();
+    expect(p).toBeInstanceOf(Promise);
+    const v = await p;
+    if (v !== undefined) expect(v).toMatch(/\d+\.\d+\.\d+/);
+    const path = process.env.PATH;
+    process.env.PATH = '/nonexistent';
+    try {
+      expect(await installedClaudeVersion()).toBeUndefined();
+    } finally {
+      process.env.PATH = path;
+    }
   });
 
   it('says the denied state is checked in the project config only (review I2)', async () => {
