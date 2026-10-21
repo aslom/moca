@@ -179,7 +179,7 @@ func attachOnce(
 	// Serve gets attachCtx — the very context this stream was created from,
 	// which is its documented precondition: recvLoop blocks in Recv() and is
 	// unblocked only by the stream being torn down. attachCtx derives from
-	// ctx, so the SIGTERM cancel above reaches it.
+	// the caller's ctx, which main cancels on SIGTERM.
 	start := time.Now()
 	err = serve(attachCtx, stream)
 	return nil, err, time.Since(start)
