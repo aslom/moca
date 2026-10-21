@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, 'feat/sbx0-*'] # the stacked SBX0 PRs (1b on 1a, 1c on 1b) get full CI
+    branches: [main]
 
 permissions:
   contents: read
