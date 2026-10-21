@@ -111,7 +111,8 @@
   <line class="line" x1="740" y1="340" x2="1118" y2="340"/>
   <g class="step"><circle cx="762" cy="340" r="10"/><text x="762" y="340">3</text></g>
   <text class="api" x="780" y="334">PUT /internal/v1/workloads/{name}/{generation}</text>
-  <text class="sub" x="780" y="356">service token + caller's API token; derives wl</text>
+  <text class="sub" x="780" y="356">service token + caller's API token;</text>
+  <text class="sub" x="780" y="372">derives wl from owner, name, generation</text>
 
   <!-- 9a delete sandboxes -->
   <line class="line" x1="740" y1="405" x2="1118" y2="405"/>
