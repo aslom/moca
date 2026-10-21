@@ -91,7 +91,7 @@ writable copy. That leaves three gaps:
    `provisioning`.
 3. **Request sandboxes:** the worker calls `PUT /internal/v1/workloads/{name}/{generation}` on
    `moca-provisioner` with its service token and the caller's API token; the provisioner derives
-   `wl` from the verified owner.
+   `wl` from the verified owner, name and generation.
 4. **Find the storage:** the provisioner resolves the Context into its PVC through
    context-service#40's trusted resolve-attachment call, which requires `attach` for the owner and
    returns `{namespace, claimName, backend, accessMode}`.
