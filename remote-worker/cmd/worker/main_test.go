@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -8,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/metadata"
+
+	pb "github.com/rossoctl/moca/gen/go/sandbox/v1"
 	wexec "github.com/rossoctl/moca/remote-worker/internal/exec"
 )
 
@@ -202,5 +206,50 @@ func TestRetryLineNamesATokenFileFailure(t *testing.T) {
 	got = retryLine(nil, errors.New("EOF"), time.Second)
 	if got != "worker: stream ended (EOF); reconnecting in 1s" {
 		t.Errorf("stream end: got %q", got)
+	}
+}
+
+// An unreadable token file after boot must back off, never reach attach or serve: serving a nil
+// context and stream panics in Serve (#560 review).
+func TestAttachOnceStopsAtATokenFileFailure(t *testing.T) {
+	get := func(k string) string {
+		return map[string]string{"SANDBOX_TOKEN_FILE": filepath.Join(t.TempDir(), "absent")}[k]
+	}
+	attached, served := false, false
+	tokenErr, err, lasted := attachOnce(context.Background(), tokenSource(get, os.ReadFile),
+		func(context.Context) (pb.SandboxWorker_AttachClient, error) { attached = true; return nil, nil },
+		func(context.Context, pb.SandboxWorker_AttachClient) error { served = true; return nil })
+	if tokenErr == nil || err != nil || lasted != 0 {
+		t.Fatalf("got tokenErr=%v err=%v lasted=%v, want only a token error", tokenErr, err, lasted)
+	}
+	if attached || served {
+		t.Errorf("a failed token read reached attach=%v serve=%v", attached, served)
+	}
+}
+
+func TestAttachOnceStopsAtAFailedAttach(t *testing.T) {
+	served := false
+	tokenErr, err, _ := attachOnce(context.Background(), func() (string, error) { return "t", nil },
+		func(context.Context) (pb.SandboxWorker_AttachClient, error) { return nil, errors.New("dial") },
+		func(context.Context, pb.SandboxWorker_AttachClient) error { served = true; return nil })
+	if tokenErr != nil || err == nil || served {
+		t.Errorf("got tokenErr=%v err=%v served=%v, want the attach error and no serve", tokenErr, err, served)
+	}
+}
+
+func TestAttachOnceServesWithTheBearer(t *testing.T) {
+	var auth []string
+	_, err, _ := attachOnce(context.Background(), func() (string, error) { return "tok", nil },
+		func(c context.Context) (pb.SandboxWorker_AttachClient, error) {
+			md, _ := metadata.FromOutgoingContext(c)
+			auth = md.Get("authorization")
+			return nil, nil
+		},
+		func(context.Context, pb.SandboxWorker_AttachClient) error { return errors.New("EOF") })
+	if err == nil || err.Error() != "EOF" {
+		t.Errorf("serve error not returned: %v", err)
+	}
+	if len(auth) != 1 || auth[0] != "Bearer tok" {
+		t.Errorf("authorization = %v", auth)
 	}
 }

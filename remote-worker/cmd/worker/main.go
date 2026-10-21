@@ -155,6 +155,36 @@ func retryLine(tokenErr, streamErr error, wait time.Duration) string {
 	return fmt.Sprintf("worker: stream ended (%v); reconnecting in %s", streamErr, w)
 }
 
+// attachOnce is one pass of the reconnect loop: read the token, attach, and serve until the
+// stream ends. It returns the token error and the stream error apart, and how long a session
+// lasted (zero when none started). A failed token read never reaches attach or serve.
+func attachOnce(
+	ctx context.Context,
+	token func() (string, error),
+	attach func(context.Context) (pb.SandboxWorker_AttachClient, error),
+	serve func(context.Context, pb.SandboxWorker_AttachClient) error,
+) (tokenErr, err error, lasted time.Duration) {
+	// Re-read before every dial, so a rotated token file is picked up on the next reconnect.
+	// A read that fails after boot backs off and retries like a failed dial.
+	bearer, tokenErr := token()
+	if tokenErr != nil {
+		return tokenErr, nil, 0
+	}
+	attachCtx := metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+bearer)
+	stream, err := attach(attachCtx)
+	if err != nil {
+		return nil, err, 0
+	}
+	log.Printf("worker: attached, serving execs")
+	// Serve gets attachCtx — the very context this stream was created from,
+	// which is its documented precondition: recvLoop blocks in Recv() and is
+	// unblocked only by the stream being torn down. attachCtx derives from
+	// ctx, so the SIGTERM cancel above reaches it.
+	start := time.Now()
+	err = serve(attachCtx, stream)
+	return nil, err, time.Since(start)
+}
+
 func nextBackoff(d time.Duration) time.Duration { return min(d*2, backoffMax) }
 
 // jitter spreads reconnects so a relay restart does not get a synchronized herd.
@@ -234,35 +264,19 @@ func main() {
 
 	backoff := backoffMin
 	for ctx.Err() == nil {
-		// Re-read before every dial, so a rotated token file is picked up on the next reconnect.
-		// A read that fails after boot backs off and retries like a failed dial.
-		bearer, tokenErr := token()
-		var stream pb.SandboxWorker_AttachClient
-		var attachCtx context.Context
-		var err error
-		if tokenErr == nil {
-			attachCtx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+bearer)
-			stream, err = client.Attach(attachCtx)
-		}
-		if err == nil {
-			log.Printf("worker: attached, serving execs")
-			// Serve gets attachCtx — the very context this stream was created from,
-			// which is its documented precondition: recvLoop blocks in Recv() and is
-			// unblocked only by the stream being torn down. attachCtx derives from
-			// ctx, so the SIGTERM cancel above reaches it.
-			start := time.Now()
-			err = sess.Serve(attachCtx, stream)
-			// Reset on a session that actually LASTED, not merely on Attach
-			// returning a stream. Attach succeeds before the relay has authorized
-			// anything: with a wrong SANDBOX_TOKEN the stream opens, Hello goes out,
-			// and Recv then fails with Unauthenticated. Resetting on the stream
-			// alone pinned backoff at its ~500-750ms floor forever, so a
-			// misconfigured worker hammered the relay ~2x/second with no escalating
-			// signal. A session that survives 30s was doing real work; anything
-			// shorter keeps escalating toward backoffMax.
-			if time.Since(start) > 30*time.Second {
-				backoff = backoffMin
-			}
+		tokenErr, err, lasted := attachOnce(ctx, token,
+			func(c context.Context) (pb.SandboxWorker_AttachClient, error) { return client.Attach(c) },
+			func(c context.Context, st pb.SandboxWorker_AttachClient) error { return sess.Serve(c, st) })
+		// Reset on a session that actually LASTED, not merely on Attach
+		// returning a stream. Attach succeeds before the relay has authorized
+		// anything: with a wrong SANDBOX_TOKEN the stream opens, Hello goes out,
+		// and Recv then fails with Unauthenticated. Resetting on the stream
+		// alone pinned backoff at its ~500-750ms floor forever, so a
+		// misconfigured worker hammered the relay ~2x/second with no escalating
+		// signal. A session that survives 30s was doing real work; anything
+		// shorter keeps escalating toward backoffMax.
+		if lasted > 30*time.Second {
+			backoff = backoffMin
 		}
 		if ctx.Err() != nil {
 			break
