@@ -149,7 +149,10 @@ mint one and a sandbox cannot forge one. The name `moca-attach+jwt` stays clear 
 lifetime remains, on its reconciler loop (§6.2), and updates the Secret. The worker re-reads the
 file whenever it dials, and when the file changes it reconnects with the new token at its next
 idle moment (no Exec in flight). The relay closes an attach stream when its token's `exp` passes,
-so no stream outlives its token. Rotating the provisioner's key is the usual overlap: add the new
+so no stream outlives its token. Phase 2 PR 1 re-reads the file only on dial, so that close at
+`exp` is a hard cut, Execs in flight included; the idle reconnect on a file change is deferred to
+PR 2, whose re-mint must land well before `exp`.
+Rotating the provisioner's key is the usual overlap: add the new
 `<kid>` to `MOCA_ATTACH_PUBLIC_KEYS`, switch the provisioner to it (every token is re-minted within
 half a TTL), and drop the old key one TTL later. A projected, pod-bound credential (a
 ServiceAccount token with the relay as audience, checked through TokenReview) would bind the token

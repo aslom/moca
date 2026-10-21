@@ -102,7 +102,7 @@ export type Reply = Array<
  * A fake worker. `auto`: answers each Exec with a chunk (its workspace key, so each caller's frames
  * are recognisable) and an End after `delayMs`, or with `reply(exec)` when given. `hold`: answers
  * only when released, or with an ExecError when aborted (the Go worker's behaviour). `deaf`: never
- * answers anything.
+ * answers anything. `attachToken` is presented as the attach bearer (a workload sandbox's).
  */
 export async function worker(
   addr: string,
@@ -110,13 +110,16 @@ export async function worker(
   mode: 'auto' | 'hold' | 'deaf' = 'auto',
   delayMs = 0,
   reply?: (e: Exec) => Reply,
+  attachToken?: string,
 ) {
   const execs: Exec[] = [];
   const aborts: number[] = [];
   const client = new WorkerClient(addr, credentials.createInsecure()) as unknown as Client & {
-    attach: () => ClientDuplexStream<WorkerFrame, ServerFrame>;
+    attach: (md?: Metadata) => ClientDuplexStream<WorkerFrame, ServerFrame>;
   };
-  const stream = client.attach();
+  const md = new Metadata();
+  if (attachToken) md.set('authorization', `Bearer ${attachToken}`);
+  const stream = client.attach(md);
   stream.on('error', () => {});
   const answer = (e: Exec) => {
     if (reply) {
@@ -221,7 +224,14 @@ export interface Result {
 }
 export function exec(
   addr: string,
-  opts: { token?: string; sandboxId?: string; wsk?: string; reqId?: number; command?: string },
+  opts: {
+    token?: string;
+    sandboxId?: string;
+    wsk?: string;
+    reqId?: number;
+    command?: string;
+    workload?: string;
+  },
 ) {
   const client = new SandboxExecClient(addr, credentials.createInsecure());
   const md = new Metadata();
@@ -229,6 +239,7 @@ export function exec(
   const call = client.exec(
     {
       sandboxId: opts.sandboxId ?? 'sbx_default',
+      workload: opts.workload ?? '',
       exec: {
         reqId: opts.reqId ?? ++req,
         command: opts.command ?? 'true',

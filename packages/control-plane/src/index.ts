@@ -26,6 +26,16 @@ export {
   type SandboxMintInput,
   type SandboxTokenClaims,
 } from './sandbox-token.js';
+export {
+  ATTACH_CLOCK_LEEWAY_S,
+  ATTACH_TOKEN_AUDIENCE,
+  ATTACH_TOKEN_ISSUER,
+  ATTACH_TOKEN_TYP,
+  mintAttachToken,
+  verifyAttachToken,
+  type AttachMintInput,
+  type AttachTokenClaims,
+} from './attach-token.js';
 export { KEK_BYTES, credentialAad, keksFromBase64, open, seal, type Opened } from './envelope.js';
 export {
   CREDENTIAL_NAME_RE,

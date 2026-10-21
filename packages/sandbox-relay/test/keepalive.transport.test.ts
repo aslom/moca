@@ -108,6 +108,7 @@ function exec(addr: string, sandboxId: string) {
   const call = client.exec(
     {
       sandboxId,
+      workload: '',
       exec: {
         reqId: 7,
         command: 'sleep 2',

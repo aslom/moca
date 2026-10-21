@@ -25,16 +25,24 @@ import {
   MAX_EXEC_MESSAGE_BYTES,
 } from '@moca/k8s-sandbox';
 import { RedisRecordStore, affinityTimings } from '@moca/harness';
-import { SANDBOX_CLOCK_LEEWAY_S, type SandboxTokenClaims } from '@moca/control-plane';
+import {
+  ATTACH_CLOCK_LEEWAY_S,
+  CpError,
+  SANDBOX_CLOCK_LEEWAY_S,
+  verifyAttachToken,
+  type SandboxTokenClaims,
+} from '@moca/control-plane';
 import {
   createRelay,
   type Relay,
   type RelayDeps,
   type AttachStream,
+  type AttachVerifier,
   type DetachMarks,
 } from './relay.js';
 import {
   DEFAULT_SANDBOX_MAX_INFLIGHT,
+  keysetFromEnv,
   makeSandboxTokenVerifier,
   sandboxMaxInflight,
   type SandboxVerifier,
@@ -288,7 +296,7 @@ function addExecService(server: Server, relay: Relay, auth: ExecAuth): void {
         await sandbox.exec(call, caller.claims, req.sandboxId, e, t0);
         return;
       }
-      await pumpExec(call, relay, req.sandboxId, e);
+      await pumpExec(call, relay, req.sandboxId, e, { workload: req.workload });
     },
     abort: (
       call: ServerUnaryCall<AbortRequest, AbortResponse>,
@@ -447,6 +455,39 @@ async function stopGracefully(servers: Server[], relay: Relay, close?: () => Pro
   await close?.();
 }
 
+const ATTACH_KEYS_VAR = 'MOCA_ATTACH_PUBLIC_KEYS';
+
+/**
+ * The attach-token verifier (workload sandboxes spec §3.1-3.2), or undefined when
+ * MOCA_ATTACH_PUBLIC_KEYS is unset or blank. Undefined is the whole "no keys, nothing changes"
+ * guarantee: createRelay consults none of the workload-label rules without it. Set, it must parse,
+ * or the relay does not boot. Public keys only: the relay can verify an attach token, never mint one.
+ */
+export function makeAttachVerifier(env: NodeJS.ProcessEnv): AttachVerifier | undefined {
+  const raw = env[ATTACH_KEYS_VAR]?.trim();
+  if (!raw) return undefined;
+  const keys = keysetFromEnv(ATTACH_KEYS_VAR, raw);
+  return (presented) => {
+    if (!presented) return { reason: 'no bearer token' };
+    try {
+      const c = verifyAttachToken(presented, keys);
+      return {
+        binding: {
+          workload: c.wl,
+          owner: c.own,
+          tier: c.tr,
+          count: c.n,
+          // The same leeway the verifier allows, so a token it admitted is never closed at once.
+          expiresAtMs: (c.exp + ATTACH_CLOCK_LEEWAY_S) * 1000,
+        },
+      };
+    } catch (err) {
+      // CpError messages are the verifier's fixed strings; anything else could carry input.
+      return { reason: err instanceof CpError ? err.message : 'invalid attach token' };
+    }
+  };
+}
+
 export async function startRelay(
   opts: {
     port?: number;
@@ -464,6 +505,8 @@ export async function startRelay(
     opts.deps ??
     (() => {
       const auth = makeExecAuth(env);
+      // Before Redis too: a malformed keyset is a boot error.
+      const verifyAttach = makeAttachVerifier(env);
       const records = new RedisRecordStore();
       ownedRecords = records;
       return {
@@ -471,6 +514,7 @@ export async function startRelay(
         detach: detachMarks(records, env),
         validateToken: makeDefaultValidateToken(env),
         ...auth,
+        ...(verifyAttach ? { verifyAttach } : {}),
       };
     })();
   const close = ownedRecords ? () => ownedRecords!.close() : undefined;
