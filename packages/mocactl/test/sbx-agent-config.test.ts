@@ -14,14 +14,17 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { MCP_INSTRUCTIONS } from '@moca/sandbox-client';
 import {
   CLAUDE_DENY,
+  CLAUDE_MIN_VERSION,
   ConfigConflict,
   MARK_BEGIN,
   MARK_END,
   OPENCODE_OFF,
   RULES,
   checkAgentConfig,
+  claudeTooOld,
   removeAgentConfig,
   takeBackAgentConfig,
   writeAgentConfig,
@@ -95,9 +98,9 @@ describe('agent configuration (SBX0 §6.3)', () => {
       'EnterWorktree',
       'ExitWorktree',
       'Workflow',
-      'MultiEdit',
-      'LS',
-      'NotebookRead',
+      'Monitor',
+      'PowerShell',
+      'LSP',
     ]);
     expect(OPENCODE_OFF).toEqual([
       'bash',
@@ -127,6 +130,22 @@ describe('agent configuration (SBX0 §6.3)', () => {
     ]) {
       expect(RULES).toContain(s);
     }
+  });
+
+  it("writes the MCP server's own instructions as the block, so both say the same (#568)", () => {
+    expect(RULES).toBe(`## Working in the MOCA sandbox\n\n${MCP_INSTRUCTIONS}`);
+  });
+
+  it('names only tools current Claude Code knows: an unknown deny name warns at every start (#568)', () => {
+    for (const t of ['MultiEdit', 'LS', 'NotebookRead']) expect(CLAUDE_DENY).not.toContain(t);
+  });
+
+  it('tells a Claude Code older than the deny list covers (#568)', () => {
+    expect(CLAUDE_MIN_VERSION).toBe('2.0.0');
+    for (const v of ['1.0.128 (Claude Code)', '1.9.99', '0.2.30'])
+      expect(claudeTooOld(v), v).toBe(true);
+    for (const v of ['2.0.0 (Claude Code)', '2.1.304', '10.0.0', 'garbage', ''])
+      expect(claudeTooOld(v), v).toBe(false);
   });
 
   it('keeps everything the developer had: other servers, allow entries, and their CLAUDE.md byte for byte', () => {

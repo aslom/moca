@@ -88,6 +88,8 @@ export interface SbxDeps {
   readStdinBytes?: (limit?: number) => Promise<Buffer>;
   /** The gRPC connection (tests pass a fake). */
   execFactory?: ExecFactory;
+  /** `doctor`'s `claude --version` (default: asked of the `claude` on PATH). */
+  claudeVersion?: () => string | undefined;
   /** `mcp`'s transport (default stdio). */
   mcpTransport?: Transport;
 }
@@ -510,7 +512,7 @@ export async function sbxMain(
       return unbind(ctx, bindingRoot!);
     }
     case 'doctor':
-      return cmdDoctor(ctx, root, id, deps.execFactory);
+      return cmdDoctor(ctx, root, id, deps.execFactory, deps.claudeVersion);
     case 'token':
       return cmdToken(ctx, id!);
     case 'run':

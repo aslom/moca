@@ -488,19 +488,28 @@ Every curated template ships `tar` and `git` (§8.2).
   - `.mcp.json` gets `mcpServers.sandbox = { "command": "mocactl", "args": ["sbx", "mcp"] }`;
   - `.claude/settings.json` gets `permissions.allow` `mcp__sandbox__*`, and `permissions.deny` for
     `Bash`, `Read`, `Edit`, `Write`, `Glob`, `Grep`, `NotebookEdit`, `WebFetch`, `WebSearch`,
-    `Agent`, `Task`, `EnterWorktree`, `ExitWorktree`, `Workflow`, and older versions' `MultiEdit`,
-    `LS`, `NotebookRead`; `enabledMcpjsonServers` gets `sandbox`.
+    `Agent`, `Task`, `EnterWorktree`, `ExitWorktree`, `Workflow`, and `Monitor`, `PowerShell`,
+    `LSP` (which run local commands, and which a `Bash` deny does not cover);
+    `enabledMcpjsonServers` gets `sandbox`. The list names only tools current Claude Code knows,
+    since it warns at every start about a deny rule naming an unknown tool (#568). The pre-2.0
+    tools (`MultiEdit`, `LS`, `NotebookRead`) are therefore not denied. `sbx doctor` fails when
+    the Claude Code on `PATH` is older than 2.0.0.
 - **OpenCode:** `opencode.json` gets `mcp.sandbox = { "type": "local", "command": ["mocactl", "sbx", "mcp"], "enabled": true }`,
   and `tools` set to `false` for `bash`, `read`, `edit`, `write`, `patch`, `apply_patch`
   (`patch`'s newer name), `glob`, `grep`, `list`, `lsp`, `webfetch`, `websearch`, `task`, and
   older versions' `multiedit`.
 - **`CLAUDE.md` and `AGENTS.md`:** a block between `<!-- sbx:begin -->` and `<!-- sbx:end -->`
-  stating that:
+  holding the MCP server's own instructions (§6.4), which state that:
   - the code lives in a remote sandbox at `/workspace`;
   - every call is a fresh VM, and no process survives it;
   - files under `/workspace` persist;
   - there is no network;
   - calls run one at a time, so batch the work.
+
+  Claude Code never loads this `CLAUDE.md`: the `Read` deny covers it, and an allow rule cannot
+  carve an exception out of a deny (#568). The server's instructions are what steers every agent.
+  Each MCP client receives them on connecting, whatever its permission rules. The block is the
+  same text, for people reading the repository.
 
 Merging rules:
 
@@ -523,6 +532,7 @@ state checkable (`doctor`) instead of assumed.
   `grep`, `find`, `ls`), so an agent sees the same tool surface MOCA's harness serves. Each costs one
   Exec (`edit` two: read, then write), using the command shapes #504's `fewer-execs.ts` measured.
   Plus `sandbox_info`: template, expiry, and the rules from §6.3.
+- **Instructions:** the server's `instructions` are the §6.3 rules, word for word.
 - **Errors:**
   - **Busy is decided client-side first.** The worker serializes Execs per workspace and makes a
     second one wait (`runpool.go`'s exec gate); `sandbox/v1` has no busy frame. So the MCP server,

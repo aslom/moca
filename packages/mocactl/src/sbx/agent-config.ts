@@ -14,6 +14,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join, relative, sep } from 'node:path';
+import { MCP_INSTRUCTIONS } from '@moca/sandbox-client';
 import { sbxDirProblem } from './state.js';
 import { parse, parseTree, ParseErrorCode, type Node, type ParseError } from 'jsonc-parser';
 import {
@@ -60,11 +61,29 @@ export const CLAUDE_DENY: readonly string[] = Object.freeze([
   'EnterWorktree',
   'ExitWorktree',
   'Workflow',
-  // Older or adjacent Claude Code versions' names: denying a tool that does not exist is harmless.
-  'MultiEdit',
-  'LS',
-  'NotebookRead',
+  // Run local commands as Bash does, but are not covered by a `Bash` deny (#568).
+  'Monitor',
+  'PowerShell',
+  'LSP',
+  // Only names the running Claude Code knows: it warns at every start about a deny rule naming
+  // no known tool (#568). The pre-2.0 tools (`MultiEdit`, `LS`, `NotebookRead`) are therefore not
+  // here; `sbx doctor` fails a Claude Code older than CLAUDE_MIN_VERSION instead.
 ]);
+/**
+ * The oldest Claude Code CLAUDE_DENY covers: older ones also have `MultiEdit`, `LS` and
+ * `NotebookRead`. The unknown-name warning came in 2.1.166, and every name in the list is a
+ * known tool there and since (2.1.304 checked: no warning, `PowerShell` included on macOS).
+ */
+export const CLAUDE_MIN_VERSION = '2.0.0';
+
+/** Whether `version` (`2.1.304`, or `claude --version`'s whole line) is older than the floor. */
+export function claudeTooOld(version: string): boolean {
+  const parts = (v: string) => (/(\d+)\.(\d+)\.(\d+)/.exec(v) ?? []).slice(1).map(Number);
+  const [have, min] = [parts(version), parts(CLAUDE_MIN_VERSION)];
+  if (have.length !== 3) return false; // unreadable: not a reason to fail
+  for (let i = 0; i < 3; i++) if (have[i] !== min[i]) return have[i]! < min[i]!;
+  return false;
+}
 /** OpenCode's built-ins that act on the laptop: `tools.<t> = false` (spec §6.3). */
 export const OPENCODE_OFF: readonly string[] = Object.freeze([
   'bash',
@@ -85,17 +104,12 @@ export const OPENCODE_OFF: readonly string[] = Object.freeze([
 ]);
 export const MARK_BEGIN = '<!-- sbx:begin -->';
 export const MARK_END = '<!-- sbx:end -->';
-/** The CLAUDE.md / AGENTS.md block body (spec §6.3). */
-export const RULES = [
-  '## Working in the MOCA sandbox',
-  '',
-  'The code lives in a remote sandbox at `/workspace`: use the `sandbox` MCP tools for everything.',
-  '',
-  '- Every tool call runs in a fresh VM, and no process survives it. Never start background jobs, servers or watchers expecting them to keep running; chain the work into one command instead.',
-  '- Files under `/workspace` persist between calls; nothing else does.',
-  '- There is no network: packages cannot be installed from the internet.',
-  '- Calls run one at a time, so batch the work: read several files in one `bash` call, and run the tests in one call after editing.',
-].join('\n');
+/**
+ * The CLAUDE.md / AGENTS.md block body (spec §6.3): the MCP server's own instructions under a
+ * heading. Claude Code does not load this CLAUDE.md (the `Read` deny covers it), so what steers it
+ * is the server's instructions; the block is the same text, for people and for OpenCode (#568).
+ */
+export const RULES = ['## Working in the MOCA sandbox', '', MCP_INSTRUCTIONS].join('\n');
 
 /** The server name in every file: Claude Code's tools are then `mcp__sandbox__*`. */
 export const SERVER = 'sandbox';
