@@ -82,12 +82,35 @@ writable copy. That leaves three gaps:
 
 ## 2. Design overview
 
-```
-[Flow diagram placeholder: create, activate, provision, register, run and delete, with the
-numbered calls between mocactl, the worker, the provisioner, Context Service (#40), the
-Kubernetes API, the sandbox pods and the relay. The SVG follows in a separate docs change, before
-PR 2 (§8).]
-```
+![Per-workload sandboxes: create, activate, provision, attach, run and delete](workload-sandboxes-flow.svg)
+
+1. **Create the workload:** the client calls `POST /workloads` with `sandboxes` and
+   `workspace.mount`, and uploads the bundle with the grant, as in phase 1. The worker creates the
+   Context and its PVC in `moca-sandbox` (`POST /internal/v1/contexts`).
+2. **Activate:** `POST /workloads/{id}/activate` freezes the revision and moves the record to
+   `provisioning`.
+3. **Request sandboxes:** the worker calls `PUT /internal/v1/workloads/{name}/{generation}` on
+   `moca-provisioner` with its service token and the caller's API token; the provisioner derives
+   `wl` from the verified owner, name and generation.
+4. **Find the storage:** the provisioner resolves the Context into its PVC through
+   context-service#40's trusted resolve-attachment call, which requires `attach` for the owner and
+   returns `{namespace, claimName, backend, accessMode}`.
+5. **Create the sandboxes:** through the Kubernetes API, the provisioner creates StatefulSet `<wl>`,
+   headless Service `<wl>` and Secret `<wl>-attach` (the attach token, mounted as a file) in
+   `moca-sandbox`.
+6. **Mount the context:** the sandbox pods `<wl>-<n>` mount the Context PVC at `/workspace/context`:
+   read-only at `subPath: .context-service/materialized/<revision>`, or writable at
+   `subPath: moca-workspace`, seeded once by an init container.
+7. **Register with the relay:** each pod attaches to the relay with `Hello` + attach token; the
+   relay stamps the trusted `moca.dev/workload` and `moca.dev/owner` labels, whatever `Hello` sent.
+   Once `count` sandboxes are registered the record is `ready`.
+8. **Run a task:** `POST /v1/runs` names the workload; selection keeps only records whose
+   `moca.dev/workload` and `moca.dev/owner` match, and the worker runs the task with
+   `SandboxExec.Exec` carrying the `workload` field, which the relay checks.
+9. **Delete:** `DELETE /workloads/{id}` removes the sandboxes first
+   (`DELETE /internal/v1/workloads/{name}/{generation}`, `200` once no pod remains), then the
+   Context and its managed PVC (`DELETE /internal/v1/namespaces/{ns}/contexts/{name}`), because Context Service
+   refuses to delete a mounted claim.
 
 In short: a new `moca-provisioner` (§4, ADR-0043), the only MOCA component with Kubernetes
 permissions in the sandbox namespace, creates each workload's sandbox pods at activation (§6). It
@@ -517,7 +540,23 @@ Ours:
 9. **Existing Contexts after the namespace move (§5.1).** Workloads created before it keep their
    PVC in the old namespace and cannot be mounted. Is re-creating them acceptable?
 
-## 11. Testing
+## 11. Future simplifications
+
+Not planned for phase 2. These are ideas to explore once phase 2 works end to end, not decisions:
+each needs deeper work to confirm it is simpler without losing something we need.
+
+1. **The provisioner registers sandboxes with the relay.** It creates the pods, so it can tell the
+   relay which workload each belongs to. Sandboxes no longer prove it, and most of the attach token
+   (§3.1) goes away.
+2. **Fewer sandbox-count rules.** Today the user picks how many sandboxes a workload gets. One per
+   workload would drop the count and ordinal rules, but fan-out needs more than one. The other
+   direction is letting a workload scale its sandboxes with demand. Needs validation either way.
+3. **MOCA owns the workload's PVC.** Context Service only fills it with the revision. No
+   resolve-attachment call (§5.2) and no cross-service delete order (§6.1).
+4. **Context Service as a format and library.** MOCA imports pack, validate and materialize instead
+   of calling a separate service on the request path. `contextctl` stays a standalone tool.
+
+## 12. Testing
 
 - Relay: an attach token sets the three labels whatever `Hello` sends; a shared-token `Hello`
   loses its `moca.dev/workload`; a bad signature, unknown `kid`, wrong `aud` or `iss`, missing or
