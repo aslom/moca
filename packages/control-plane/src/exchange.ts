@@ -1,4 +1,5 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { defaultAuditLog } from './audit-log.js';
 import { touchBundle } from './bundle-budget.js';
 import { inferenceAuthHeader, type InferenceAuthHeader } from './credential-store.js';
 import { CpError } from './errors.js';
@@ -339,12 +340,18 @@ export async function exchangeCredential(
     refuseMisdirectedSecret(resolved, rec.sessionId);
   }
 
-  await deps.index.audit({
+  const exchangeEntry = {
     subject: rec.owner,
     sessionId: rec.sessionId,
     credential: credentialName,
-    decision: usedOperatorFallback ? 'operator_fallback_used' : 'credential_issued',
-  });
+    decision: (usedOperatorFallback ? 'operator_fallback_used' : 'credential_issued') as
+      'credential_issued' | 'operator_fallback_used',
+  };
+  // Emit after the await: this index.audit is not best-effort (exchange answers 503 on XADD
+  // failure and no credential is returned), so stdout must agree with the server's view.
+  // Inline fallback (not resolveAuditLog) avoids a handlers.ts <-> exchange.ts cycle.
+  await deps.index.audit(exchangeEntry);
+  (deps.log ?? defaultAuditLog)({ event: 'audit', ...exchangeEntry });
 
   if (rec.configRef) {
     // Best effort: a bundle in daily use must not age out, but a failed refresh never fails a turn.

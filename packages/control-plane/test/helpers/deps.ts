@@ -20,6 +20,8 @@ export type TestDeps = CpDeps & {
   refreshAudit: AuditFields[];
   /** ...and its separate stream for refusals of a token nobody issued. */
   refreshAnonAudit: AuditFields[];
+  /** Captured audit log lines; land here instead of stdout under tests. */
+  logLines: Array<Record<string, unknown>>;
 };
 
 /**
@@ -78,6 +80,7 @@ export function makeDeps(
     maxTtlS: config.refreshMaxTtlSeconds,
     graceS: config.refreshReuseGraceSeconds,
   });
+  const logLines: Array<Record<string, unknown>> = [];
   const base: TestDeps = {
     index: new OwnershipIndex(fake.redis),
     credentials: new InMemoryCredentialStore(),
@@ -94,6 +97,8 @@ export function makeDeps(
     config,
     now: () => NOW_MS,
     newId: () => 'sid-fixed',
+    log: (line) => logLines.push(line),
+    logLines,
   };
   // A caller-supplied `index` brings its own fake, so `streams` must follow it or an audit assertion
   // would read the wrong map.

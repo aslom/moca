@@ -3,6 +3,7 @@ import type { BundleRedisLike } from '@moca/config-bundle';
 import { fileURLToPath } from 'node:url';
 import type { KeyObject } from 'node:crypto';
 import { randomUUID } from 'node:crypto';
+import { defaultAuditLog } from './audit-log.js';
 import type { BundleBudgetRedisLike } from './bundle-budget.js';
 import { keksFromBase64 } from './envelope.js';
 import {
@@ -372,11 +373,16 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
     },
     index: new OwnershipIndex(client as unknown as CpRedisLike),
     bundles: client as unknown as BundleRedisLike & BundleBudgetRedisLike,
-    refresh: new RedisRefreshStore(client as unknown as RefreshRedisLike, {
-      idleTtlS: config.refreshIdleTtlSeconds,
-      maxTtlS: config.refreshMaxTtlSeconds,
-      graceS: config.refreshReuseGraceSeconds,
-    }),
+    refresh: new RedisRefreshStore(
+      client as unknown as RefreshRedisLike,
+      {
+        idleTtlS: config.refreshIdleTtlSeconds,
+        maxTtlS: config.refreshMaxTtlSeconds,
+        graceS: config.refreshReuseGraceSeconds,
+      },
+      undefined,
+      defaultAuditLog,
+    ),
     credentials: sandboxProfile ? new UnavailableCredentialStore() : credentialStoreFromEnv(env),
     ...(sandboxProfile
       ? { sandboxes: new RedisSandboxStore(client as unknown as SandboxRedisLike) }
@@ -393,6 +399,7 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
     // sanitisation and the cascade needs no sanitising helper (plan gap #10).
     newId: () => randomUUID(),
     runKubectl: defaultRunKubectl,
+    log: defaultAuditLog,
   };
 }
 

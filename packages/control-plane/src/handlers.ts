@@ -19,6 +19,7 @@ import {
   withBundleLock,
   type BundleBudgetRedisLike,
 } from './bundle-budget.js';
+import { type AuditLog, defaultAuditLog } from './audit-log.js';
 import { CpError } from './errors.js';
 import { asRecord, auditBestEffort, isAdmin, seconds } from './handler-util.js';
 import { subjectHash } from './subject-document.js';
@@ -157,7 +158,12 @@ export interface CpDeps {
   close?: () => Promise<void>;
   /** The sandbox resource (SBX0 §5); present on the sandbox profile only. */
   sandboxes?: SandboxStore;
+  /** Stdout mirror of audit decisions; defaults to `defaultAuditLog` in depsFromEnv. */
+  log?: AuditLog;
 }
+
+/** `deps.log` with the production default; keeps the field optional on `CpDeps`. */
+export const resolveAuditLog = (deps: Pick<CpDeps, 'log'>): AuditLog => deps.log ?? defaultAuditLog;
 
 export interface RequestCtx {
   params: Record<string, string>;
@@ -634,13 +640,15 @@ export const HANDLERS: Record<string, Handler> = {
       ...(choice?.limits ? { modelLimits: choice.limits } : {}),
     };
     await deps.index.create(rec);
-    await deps.index.audit({
+    const sessionCreatedEntry = {
       subject: p.sub,
       sessionId,
       credential: credentialName || OPERATOR_FALLBACK_NAME,
-      decision: 'session_created',
+      decision: 'session_created' as const,
       ...(choice ? { model: choice.model } : {}),
-    });
+    };
+    resolveAuditLog(deps)({ event: 'audit', ...sessionCreatedEntry });
+    await deps.index.audit(sessionCreatedEntry);
     const iat = seconds(deps);
     return {
       status: 201,
@@ -722,13 +730,15 @@ export const HANDLERS: Record<string, Handler> = {
       throw new CpError('session_not_found', undefined, rec.sessionId);
     }
     await deps.index.setModel(rec.sessionId, choice.model, choice.limits);
-    await deps.index.audit({
+    const modelChangedEntry = {
       subject: rec.owner,
       sessionId: rec.sessionId,
-      decision: 'model_changed',
+      decision: 'model_changed' as const,
       model: choice.model || 'default',
       fromModel: fresh.model || 'default',
-    });
+    };
+    resolveAuditLog(deps)({ event: 'audit', ...modelChangedEntry });
+    await deps.index.audit(modelChangedEntry);
     const updated: SessionRecord = { ...fresh, model: choice.model, modelLimits: choice.limits };
     return {
       status: 200,
@@ -763,11 +773,14 @@ export const HANDLERS: Record<string, Handler> = {
     const rec = await assertOwner(ctx.params.id!, ctx.principal, deps);
     const inFlight = await turnInFlight(rec.sessionId, deps);
     await deps.index.cascadeDelete(rec);
-    await deps.index.audit({
+    const deletedEntry = {
       subject: rec.owner,
       sessionId: rec.sessionId,
-      decision: inFlight ? 'session_deleted_in_flight' : 'session_deleted',
-    });
+      decision: (inFlight ? 'session_deleted_in_flight' : 'session_deleted') as
+        'session_deleted' | 'session_deleted_in_flight',
+    };
+    resolveAuditLog(deps)({ event: 'audit', ...deletedEntry });
+    await deps.index.audit(deletedEntry);
     // 202 rather than pretending a synchronous delete happened; a sweeper reaps what the in-flight
     // turn writes on its way out (spec §7.3).
     return { status: inFlight ? 202 : 204, body: undefined };

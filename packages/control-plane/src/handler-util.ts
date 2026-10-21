@@ -1,3 +1,5 @@
+import type { AuditLog } from './audit-log.js';
+import { defaultAuditLog } from './audit-log.js';
 import type { OwnershipIndex } from './ownership.js';
 import type { TokenClaims } from './token.js';
 
@@ -40,11 +42,14 @@ export const isAdmin = (p: TokenClaims): boolean => (p.roles ?? []).includes('ad
  * given in the first place.
  */
 export async function auditBestEffort(
-  deps: { index: Pick<OwnershipIndex, 'audit'> },
+  deps: { index: Pick<OwnershipIndex, 'audit'>; log?: AuditLog },
   route: string,
   target: string,
   entry: Parameters<OwnershipIndex['audit']>[0],
 ): Promise<void> {
+  // Mirror to stdout BEFORE the Redis write so the line still appears when Redis is down.
+  (deps.log ?? defaultAuditLog)({ event: 'audit', ...entry });
+
   try {
     await deps.index.audit(entry);
   } catch (err) {

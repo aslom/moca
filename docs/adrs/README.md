@@ -54,6 +54,7 @@ spec). Chronological by the spec's date; numbers are permanent.
 | [0041](0041-deprecate-knative-keda-deployment.md)         | Deprecate the Knative/KEDA deployment path; P6 is the primary runtime                           | Accepted                                                        |
 | [0042](0042-sbx0-sandbox-service-on-sandbox-v1.md)        | Offer the P4 tier to an internal cohort on `sandbox/v1` as it is, behind per-sandbox tokens     | Proposed                                                        |
 | [0043](0043-workload-sandboxes-provisioner.md)            | A separate `moca-provisioner` is the only MOCA component that creates workload sandboxes        | Proposed                                                        |
+| [0044](0044-audit-log-mirror-stdout.md)                   | Mirror audit decisions to component stdout as structured JSON, carrying subject and sessionId   | Proposed                                                        |
 
 ## What an ADR is (and isn't)
 
