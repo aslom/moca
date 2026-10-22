@@ -157,6 +157,34 @@ They are ordinary files in your working tree, so `git status` shows them. Leave 
 committed, they would point every teammate's agents at a sandbox and deny their local tools.
 `mocactl sbx up --no-agent-config` creates and pushes without touching them.
 
+### The first `claude` asks about the sandbox server
+
+Start Claude Code from the repository root, where `up` wrote `.mcp.json` and
+`.claude/settings.json`. On a fresh clone the first session asks about the server `up` wired
+up, despite the `enabledMcpjsonServers` entry above:
+
+```
+New MCP server found in this project: sandbox
+
+  Use this MCP server
+  Use this and all future MCP servers in this project
+❯ Continue without using this MCP server
+```
+
+Choose **"Use this MCP server"**. The highlighted default is the last line, so pressing Enter
+declines, and declining writes `disabledMcpjsonServers: ["sandbox"]` into
+`.claude/settings.local.json`. Together with the local tools denied in `.claude/settings.json`
+that leaves the agent with no tools at all — and the marker suppresses the question on the next
+run, so the state is easy to mistake for a broken sandbox. `mocactl sbx doctor` reports it:
+
+```
+Claude Code: .claude/settings.local.json disabledMcpjsonServers rejects the sandbox MCP server
+```
+
+To recover, delete `.claude/settings.local.json` (`up` never writes it) and start `claude` again.
+Why the prompt appears at all despite `enabledMcpjsonServers` is
+[#577](https://github.com/rossoctl/moca/issues/577).
+
 **To undo it**, delete the sandbox:
 
 ```bash
