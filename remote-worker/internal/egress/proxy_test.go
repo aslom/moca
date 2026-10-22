@@ -409,7 +409,11 @@ func TestPerVMConnCap(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		connect(t, dial(t, path), fmt.Sprintf("up.test:%d", up.port))
 	}
-	resp, err := http.ReadResponse(bufio.NewReader(dial(t, path)), nil)
+	// The third guest pipelines its CONNECT before reading: it must see the
+	// named 429, not a reset from closing with unread input.
+	c3 := dial(t, path)
+	fmt.Fprintf(c3, "CONNECT up.test:%d HTTP/1.1\r\nHost: up.test\r\n\r\n%s", up.port, strings.Repeat("x", 8192))
+	resp, err := http.ReadResponse(bufio.NewReader(c3), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -599,4 +603,117 @@ func TestNewProxyValidatesConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	p.Close()
+}
+
+func TestUpstream101IsRefused(t *testing.T) {
+	// The upstream answers 101 although the proxy stripped Upgrade; the raw
+	// stream after it must never reach the guest.
+	up := newTCPUpstream(t, func(c net.Conn) {
+		defer c.Close()
+		http.ReadRequest(bufio.NewReader(c))
+		io.WriteString(c, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\nRAWSTREAM")
+		time.Sleep(200 * time.Millisecond)
+	})
+	h := newHarness(t, fmt.Sprintf("up.test:%d", up.port), nil)
+	h.res.set("up.test", "127.0.0.1")
+	c := dial(t, h.register("vm-1", "run-a"))
+	io.WriteString(c, fmt.Sprintf("GET http://up.test:%d/ws HTTP/1.1\r\nHost: up.test\r\n"+
+		"Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n", up.port))
+	all, _ := io.ReadAll(c)
+	if strings.Contains(string(all), "RAWSTREAM") || strings.Contains(string(all), " 101 ") {
+		t.Fatalf("101 stream relayed: %q", all)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(strings.NewReader(string(all))), nil)
+	if err != nil {
+		t.Fatalf("%v: %q", err, all)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	assertRefusal(t, resp, string(body), 502, DecisionUpstreamUnreachable, "up.test")
+	h.sink.waitEvent(t, DecisionUpstreamUnreachable)
+	for _, e := range h.sink.events() {
+		if e.Decision == DecisionForward {
+			t.Fatalf("101 audited as forward: %+v", e)
+		}
+	}
+}
+
+func TestTrailersAreScrubbedBothWays(t *testing.T) {
+	var upHdr, upTrailer http.Header
+	var mu sync.Mutex
+	up := newTCPUpstream(t, func(c net.Conn) {
+		defer c.Close()
+		br := bufio.NewReader(c)
+		r, err := http.ReadRequest(br)
+		if err != nil {
+			return
+		}
+		io.ReadAll(r.Body)
+		mu.Lock()
+		upHdr, upTrailer = r.Header.Clone(), r.Trailer.Clone()
+		mu.Unlock()
+		io.WriteString(c, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"+
+			"Trailer: X-Moca-Leak, Proxy-Authenticate, Connection, X-Fine\r\n\r\n"+
+			"2\r\nok\r\n0\r\nX-Moca-Leak: up\r\nProxy-Authenticate: up\r\nConnection: up\r\nX-Fine: yes\r\n\r\n")
+	})
+	h := newHarness(t, fmt.Sprintf("up.test:%d", up.port), nil)
+	h.res.set("up.test", "127.0.0.1")
+	c := dial(t, h.register("vm-1", "run-a"))
+	io.WriteString(c, fmt.Sprintf("POST http://up.test:%d/t HTTP/1.1\r\nHost: up.test\r\n"+
+		"Transfer-Encoding: chunked\r\nTrailer: X-Moca-Session, Proxy-Authorization, X-Ok\r\n\r\n"+
+		"3\r\nabc\r\n0\r\nX-Moca-Session: run-a\r\nProxy-Authorization: Basic Zm9v\r\nX-Ok: 1\r\n\r\n", up.port))
+	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || string(b) != "ok" {
+		t.Fatalf("%d %q", resp.StatusCode, b)
+	}
+	for k := range resp.Trailer {
+		if k != "X-Fine" {
+			t.Fatalf("guest got response trailer %s: %v", k, resp.Trailer)
+		}
+	}
+	if resp.Trailer.Get("X-Fine") != "yes" {
+		t.Fatalf("benign response trailer lost: %v", resp.Trailer)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if upHdr == nil {
+		t.Fatal("upstream saw no request")
+	}
+	if v := upHdr.Get("Trailer"); v != "" {
+		t.Fatalf("upstream got Trailer header %q", v)
+	}
+	for k := range upTrailer {
+		t.Fatalf("upstream got request trailer %s: %v", k, upTrailer)
+	}
+}
+
+// stuckListener reports a non-ErrClosed error from Accept once closed, as a
+// misbehaving listener implementation might.
+type stuckListener struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (l *stuckListener) Accept() (net.Conn, error) {
+	<-l.closed
+	return nil, errors.New("listener gone")
+}
+func (l *stuckListener) Close() error   { l.once.Do(func() { close(l.closed) }); return nil }
+func (l *stuckListener) Addr() net.Addr { return &net.UnixAddr{Name: "stuck", Net: "unix"} }
+
+func TestCloseReturnsWhenAcceptKeepsFailing(t *testing.T) {
+	h := newHarness(t, "up.test", nil)
+	if err := h.p.Register("vm-1", "run-a", nil, &stuckListener{closed: make(chan struct{})}); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- h.p.Close() }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close hung: serve spins on a non-ErrClosed accept error")
+	}
 }

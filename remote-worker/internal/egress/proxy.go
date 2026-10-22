@@ -184,7 +184,7 @@ func (p *Proxy) serve(b *vmBinding) {
 	for {
 		c, err := b.ln.Accept()
 		if err != nil {
-			if errors.Is(err, net.ErrClosed) {
+			if errors.Is(err, net.ErrClosed) || p.ctx.Err() != nil || p.bindingClosed(b) {
 				return
 			}
 			if delay == 0 {
@@ -199,6 +199,12 @@ func (p *Proxy) serve(b *vmBinding) {
 		delay = 0
 		p.admit(b, &boundConn{Conn: c, caller: b.caller})
 	}
+}
+
+func (p *Proxy) bindingClosed(b *vmBinding) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return b.closed
 }
 
 // admit applies the per-VM connection cap and starts the handler.
@@ -223,10 +229,10 @@ func (p *Proxy) admit(b *vmBinding, c *boundConn) {
 		p.wg.Add(1)
 		go func() {
 			defer p.wg.Done()
-			// Not read first: the cap exists to shed load before parsing.
-			_ = c.SetWriteDeadline(time.Now().Add(time.Second))
-			_, _ = c.Write(refusalBytes(429, DecisionConnCap, caller.VMID))
-			_ = c.Close()
+			// Not parsed: the cap exists to shed load. The bounded drain, as
+			// for every refusal, lets a guest that pipelined its request see
+			// the named 429 rather than a reset.
+			writeAndClose(c, refusalBytes(429, DecisionConnCap, caller.VMID))
 		}()
 		return
 	}
