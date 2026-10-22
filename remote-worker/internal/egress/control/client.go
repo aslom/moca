@@ -280,9 +280,10 @@ func (c *Client) heal() {
 			n := len(c.live)
 			c.healing = false
 			c.mu.Unlock()
-			if failures > 0 {
-				log.Printf("egress control: reconnected to %s after %d failed attempts; replayed %d registrations", c.path, failures, n)
-			}
+			// Logged on every heal, a first-try one included: after `systemctl restart moca-egress`
+			// the redial usually succeeds at once, and this line is then the only trace in the
+			// worker's journal that its VMs were re-registered (P4.1 live acceptance, nested-m8i).
+			log.Printf("egress control: reconnected to %s after %d failed attempts; replayed %d registrations", c.path, failures, n)
 			return
 		}
 		c.mu.Unlock()
