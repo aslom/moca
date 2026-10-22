@@ -330,11 +330,12 @@ func TestGateSnapshotHoldsNoSecrets(t *testing.T) {
 	if _, err := p.Exec(context.Background(), "gate-secrets", Exec{Command: "env", TimeoutS: 30}, &out); err != nil {
 		t.Fatalf("Exec env: %v", err)
 	}
-	// P4.1: the guest env now carries HTTPS_PROXY/HTTP_PROXY (and lowercase), empty
-	// NO_PROXY, and GH_TOKEN/GITHUB_TOKEN=moca-placeholder. None of those names starts
-	// with a forbidden prefix, and the placeholder is deliberately NOT a credential
-	// pattern (no AKIA, ghp_ or -----BEGIN), so this check and the memfile scan above
-	// still pass with the new variables. A real token in GH_TOKEN would trip the scan.
+	// P4.1: the guest env now carries HTTPS_PROXY/HTTP_PROXY (and lowercase),
+	// NO_PROXY=localhost,127.0.0.1,::1 (and lowercase), and
+	// GH_TOKEN/GITHUB_TOKEN=moca-placeholder. None of those names starts with a
+	// forbidden prefix, and the placeholder is deliberately NOT a credential pattern
+	// (no AKIA, ghp_ or PEM private-key header), so this check and the memfile scan
+	// above still pass with the new variables. A real token in GH_TOKEN would trip it.
 	for _, name := range []string{"SANDBOX_TOKEN", "AWS_", "ANTHROPIC_"} {
 		if strings.Contains(out.out(), name) {
 			t.Errorf("guest env contains %q:\n%s", name, out.out())
