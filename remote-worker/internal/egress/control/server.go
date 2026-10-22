@@ -25,6 +25,13 @@ type Server struct {
 	allowed []int
 	h       Handler
 
+	// hmu serialises every bindings change together with the Handler call that matches it.
+	// Without it, dropConn could clear a VM's binding, release mu, and call Unregister after a
+	// redialled client had already re-registered that VM: the handler would then refuse the
+	// replay as a duplicate, or tear down the binding the new connection had just made (#582
+	// review). Lock order is hmu then mu; Handler calls happen under hmu, never under mu.
+	hmu sync.Mutex
+
 	mu       sync.Mutex
 	closed   bool
 	conns    map[*serverConn]struct{}
@@ -143,6 +150,8 @@ func (s *Server) handle(sc *serverConn, body []byte, fds []int) *egressv1.Contro
 	case req.GetUnregister() != nil:
 		closeFDs(fds)
 		vm := req.GetUnregister().GetVmId()
+		s.hmu.Lock()
+		defer s.hmu.Unlock()
 		s.release(vm)
 		if err := s.h.Unregister(vm); err != nil {
 			return handlerRefusal(err)
@@ -169,6 +178,8 @@ func (s *Server) register(sc *serverConn, r *egressv1.Register, fds []int) *egre
 		return refusal(CodeBadRequest, "empty vm_id")
 	}
 
+	s.hmu.Lock()
+	defer s.hmu.Unlock()
 	s.mu.Lock()
 	owner := s.bindings[vm]
 	if owner == sc {
@@ -211,6 +222,8 @@ func (s *Server) release(vm string) {
 // nobody manages.
 func (s *Server) dropConn(sc *serverConn) {
 	_ = sc.c.Close()
+	s.hmu.Lock()
+	defer s.hmu.Unlock()
 	s.mu.Lock()
 	delete(s.conns, sc)
 	owned := make([]string, 0, len(sc.vms))
