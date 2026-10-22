@@ -100,10 +100,11 @@ func TestGateEgressThroughVsock(t *testing.T) {
 	defer srv.Close()
 	client := control.NewClient(sock)
 	defer client.Close()
+	binder := &orderBinder{inner: client}
 
 	var chrootBase string
 	lc := fcLauncherWith(t, func(o *FirecrackerOptions) {
-		o.Egress = client
+		o.Egress = binder
 		chrootBase = o.ChrootBase
 	})
 
@@ -125,12 +126,28 @@ func TestGateEgressThroughVsock(t *testing.T) {
 		t.Fatalf("Restore returned %T, want *firecrackerVM", vm)
 	}
 	pid := fvm.cmd.Process.Pid
-	root, err := os.Readlink(fmt.Sprintf("/proc/%d/root", pid))
+	// Identity, not path: after the jailer's pivot_root the readlink value is "/" or
+	// namespace-relative, never the host path. os.Stat follows the magic link into the
+	// target's root directory, so SameFile compares the directories themselves.
+	procRoot := fmt.Sprintf("/proc/%d/root", pid)
+	readlink, _ := os.Readlink(procRoot)
+	vmmRoot, err := os.Stat(procRoot)
 	if err != nil {
-		t.Fatalf("readlink /proc/%d/root: %v", pid, err)
+		t.Fatalf("stat %s: %v", procRoot, err)
 	}
-	if root != fvm.jailRoot {
-		t.Errorf("firecracker pid %d root = %q, want its own jail %q (the chroot is not in force)", pid, root, fvm.jailRoot)
+	jailInfo, err := os.Stat(fvm.jailRoot)
+	if err != nil {
+		t.Fatalf("stat jail root %s: %v", fvm.jailRoot, err)
+	}
+	hostRoot, err := os.Stat("/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(vmmRoot, hostRoot) {
+		t.Errorf("firecracker pid %d root is the host root (readlink %q): the VMM is not jailed", pid, readlink)
+	}
+	if !os.SameFile(vmmRoot, jailInfo) {
+		t.Errorf("firecracker pid %d root (readlink %q) is not its own jail %s: the chroot is not in force", pid, readlink, fvm.jailRoot)
 	}
 
 	// A VM serves exactly one Run, so both requests go in one guest command, split by a marker.
@@ -148,6 +165,9 @@ func TestGateEgressThroughVsock(t *testing.T) {
 	allowed, denied, found := strings.Cut(out.out(), "==SPLIT==")
 	if !found {
 		t.Fatalf("guest output has no split marker:\n%s", out.out())
+	}
+	if strings.Contains(out.out(), "Connection refused") {
+		t.Fatalf("guest 127.0.0.1:3128 refused the connection: snapshot built without Task 6's egress init (--egress-listen)?\n%s", out.out())
 	}
 	if !strings.Contains(allowed, " 200") || !strings.Contains(allowed, "hello") {
 		t.Errorf("allowed request: want a 200 and hello, got:\n%s", allowed)
@@ -176,6 +196,11 @@ func TestGateEgressThroughVsock(t *testing.T) {
 	if err := vm.Destroy(); err != nil {
 		t.Fatalf("Destroy: %v", err)
 	}
+	// The jail is removed wholesale, so an absent file proves nothing about the listener:
+	// the Unregister reaching the proxy, after the Register, does.
+	if got, want := binder.log(), []string{"register:vm-egress-gate", "unregister:vm-egress-gate"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("egress binder calls = %v, want %v", got, want)
+	}
 	var left []string
 	_ = filepath.WalkDir(chrootBase, func(p string, _ fs.DirEntry, err error) error {
 		if err == nil && strings.HasPrefix(filepath.Base(p), "v.sock_1025") {
@@ -186,6 +211,36 @@ func TestGateEgressThroughVsock(t *testing.T) {
 	if len(left) > 0 {
 		t.Errorf("egress sockets remain under %s after Destroy: %v", chrootBase, left)
 	}
+}
+
+// orderBinder delegates to the real control client and records the call order.
+type orderBinder struct {
+	inner EgressBinder
+	mu    sync.Mutex
+	calls []string
+}
+
+func (b *orderBinder) note(s string) { b.mu.Lock(); b.calls = append(b.calls, s); b.mu.Unlock() }
+func (b *orderBinder) log() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.calls...)
+}
+
+func (b *orderBinder) Register(ctx context.Context, vmID, sid string, grant []byte, ln *os.File) error {
+	err := b.inner.Register(ctx, vmID, sid, grant, ln)
+	if err == nil {
+		b.note("register:" + vmID)
+	}
+	return err
+}
+
+func (b *orderBinder) Unregister(ctx context.Context, vmID string) error {
+	err := b.inner.Unregister(ctx, vmID)
+	if err == nil {
+		b.note("unregister:" + vmID)
+	}
+	return err
 }
 
 func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
