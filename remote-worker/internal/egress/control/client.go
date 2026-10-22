@@ -163,6 +163,14 @@ func (c *Client) Close() error {
 // stream out of step, so the connection is dropped. That makes the server unbind every VM
 // the connection owned, and the heal loop dropConn starts re-registers them within about
 // healMin, with no further call needed.
+//
+// The cost is host-wide, not per call: unbinding a VM makes moca-egress abort its live
+// connections, so ONE call that outlives its ctx -- a Register past egressControlTimeout
+// while moca-egress is slow -- severs every in-flight tunnel on the host (an open git clone
+// fails; new connections work again once the heal lands). The launcher's calls do not
+// inherit the Exec request's cancel, so in practice only a stalled moca-egress gets here.
+// Keeping the connection instead (discard the owed reply, or a request id on the wire) is
+// tracked as a follow-up.
 func (c *Client) do(ctx context.Context, fn func(*clientConn) error) error {
 	if c.closed {
 		return errClientClosed

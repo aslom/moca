@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"syscall"
 	"testing"
@@ -376,8 +377,11 @@ func TestClientReplaysRegistrationsAfterServerRestart(t *testing.T) {
 	acceptOne(t, call.ln)
 }
 
-// I1: one call abandoned by its caller must not cost the other VMs on the host their egress.
-func TestCancelledCallDoesNotUnbindOtherVMs(t *testing.T) {
+// I1: a call whose ctx is already done when it is made is refused before it touches the shared
+// connection, so it costs the other VMs on the host nothing -- vm-1 is never unbound at all.
+// (Cancellation DURING a call, which does drop the connection and relies on the heal loop, is
+// TestCallTimingOutMidFlightHealsTheConnection.)
+func TestAlreadyCancelledCallNeverTouchesTheConnection(t *testing.T) {
 	dir := shortDir(t)
 	ctlPath := filepath.Join(dir, "c.sock")
 	h := newRecorder()
@@ -398,28 +402,13 @@ func TestCancelledCallDoesNotUnbindOtherVMs(t *testing.T) {
 		t.Fatalf("Register with a cancelled ctx = %v, want context.Canceled", err)
 	}
 
-	// Either vm-1 was never unbound, or it is re-registered within the heal bound with no
-	// further client call. In both cases vm-2 must not be bound.
-	deadline := time.After(2 * time.Second)
-	bound := true
-	for settled := false; !settled; {
-		select {
-		case vm := <-h.unregs:
-			if vm != "vm-1" {
-				t.Fatalf("unexpected unregister %q", vm)
-			}
-			bound = false
-		case r := <-h.regs:
-			if r.vmID != "vm-1" {
-				t.Fatalf("server bound %q after a cancelled Register", r.vmID)
-			}
-			bound = true
-		case <-deadline:
-			settled = true
-		}
-	}
-	if !bound {
-		t.Fatal("vm-1 was unbound by vm-2's cancelled call and not re-established within 2s")
+	// Nothing at all reaches the server: no unbind of vm-1, no bind of vm-2.
+	select {
+	case vm := <-h.unregs:
+		t.Fatalf("a call cancelled before it was made unbound %q", vm)
+	case r := <-h.regs:
+		t.Fatalf("a call cancelled before it was made bound %q", r.vmID)
+	case <-time.After(500 * time.Millisecond):
 	}
 	h.mu.Lock()
 	ln := h.listeners["vm-1"]
@@ -456,21 +445,55 @@ func TestCallTimingOutMidFlightHealsTheConnection(t *testing.T) {
 	}
 	// The server finishes vm-2 (the handler was already running), sees the connection gone,
 	// and unbinds both; then the heal loop re-registers vm-1 and only vm-1.
-	held := map[string]bool{"vm-1": true}
-	deadline := time.After(3 * time.Second)
-	for settled := false; !settled; {
-		select {
-		case vm := <-h.unregs:
-			delete(held, vm)
-		case r := <-h.regs:
-			held[r.vmID] = true
-		case <-deadline:
-			settled = true
+	//
+	// Wait for that unbind first: until it lands the handler still holds the ORIGINAL vm-1,
+	// and a check made then would pass even with no heal at all. Then judge by the handler's
+	// own binding table rather than by replaying its regs/unregs channels -- those are two
+	// channels, so a select can take "reg vm-1" before the "unreg vm-1" that preceded it.
+	waitUnreg := func(want string) {
+		t.Helper()
+		deadline := time.After(3 * time.Second)
+		for {
+			select {
+			case vm := <-h.unregs:
+				if vm == want {
+					return
+				}
+			case <-deadline:
+				t.Fatalf("the dropped connection never unbound %s", want)
+			}
 		}
 	}
-	if !held["vm-1"] || held["vm-2"] || len(held) != 1 {
-		t.Fatalf("server holds %v, want exactly vm-1", held)
+	waitUnreg("vm-1")
+	deadline := time.Now().Add(3 * time.Second)
+	var held []string
+	for {
+		held = h.held()
+		if len(held) == 1 && held[0] == "vm-1" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after the drop the server holds %v, want exactly [vm-1] (re-registered by the heal loop)", held)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
+	// And it stays that way: no late Unregister undoes the heal.
+	time.Sleep(300 * time.Millisecond)
+	if held = h.held(); len(held) != 1 || held[0] != "vm-1" {
+		t.Fatalf("after settling the server holds %v, want exactly [vm-1]", held)
+	}
+}
+
+// held is the set of VMs the handler currently has bound, sorted.
+func (r *recorder) held() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, 0, len(r.listeners))
+	for vm := range r.listeners {
+		out = append(out, vm)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // slowRecorder delays Register for the listed VMs.
