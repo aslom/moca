@@ -92,7 +92,10 @@ spec:
             # the entries, which the control plane would otherwise refuse to boot on.
             - name: SH_MODEL_CATALOG_HOSTS
               valueFrom:
-                { configMapKeyRef: { name: moca-settings, key: SH_MODEL_CATALOG_HOSTS, optional: true } }
+                {
+                  configMapKeyRef:
+                    { name: moca-settings, key: SH_MODEL_CATALOG_HOSTS, optional: true },
+                }
           ports:
             - { name: http, containerPort: 8080 }
           securityContext:

@@ -195,10 +195,18 @@ valid_ttl() { [[ -z "$1" || "$1" =~ ^[1-9][0-9]{0,7}$ ]]; }
 # valid_catalog_hosts VALUE: empty (the control plane's default, no extra hosts) or comma-separated
 # bare hostnames. Mirrors main.ts catalogHostsEnv, which trims, lower-cases and skips empty entries
 # but refuses a scheme, port, path or userinfo at BOOT; this keeps to [A-Za-z0-9.-] per entry,
-# which covers every real hostname and none of what that check refuses.
+# which covers every real hostname and none of what that check refuses -- and is stricter: no `_`
+# and no trailing dot, both of which URL.parse would take. Stricter is safe: an operator told to
+# use a bare hostname loses nothing real, while a value this passes but that check refuses
+# crashloops the control plane after the apply.
 valid_catalog_hosts() {
   local raw h
+  local -a _vch_parts
   [[ -z "$1" ]] && return 0
+  # read -r below reads only the first line, so a value with an embedded newline would validate as
+  # that line here while catalogHostsEnv (split on ',' only, trims only the ends) refuses it at
+  # boot. Reject it up front, for a given value and a stored one alike.
+  [[ "$1" == *$'\n'* ]] && return 1
   IFS=',' read -r -a _vch_parts <<<"$1"
   for raw in "${_vch_parts[@]}"; do
     h="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"

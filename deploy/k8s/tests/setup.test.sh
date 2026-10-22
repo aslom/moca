@@ -1296,6 +1296,19 @@ for bad in 'https://gw.example.com' 'gw.example.com:4000' 'gw example.com' 'user
   expect_out "SH_MODEL_CATALOG_HOSTS='$bad'"
   ! grep -q '^kubectl .*apply' "$MOCK_LOG" || fail "SH_MODEL_CATALOG_HOSTS='$bad' reached kubectl apply"
 done
+# An embedded newline: read -r in valid_catalog_hosts sees only the first line, so without the
+# up-front rejection this would validate here and crashloop the control plane at boot.
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_MODEL_CATALOG_HOSTS=$'gw.example.com\nhttps://x'; expect_fail --target kind --skip-build)
+expect_out 'must be comma-separated bare hostnames'
+! grep -q '^kubectl .*apply' "$MOCK_LOG" || fail 'an embedded newline in SH_MODEL_CATALOG_HOSTS reached kubectl apply'
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
+jq '.data.SH_MODEL_CATALOG_HOSTS = "gw.example.com\nhttps://x"' "$MOCK_STATE/moca__ConfigMap__moca-settings.json" >"$TMP/cm" &&
+  mv "$TMP/cm" "$MOCK_STATE/moca__ConfigMap__moca-settings.json"
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_fail --target kind --skip-build)
+expect_out 'moca-settings holds SH_MODEL_CATALOG_HOSTS'
+pass 'an embedded newline in the catalog allow-list is refused, given (before any apply) or stored'
 (export SH_GITHUB_CLIENT_ID=Iv1.a SH_MODEL_CATALOG_HOSTS='GW.Example.Com'; expect_ok --target kind --skip-build)
 [[ "$(setting SH_MODEL_CATALOG_HOSTS)" == 'GW.Example.Com' ]] ||
   fail 'upper-case hostnames were mangled instead of passed through for the control plane to lower-case'
