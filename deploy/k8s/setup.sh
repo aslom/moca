@@ -22,10 +22,9 @@
 # SH_MODEL_CATALOG_HOSTS (every target: comma-separated bare hostnames the control plane's model
 # catalog may contact besides api.anthropic.com and the default inference endpoint; empty, the
 # default, allows only those; a URL, port or path is refused -- the control plane would refuse to
-# boot on it), SH_PUBLIC_HARNESS_URL (kind and ocp-single-without-Routes only: override the default
-# http://127.0.0.1:8080 when 8080 conflicts on the host; the port in the URL also becomes the
-# supervisor port-forward's local port in print_access), SH_SOURCE_ONLY=1 (define the functions and
-# stop, for tests).
+# boot on it), SH_PUBLIC_HARNESS_URL (port-forward-reached targets only: override the default
+# http://127.0.0.1:8080 when 8080 conflicts on the host; the URL's port is also the printed
+# port-forward's local port), SH_SOURCE_ONLY=1 (define the functions and stop, for tests).
 #
 # Idempotent: a re-run converges and never rotates a secret. Inputs are sticky: a re-run keeps every
 # setting, --image, --sandbox-image (ocp), SH_SANDBOX_COUNT, SH_P4_SANDBOX_IDS,
