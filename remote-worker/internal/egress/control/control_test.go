@@ -266,15 +266,10 @@ func TestControlDisconnectUnregistersItsBindings(t *testing.T) {
 	}
 }
 
-func TestClientReplaysRegistrationsAfterServerRestart(t *testing.T) {
-	dir := shortDir(t)
-	ctlPath := filepath.Join(dir, "c.sock")
-	h1 := newRecorder()
-	h1.closeOnUnregister = true // proves the client's dup keeps the socket alive
-	s1 := startServer(t, ctlPath, []int{os.Getuid()}, h1)
-	c := NewClient(ctlPath)
-	defer c.Close()
-
+// restartWithGap registers vm-1, drops the caller's copy of its listener, stops the server
+// and dials vm-1's socket while nobody serves it. It returns the gap connection.
+func restartWithGap(t *testing.T, dir, ctlPath string, c *Client, s1 *Server, h1 *recorder) net.Conn {
+	t.Helper()
 	vmPath, ul, f := vmListener(t, dir, "vm.sock")
 	if err := c.Register(ctx(t), "vm-1", "run-a", nil, f); err != nil {
 		t.Fatal(err)
@@ -296,7 +291,73 @@ func TestClientReplaysRegistrationsAfterServerRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial during gap: %v", err)
 	}
-	defer gap.Close()
+	t.Cleanup(func() { gap.Close() })
+	return gap
+}
+
+// acceptOne accepts on ln within the test's patience.
+func acceptOne(t *testing.T, ln net.Listener) {
+	t.Helper()
+	type res struct {
+		conn net.Conn
+		err  error
+	}
+	ch := make(chan res, 1)
+	go func() { cn, err := ln.Accept(); ch <- res{cn, err} }()
+	r := recv(t, ch)
+	if r.err != nil {
+		t.Fatalf("accept: %v", r.err)
+	}
+	r.conn.Close()
+}
+
+// recvWithin is recv with an explicit bound.
+func recvWithin[T any](t *testing.T, ch <-chan T, d time.Duration, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(d):
+		t.Fatalf("timed out after %s waiting for %s", d, what)
+		panic("unreachable")
+	}
+}
+
+// A restart (systemctl restart moca-egress) is healed by the client on its own: vmpool may be
+// idle for minutes, and a guest dialling in meanwhile must not hang in the backlog.
+func TestClientReplaysWithoutFurtherCallsAfterServerRestart(t *testing.T) {
+	dir := shortDir(t)
+	ctlPath := filepath.Join(dir, "c.sock")
+	h1 := newRecorder()
+	h1.closeOnUnregister = true // proves the client's dup keeps the socket alive
+	s1 := startServer(t, ctlPath, []int{os.Getuid()}, h1)
+	c := NewClient(ctlPath)
+	defer c.Close()
+	restartWithGap(t, dir, ctlPath, c, s1, h1)
+
+	// The new server comes up only after the client has already failed a few redials.
+	time.Sleep(300 * time.Millisecond)
+	h2 := newRecorder()
+	startServer(t, ctlPath, []int{os.Getuid()}, h2)
+	// No client call from here on.
+	call := recvWithin(t, h2.regs, 2500*time.Millisecond, "the automatic replay")
+	if call.vmID != "vm-1" || call.sid != "run-a" {
+		t.Fatalf("replayed %q %q", call.vmID, call.sid)
+	}
+	acceptOne(t, call.ln) // the gap connection
+}
+
+// A call made after a restart still works and does not double-register what the heal loop
+// may already have replayed.
+func TestClientReplaysRegistrationsAfterServerRestart(t *testing.T) {
+	dir := shortDir(t)
+	ctlPath := filepath.Join(dir, "c.sock")
+	h1 := newRecorder()
+	h1.closeOnUnregister = true
+	s1 := startServer(t, ctlPath, []int{os.Getuid()}, h1)
+	c := NewClient(ctlPath)
+	defer c.Close()
+	restartWithGap(t, dir, ctlPath, c, s1, h1)
 
 	h2 := newRecorder()
 	startServer(t, ctlPath, []int{os.Getuid()}, h2)
@@ -307,17 +368,146 @@ func TestClientReplaysRegistrationsAfterServerRestart(t *testing.T) {
 	if call.vmID != "vm-1" || call.sid != "run-a" {
 		t.Fatalf("replayed %q %q", call.vmID, call.sid)
 	}
-	type res struct {
-		conn net.Conn
-		err  error
+	select {
+	case v := <-h2.regs:
+		t.Fatalf("vm-1 replayed twice (second: %q)", v.vmID)
+	case <-time.After(300 * time.Millisecond):
 	}
-	ch := make(chan res, 1)
-	go func() { cn, err := call.ln.Accept(); ch <- res{cn, err} }()
-	r := recv(t, ch)
-	if r.err != nil {
-		t.Fatalf("accept: %v", r.err)
+	acceptOne(t, call.ln)
+}
+
+// I1: one call abandoned by its caller must not cost the other VMs on the host their egress.
+func TestCancelledCallDoesNotUnbindOtherVMs(t *testing.T) {
+	dir := shortDir(t)
+	ctlPath := filepath.Join(dir, "c.sock")
+	h := newRecorder()
+	startServer(t, ctlPath, []int{os.Getuid()}, h)
+	c := NewClient(ctlPath)
+	defer c.Close()
+
+	vmPath, _, f1 := vmListener(t, dir, "vm1.sock")
+	if err := c.Register(ctx(t), "vm-1", "s", nil, f1); err != nil {
+		t.Fatal(err)
 	}
-	r.conn.Close()
+	recv(t, h.regs)
+
+	_, _, f2 := vmListener(t, dir, "vm2.sock")
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := c.Register(cancelled, "vm-2", "s", nil, f2); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Register with a cancelled ctx = %v, want context.Canceled", err)
+	}
+
+	// Either vm-1 was never unbound, or it is re-registered within the heal bound with no
+	// further client call. In both cases vm-2 must not be bound.
+	deadline := time.After(2 * time.Second)
+	bound := true
+	for settled := false; !settled; {
+		select {
+		case vm := <-h.unregs:
+			if vm != "vm-1" {
+				t.Fatalf("unexpected unregister %q", vm)
+			}
+			bound = false
+		case r := <-h.regs:
+			if r.vmID != "vm-1" {
+				t.Fatalf("server bound %q after a cancelled Register", r.vmID)
+			}
+			bound = true
+		case <-deadline:
+			settled = true
+		}
+	}
+	if !bound {
+		t.Fatal("vm-1 was unbound by vm-2's cancelled call and not re-established within 2s")
+	}
+	h.mu.Lock()
+	ln := h.listeners["vm-1"]
+	h.mu.Unlock()
+	conn, err := net.Dial("unix", vmPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	acceptOne(t, ln)
+}
+
+// A call whose ctx expires with the reply still pending loses the connection (the stream is
+// out of step), and the client heals on its own: the server ends up holding vm-1 again.
+func TestCallTimingOutMidFlightHealsTheConnection(t *testing.T) {
+	dir := shortDir(t)
+	ctlPath := filepath.Join(dir, "c.sock")
+	h := &slowRecorder{recorder: newRecorder(), slow: map[string]time.Duration{"vm-2": 500 * time.Millisecond}}
+	startServer(t, ctlPath, []int{os.Getuid()}, h)
+	c := NewClient(ctlPath)
+	defer c.Close()
+
+	_, _, f1 := vmListener(t, dir, "vm1.sock")
+	if err := c.Register(ctx(t), "vm-1", "s", nil, f1); err != nil {
+		t.Fatal(err)
+	}
+	recv(t, h.regs)
+
+	_, _, f2 := vmListener(t, dir, "vm2.sock")
+	short, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := c.Register(short, "vm-2", "s", nil, f2); err == nil {
+		t.Fatal("Register outlived its ctx")
+	}
+	// The server finishes vm-2 (the handler was already running), sees the connection gone,
+	// and unbinds both; then the heal loop re-registers vm-1 and only vm-1.
+	held := map[string]bool{"vm-1": true}
+	deadline := time.After(3 * time.Second)
+	for settled := false; !settled; {
+		select {
+		case vm := <-h.unregs:
+			delete(held, vm)
+		case r := <-h.regs:
+			held[r.vmID] = true
+		case <-deadline:
+			settled = true
+		}
+	}
+	if !held["vm-1"] || held["vm-2"] || len(held) != 1 {
+		t.Fatalf("server holds %v, want exactly vm-1", held)
+	}
+}
+
+// slowRecorder delays Register for the listed VMs.
+type slowRecorder struct {
+	*recorder
+	slow map[string]time.Duration
+}
+
+func (r *slowRecorder) Register(vmID, sid string, grant []byte, ln net.Listener) error {
+	time.Sleep(r.slow[vmID])
+	return r.recorder.Register(vmID, sid, grant, ln)
+}
+
+// Close stops a heal loop that is retrying against a server that never comes back.
+func TestCloseStopsTheHealLoop(t *testing.T) {
+	dir := shortDir(t)
+	ctlPath := filepath.Join(dir, "c.sock")
+	h := newRecorder()
+	s := startServer(t, ctlPath, []int{os.Getuid()}, h)
+	c := NewClient(ctlPath)
+	_, _, f := vmListener(t, dir, "vm.sock")
+	if err := c.Register(ctx(t), "vm-1", "s", nil, f); err != nil {
+		t.Fatal(err)
+	}
+	recv(t, h.regs)
+	s.Close()
+	recv(t, h.unregs)
+	time.Sleep(250 * time.Millisecond) // let the loop make an attempt or two
+	done := make(chan struct{})
+	go func() { _ = c.Close(); close(done) }()
+	recvWithin(t, done, 3*time.Second, "Close to stop the heal loop")
+	c.mu.Lock()
+	healing := c.healing
+	c.mu.Unlock()
+	if healing {
+		t.Fatal("heal loop still marked running after Close")
+	}
 }
 
 func TestOversizeFrameIsRefused(t *testing.T) {

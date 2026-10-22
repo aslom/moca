@@ -31,6 +31,12 @@ func checkLocalAddrs(fn func() ([]netip.Addr, error)) error {
 }
 
 func main() {
+	// Installed first, so a SIGTERM that lands during setup (systemd stopping a unit that is
+	// still starting) is caught here and handled as a clean stop rather than killing the
+	// process with the default action halfway through binding the control socket.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
 	cfg, cc, err := egress.ConfigFromEnv(os.Getenv)
 	if err != nil {
 		log.Fatalf("moca-egress: %v", err)
@@ -47,9 +53,12 @@ func main() {
 		proxy.Close()
 		log.Fatalf("moca-egress: control socket %s: %v", cc.Socket, err)
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
+	if ctx.Err() != nil {
+		// Stopped before we began serving: nothing is registered yet, so close and exit 0.
+		srv.Close()
+		proxy.Close()
+		return
+	}
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve() }()
