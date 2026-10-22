@@ -44,9 +44,11 @@ Description=microvm-worker: ephemeral microVM sandbox tier (moca P4)
 Documentation=https://github.com/rossoctl/moca
 After=network-online.target
 Wants=network-online.target
-# P4.1 egress proxy. Wants=, not Requires=: a moca-egress outage must not stop the worker, but while
-# it is down standby admission fails closed per restore (a VM is never restored without its egress
-# registration). Started first by setup-microvm.sh; see moca-egress.service.
+# P4.1 egress proxy. Wants=, not Requires=: a mid-run moca-egress stop or restart does not stop the
+# worker; while it is down, new standbys fail closed per restore (a VM is never restored without its
+# egress registration). At worker start it is different: the startup probe performs a Register, so a
+# moca-egress outage then fails the worker, and Restart=on-failure retries it until moca-egress is up.
+# Started first by setup-microvm.sh; see moca-egress.service.
 After=moca-egress.service
 Wants=moca-egress.service
 # Spec §6: "KVM unavailable at startup ... Fail the unit at start with an explicit

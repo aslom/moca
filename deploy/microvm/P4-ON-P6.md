@@ -516,17 +516,26 @@ Verified on 2026-09-30:
 `127.0.0.1:3128` -> vsock port 1025 -> `<jail>/run/v.sock_1025` -> `moca-egress`, which allows only the
 hosts in its allowlist and refuses everything else with a named error, never a timeout. The worker
 registers each VM's listener over `/run/moca-egress/control.sock` (the worker runs as root; the
-proxy's `DynamicUser` needs no group). While `moca-egress` is down, restores fail closed.
+proxy's `DynamicUser` needs no group). While `moca-egress` is down, restores fail closed. If it is down
+when the worker starts, the worker's startup probe fails and systemd retries the worker until
+`moca-egress` is up.
 
+- **Snapshot:** a golden snapshot built before P4.1 has no guest egress listener. Rebuild it with
+  `build-snapshot.sh` for egress to work.
 - **Allowlist:** `MOCA_EGRESS_ALLOW` in `/etc/serverless-harness/moca-egress.env`, seeded with
   `api.github.com,github.com,codeload.github.com,objects.githubusercontent.com` (or from
   `MOCA_EGRESS_ALLOW` in the installer's environment, on the first write only). A re-run never
-  overwrites the file. To change it, edit the file, then `systemctl restart moca-egress`. The restart severs in-flight guest connections (open tunnels die and the guest must retry); the worker's
-  control client re-registers live VMs when it reconnects.
-- **Audit:** one JSON line per request (host, method, path without query, status, bytes, decision) in
-  `journalctl -u moca-egress`.
+  overwrites the file. To change it, edit the file, then `systemctl restart moca-egress`. The restart
+  severs open tunnels (the guest must retry). The worker's control client notices the restart on its
+  own and re-registers every live VM within seconds, with no Exec needed; a guest that connects in
+  that gap waits in the socket backlog and is served once the VM is re-registered.
+- **Audit:** one JSON line per request (host, method, path without query, status, `bytes_up`,
+  `bytes_down`, `dial_addr`, decision) in `journalctl -u moca-egress`.
 - **Not in this slice:** no credentials (the guest's `GH_TOKEN` is the placeholder `moca-placeholder`),
   no TLS interception, no cert-pinning escape hatch, and `MOCA_TENANCY=multi` is refused at boot.
+  Because nothing swaps the placeholder yet, tools that send `GH_TOKEN`/`GITHUB_TOKEN` to GitHub (`gh`,
+  `curl -H "Authorization: ..."`) get `401`, even on endpoints that work anonymously. `git` is
+  unaffected: its credential helper answers only a challenge.
 - **No bypass:** the VM has no NIC, so the proxy is the only way out (T7).
 - **Cloud Hypervisor:** egress is Firecracker-only and the worker refuses to start on
   `SH_VMM=cloud-hypervisor` with `MOCA_EGRESS_CONTROL_SOCK` set. Drop it with a unit drop-in

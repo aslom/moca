@@ -15,10 +15,13 @@
 # jail-side v.sock_1025 does not matter to it. It writes nothing to disk (audit goes to the journal),
 # which is what makes ProtectSystem=strict safe. DNS is UDP/TCP over inet, hence AF_INET/AF_INET6.
 #
-# Ordering is Wants= + After=, not Requires=: a moca-egress outage must not stop the worker. While it
-# is down, standby admission fails CLOSED per restore (P4.1 amendment item 7: a restore whose egress
-# registration fails is refused), so no VM ever runs with an unregistered proxy. On restart, the
-# worker's control client reconnects and re-registers every live VM.
+# Ordering is Wants= + After=, not Requires=, so a mid-run moca-egress stop or restart does not stop the
+# worker. It is not outage-proof at worker start: the worker's startup probe performs a Register, so if
+# moca-egress is down then, the worker fails and systemd retries it (Restart=on-failure) until
+# moca-egress is up. A mid-run outage only fails new standbys CLOSED per restore (P4.1 amendment item
+# 7: a restore whose egress registration fails is refused), so no VM ever runs with an unregistered
+# proxy; ready standbys keep their sockets. On restart, the worker's control client notices the lost
+# connection on its own and re-registers every live VM within seconds; open tunnels are severed.
 #
 # SH_VMM=cloud-hypervisor: the worker refuses egress on CHV by name, so such a host must drop
 # MOCA_EGRESS_CONTROL_SOCK from microvm-worker.service with a drop-in (see P4-ON-P6.md).
