@@ -66,6 +66,8 @@ export class FakeKube implements KubeApi {
     if (!cur) throw new Error(`patch of missing ${kind} ${name}`);
     const merge = (a: Record<string, unknown>, b: Record<string, unknown>) => {
       for (const [k, v] of Object.entries(b)) {
+        // A merge patch never names these; skipping them keeps the fake from polluting prototypes.
+        if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue;
         if (v && typeof v === 'object' && !Array.isArray(v) && a[k] && typeof a[k] === 'object') {
           merge(a[k] as Record<string, unknown>, v as Record<string, unknown>);
         } else a[k] = v;
