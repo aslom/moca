@@ -26,7 +26,8 @@
 # cluster is the token authority), and MICROVM_SANDBOX_ID comes from it. No relay drop-in, no podman,
 # no installed P6 needed. The one local change: tier files an earlier mixed run wrote are removed, and
 # the installed units try-restarted, since this host's own P6 is container-only once its only microVM
-# worker attaches elsewhere. Running again without --remote switches back.
+# worker attaches elsewhere. moca-egress (P4.1) is installed and started in both modes, since the
+# worker unit references it. Running again without --remote switches back.
 #
 # Env overrides: SH_UNIT_DIR, SH_ENV_DIR, SH_BIN_DIR, MICROVM_SANDBOX_ID, MICROVM_WORKSPACE_IDLE,
 # MICROVM_SNAPSHOT_DIR, MICROVM_BIN, MOCA_EGRESS_BIN, MOCA_EGRESS_ALLOW (seeds a NEW moca-egress.env
@@ -487,6 +488,7 @@ apply() {
   fi
   # moca-egress first: the worker registers each VM's egress listener with it. A restart (not a
   # stop/start) is enough, the worker's control client re-registers live VMs on reconnect.
+  # The restart severs in-flight guest connections (open tunnels die); new ones work at once.
   systemctl enable moca-egress.service
   if changed_any "$SH_BIN_DIR/moca-egress" "$SH_UNIT_DIR/moca-egress.service" "$SH_ENV_DIR/moca-egress.env"; then
     systemctl restart moca-egress.service

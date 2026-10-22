@@ -239,7 +239,7 @@ check "moca-egress.service present" "$([ -f "$EGRESS" ] && echo yes || echo no)"
 for line in DynamicUser=yes RuntimeDirectory=moca-egress RuntimeDirectoryMode=0750 \
   EnvironmentFile=/etc/serverless-harness/moca-egress.env ExecStart=/usr/local/bin/moca-egress \
   Restart=always RestartSec=1s NoNewPrivileges=yes ProtectSystem=strict ProtectHome=yes PrivateTmp=yes \
-  'CapabilityBoundingSet=' 'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6' LimitNOFILE=65536; do
+  'CapabilityBoundingSet=' 'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' LimitNOFILE=65536; do
   check "moca-egress.service has $line" "$(grep -cxF "$line" "$EGRESS")" "1"
 done
 check "CapabilityBoundingSet= is empty (no capability at all)" \

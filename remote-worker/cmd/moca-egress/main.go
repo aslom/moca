@@ -7,7 +7,9 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"net/netip"
 	"os"
 	"os/signal"
 	"syscall"
@@ -16,9 +18,24 @@ import (
 	"github.com/rossoctl/moca/remote-worker/internal/egress/control"
 )
 
+// checkLocalAddrs runs the host-address lookup once so a sandbox that blocks it
+// (no AF_NETLINK) fails at boot instead of refusing every request.
+func checkLocalAddrs(fn func() ([]netip.Addr, error)) error {
+	if fn == nil {
+		return nil
+	}
+	if _, err := fn(); err != nil {
+		return fmt.Errorf("cannot read host addresses (needed for the private-destination check; is AF_NETLINK allowed?): %w", err)
+	}
+	return nil
+}
+
 func main() {
 	cfg, cc, err := egress.ConfigFromEnv(os.Getenv)
 	if err != nil {
+		log.Fatalf("moca-egress: %v", err)
+	}
+	if err := checkLocalAddrs(cfg.LocalAddrs); err != nil {
 		log.Fatalf("moca-egress: %v", err)
 	}
 	proxy, err := egress.NewProxy(cfg)

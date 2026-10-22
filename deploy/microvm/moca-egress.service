@@ -45,7 +45,9 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 CapabilityBoundingSet=
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# AF_NETLINK: net.InterfaceAddrs reads the host's own addresses over rtnetlink for the
+# private-destination check; without it every request would be refused as destination_private.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 PrivateDevices=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes

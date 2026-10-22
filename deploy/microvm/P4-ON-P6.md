@@ -521,7 +521,7 @@ proxy's `DynamicUser` needs no group). While `moca-egress` is down, restores fai
 - **Allowlist:** `MOCA_EGRESS_ALLOW` in `/etc/serverless-harness/moca-egress.env`, seeded with
   `api.github.com,github.com,codeload.github.com,objects.githubusercontent.com` (or from
   `MOCA_EGRESS_ALLOW` in the installer's environment, on the first write only). A re-run never
-  overwrites the file. To change it, edit the file, then `systemctl restart moca-egress`; the worker's
+  overwrites the file. To change it, edit the file, then `systemctl restart moca-egress`. The restart severs in-flight guest connections (open tunnels die and the guest must retry); the worker's
   control client re-registers live VMs when it reconnects.
 - **Audit:** one JSON line per request (host, method, path without query, status, bytes, decision) in
   `journalctl -u moca-egress`.
