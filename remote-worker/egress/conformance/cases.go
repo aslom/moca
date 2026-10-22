@@ -726,12 +726,14 @@ func connectTunnelOpaque(ctx context.Context, t Target) error {
 }
 
 // plainHTTPStripsProxyAndMocaHeaders: an absolute-form http:// request is
-// forwarded with Proxy-Authorization, the hop-by-hop headers, the headers
-// Connection names and every X-Moca-* header removed, and the upstream's
-// X-Moca-* and Proxy-Authenticate response headers never reach the guest, so
-// an upstream cannot forge a named refusal. Other headers pass both ways.
+// forwarded with every Proxy-* header (not only the hop-by-hop Proxy-Authorization
+// and Proxy-Connection), the hop-by-hop headers, the headers Connection names and
+// every X-Moca-* header removed, and the upstream's X-Moca-* and Proxy-* response
+// headers never reach the guest, so an upstream cannot forge a named refusal.
+// Other headers pass both ways.
 //
-// pinned against: dropping the X-Moca-* loop from scrubHeaders.
+// pinned against: dropping the X-Moca-* loop from scrubHeaders, and dropping its
+// Proxy-* prefix loop (Proxy-Tenant then reaches upstream).
 func plainHTTPStripsProxyAndMocaHeaders(ctx context.Context, t Target) error {
 	var up *httpUpstream
 	return run(ctx, t, func(h *harness) (err error) {
@@ -757,6 +759,8 @@ func plainHTTPStripsProxyAndMocaHeaders(ctx context.Context, t Target) error {
 			"Keep-Alive: timeout=5",
 			"X-Moca-Session: forged",
 			"x-moca-egress-error: forged",
+			"Proxy-Tenant: other",
+			"proxy-remote-user: root",
 			"X-Kept-Request: 1")
 		if err != nil {
 			return err
@@ -766,7 +770,7 @@ func plainHTTPStripsProxyAndMocaHeaders(ctx context.Context, t Target) error {
 		}
 		for k := range r.header {
 			lk := strings.ToLower(k)
-			if strings.HasPrefix(lk, "x-moca-") || lk == "proxy-authenticate" {
+			if strings.HasPrefix(lk, "x-moca-") || strings.HasPrefix(lk, "proxy-") {
 				return fmt.Errorf("guest received upstream response header %s: %v", k, r.header[k])
 			}
 		}
@@ -781,7 +785,7 @@ func plainHTTPStripsProxyAndMocaHeaders(ctx context.Context, t Target) error {
 		for k := range rq.header {
 			lk := strings.ToLower(k)
 			switch {
-			case strings.HasPrefix(lk, "x-moca-"), lk == "proxy-authorization", lk == "proxy-connection",
+			case strings.HasPrefix(lk, "x-moca-"), strings.HasPrefix(lk, "proxy-"),
 				lk == "keep-alive", lk == "x-named-hop":
 				return fmt.Errorf("upstream received request header %s: %v", k, rq.header[k])
 			}

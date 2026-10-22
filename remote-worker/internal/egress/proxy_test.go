@@ -331,7 +331,7 @@ func TestIdentityComesFromTheAcceptingSocket(t *testing.T) {
 	c := dial(t, h.register("vm-2", "run-b"))
 	resp, body := roundTrip(t, c, fmt.Sprintf("GET http://up.test:%d/x HTTP/1.1\r\nHost: up.test:%d\r\n"+
 		"X-Moca-Session: run-a\r\nx-moca-vm: vm-1\r\nProxy-Authorization: Basic Zm9vOmJhcg==\r\n"+
-		"Proxy-Connection: keep-alive\r\n\r\n", up.port, up.port))
+		"Proxy-Connection: keep-alive\r\nProxy-Tenant: other\r\nproxy-remote-user: root\r\n\r\n", up.port, up.port))
 	if resp.StatusCode != 200 || body != "hello " {
 		t.Fatalf("%d %q", resp.StatusCode, body)
 	}
@@ -340,7 +340,7 @@ func TestIdentityComesFromTheAcceptingSocket(t *testing.T) {
 	}
 	r := up.last(t)
 	for k := range r.Header {
-		if strings.HasPrefix(strings.ToLower(k), "x-moca-") || k == "Proxy-Authorization" || k == "Proxy-Connection" {
+		if lk := strings.ToLower(k); strings.HasPrefix(lk, "x-moca-") || strings.HasPrefix(lk, "proxy-") {
 			t.Fatalf("upstream saw %s", k)
 		}
 	}

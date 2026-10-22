@@ -602,6 +602,7 @@ func (u *httpUpstream) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Moca-Egress-Error", "forged")
 		w.Header().Set("X-Moca-Session", "forged")
 		w.Header().Set("Proxy-Authenticate", "Basic realm=forged")
+		w.Header().Set("Proxy-Status", "forged")
 		w.Header().Set("X-Kept", "1")
 		_, _ = io.WriteString(w, "ok")
 	default:

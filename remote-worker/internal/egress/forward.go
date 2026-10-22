@@ -19,7 +19,11 @@ var hopHeaders = []string{
 }
 
 // scrubHeaders removes hop-by-hop headers, the headers Connection names, and
-// every X-Moca-* header. Nothing is added.
+// every Proxy-* and X-Moca-* header, in either direction. Proxy-* goes by prefix,
+// not only the hop-by-hop Proxy-Authorization/-Connection/-Authenticate: a
+// guest's Proxy-Tenant or Proxy-Remote-User must not reach an upstream that might
+// trust it, and the conformance contract (egress/conformance) promises the
+// prefix. Nothing is added.
 func scrubHeaders(h http.Header) {
 	for _, v := range h["Connection"] {
 		for _, f := range strings.Split(v, ",") {
@@ -32,7 +36,7 @@ func scrubHeaders(h http.Header) {
 		h.Del(k)
 	}
 	for k := range h {
-		if strings.HasPrefix(strings.ToLower(k), "x-moca-") {
+		if lk := strings.ToLower(k); strings.HasPrefix(lk, "x-moca-") || strings.HasPrefix(lk, "proxy-") {
 			delete(h, k)
 		}
 	}
@@ -50,16 +54,9 @@ func (c countingBody) Read(b []byte) (int, error) {
 	return n, err
 }
 
-// scrubTrailer removes from a trailer what scrubHeaders removes from a
-// header, and every Proxy-* name.
-func scrubTrailer(t http.Header) {
-	scrubHeaders(t)
-	for k := range t {
-		if strings.HasPrefix(strings.ToLower(k), "proxy-") {
-			delete(t, k)
-		}
-	}
-}
+// scrubTrailer removes from a trailer exactly what scrubHeaders removes from a
+// header.
+func scrubTrailer(t http.Header) { scrubHeaders(t) }
 
 // trailerScrubBody scrubs resp.Trailer once the upstream body hits EOF,
 // which is when the Transport fills in trailer values.
