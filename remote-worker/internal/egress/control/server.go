@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+	"google.golang.org/protobuf/proto"
 
 	egressv1 "github.com/rossoctl/moca/gen/go/egress/v1"
 )
@@ -132,7 +133,7 @@ func (s *Server) serveConn(sc *serverConn) {
 
 func (s *Server) handle(sc *serverConn, body []byte, fds []int) *egressv1.ControlReply {
 	var req egressv1.ControlRequest
-	if err := protoUnmarshal(body, &req); err != nil {
+	if err := proto.Unmarshal(body, &req); err != nil {
 		closeFDs(fds)
 		return refusal(CodeBadRequest, "malformed request")
 	}

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"sync"
@@ -143,9 +144,20 @@ func (c *Client) connect(ctx context.Context) (*net.UnixConn, error) {
 	stop := bindDeadline(ctx, conn)
 	defer stop()
 	for vm, r := range c.live {
-		if err := roundTrip(conn, registerReq(vm, r), r.fd); err != nil {
+		err := roundTrip(conn, registerReq(vm, r), r.fd)
+		var re *RefusalError
+		if errors.As(err, &re) {
+			// The server's verdict on this old entry says nothing about the call in
+			// progress. Keeping it would poison every later call, so evict it.
+			log.Printf("egress control: replay of %s refused (%s); evicting", vm, re.Code)
+			_ = unix.Close(r.fd)
+			delete(c.live, vm)
+			continue
+		}
+		if err != nil {
 			_ = conn.Close()
-			return nil, fmt.Errorf("replay %s: %w", vm, err)
+			// %v, not %w: a transport fault must not look like a refusal to do().
+			return nil, fmt.Errorf("replay %s: %v", vm, err)
 		}
 	}
 	c.conn = conn

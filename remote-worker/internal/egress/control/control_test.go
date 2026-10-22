@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	egressv1 "github.com/rossoctl/moca/gen/go/egress/v1"
 )
 
@@ -301,5 +303,129 @@ func TestOversizeFrameIsRefused(t *testing.T) {
 	case v := <-h.regs:
 		t.Fatalf("handler saw %v", v)
 	default:
+	}
+}
+
+// refuser refuses the listed VMs and otherwise records like recorder.
+type refuser struct {
+	*recorder
+	refuse map[string]bool
+}
+
+func (r *refuser) Register(vmID, sid string, grant []byte, ln net.Listener) error {
+	if r.refuse[vmID] {
+		return errors.New("no")
+	}
+	return r.recorder.Register(vmID, sid, grant, ln)
+}
+
+func TestClientEvictsARefusedReplayAndKeepsServing(t *testing.T) {
+	dir := shortDir(t)
+	ctlPath := filepath.Join(dir, "c.sock")
+	h1 := newRecorder()
+	s1 := startServer(t, ctlPath, []int{os.Getuid()}, h1)
+	c := NewClient(ctlPath)
+	defer c.Close()
+	for _, id := range []string{"vm-1", "vm-2", "vm-3"} {
+		_, _, f := vmListener(t, dir, id+".sock")
+		if id == "vm-3" {
+			s1.Close()
+			h2 := &refuser{newRecorder(), map[string]bool{"vm-1": true}}
+			startServer(t, ctlPath, []int{os.Getuid()}, h2)
+			if err := c.Register(ctx(t), id, "s", nil, f); err != nil {
+				t.Fatalf("register after restart: %v", err)
+			}
+			got := map[string]bool{recv(t, h2.regs).vmID: true, recv(t, h2.regs).vmID: true}
+			if !got["vm-2"] || !got["vm-3"] || got["vm-1"] {
+				t.Fatalf("new handler holds %v", got)
+			}
+			c.mu.Lock()
+			_, stale := c.live["vm-1"]
+			conn := c.conn
+			c.mu.Unlock()
+			if stale {
+				t.Fatal("vm-1 not evicted")
+			}
+			if err := c.Unregister(ctx(t), "vm-other"); err != nil {
+				t.Fatalf("follow-up call: %v", err)
+			}
+			c.mu.Lock()
+			same := c.conn == conn
+			c.mu.Unlock()
+			if !same {
+				t.Fatal("follow-up call redialled")
+			}
+			return
+		}
+		if err := c.Register(ctx(t), id, "s", nil, f); err != nil {
+			t.Fatal(err)
+		}
+		recv(t, h1.regs)
+	}
+}
+
+func TestFdOnAnUnregisterFrameIsClosed(t *testing.T) {
+	dir := shortDir(t)
+	h := newRecorder()
+	startServer(t, filepath.Join(dir, "c.sock"), []int{os.Getuid()}, h)
+	conn, err := net.Dial("unix", filepath.Join(dir, "c.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	vmPath, ul, f := vmListener(t, dir, "vm.sock")
+	req := &egressv1.ControlRequest{Msg: &egressv1.ControlRequest_Unregister{
+		Unregister: &egressv1.Unregister{VmId: "vm-1"}}}
+	if err := roundTrip(conn.(*net.UnixConn), req, int(f.Fd())); err != nil {
+		t.Fatal(err)
+	}
+	// Once every other copy is gone, the socket survives only if the server leaked its fd.
+	f.Close()
+	ul.Close()
+	assertSocketGone(t, vmPath)
+}
+
+func TestClientClosesItsDupAfterUnregister(t *testing.T) {
+	dir := shortDir(t)
+	h := newRecorder()
+	h.closeOnUnregister = true
+	startServer(t, filepath.Join(dir, "c.sock"), []int{os.Getuid()}, h)
+	c := NewClient(filepath.Join(dir, "c.sock"))
+	defer c.Close()
+	vmPath, ul, f := vmListener(t, dir, "vm.sock")
+	if err := c.Register(ctx(t), "vm-1", "s", nil, f); err != nil {
+		t.Fatal(err)
+	}
+	recv(t, h.regs)
+	c.mu.Lock()
+	dup := c.live["vm-1"].fd
+	c.mu.Unlock()
+	if err := c.Unregister(ctx(t), "vm-1"); err != nil {
+		t.Fatal(err)
+	}
+	recv(t, h.unregs)
+	if _, err := unix.FcntlInt(uintptr(dup), unix.F_GETFD, 0); err == nil {
+		t.Fatal("dup still open after Unregister")
+	}
+	f.Close()
+	ul.Close()
+	assertSocketGone(t, vmPath)
+}
+
+// assertSocketGone checks that no process holds the listening socket at path any more:
+// the file may remain, but connecting must be refused.
+func assertSocketGone(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		conn, err := net.Dial("unix", path)
+		if err != nil {
+			return
+		}
+		conn.Close()
+		if time.Now().After(deadline) {
+			t.Fatal("listening socket still alive: an fd leaked")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

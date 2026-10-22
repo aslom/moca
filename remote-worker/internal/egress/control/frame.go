@@ -98,7 +98,10 @@ func readFull(c *net.UnixConn, p []byte, fds *[]int) error {
 					continue // not SCM_RIGHTS
 				}
 				for _, fd := range rights {
-					unix.CloseOnExec(fd) // net's ReadMsgUnix cannot pass MSG_CMSG_CLOEXEC
+					// net's ReadMsgUnix cannot pass MSG_CMSG_CLOEXEC, so there is a short window
+					// between the receive and this call in which a concurrent fork+exec could
+					// inherit the fd. Accepted: moca-egress execs nothing on this path.
+					unix.CloseOnExec(fd)
 				}
 				*fds = append(*fds, rights...)
 			}
@@ -119,5 +122,3 @@ func closeFDs(fds []int) {
 		_ = unix.Close(fd)
 	}
 }
-
-func protoUnmarshal(b []byte, m proto.Message) error { return proto.Unmarshal(b, m) }
