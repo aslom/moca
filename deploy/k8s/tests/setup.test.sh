@@ -941,7 +941,11 @@ jq -e -r '.data.SH_TLS_SECRET' "$MOCK_STATE/moca-single__ConfigMap__moca-setup.j
 jq -e 'has("SH_ROUTE_DOMAIN") or .data.SH_ROUTE_DOMAIN' "$MOCK_STATE/moca-single__ConfigMap__moca-setup.json" >/dev/null 2>&1 ||
   pass 'SH_ROUTE_DOMAIN= cleared the recorded domain'
 expect_out 'kubectl -n moca-single port-forward'
-pass 'ocp-single: SH_ROUTE_DOMAIN and --tls-secret are sticky; empty turns Routes off'
+# The Routes-on run stored the Route URL in moca-settings; the Routes-off re-run must not reuse it.
+# Discovery would otherwise advertise a dead Route host and the printed port extraction would miss.
+[[ "$(jq -r '.data.SH_PUBLIC_HARNESS_URL' "$MOCK_STATE/moca-single__ConfigMap__moca-settings.json")" == http://127.0.0.1:8080 ]] ||
+  fail 'ocp-single Routes-off transition reused the stored https Route URL for SH_PUBLIC_HARNESS_URL'
+pass 'ocp-single: SH_ROUTE_DOMAIN and --tls-secret are sticky; empty turns Routes off (and resets the harness URL)'
 
 reset_state
 (export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=Example.Test; expect_fail --target ocp-single)

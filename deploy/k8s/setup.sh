@@ -718,12 +718,16 @@ public_harness_url() {
   # On port-forward-reached stacks: a given SH_PUBLIC_HARNESS_URL wins (set-but-empty clears back
   # to the default -- the same unset/set-empty convention as every other sticky input); otherwise
   # the stored value in moca-settings; otherwise the default. parse_args validates a given value.
+  # A stored value is accepted only if it still has the port-forward shape: a run that had Routes
+  # on would have stored the Route URL, and reusing that on a Routes-off re-run would advertise a
+  # dead host and break the printed port extraction.
   if is_kind || [[ "$TARGET" == ocp-single && -z "$ROUTE_DOMAIN" ]]; then
     if [[ -n "${SH_PUBLIC_HARNESS_URL+x}" ]]; then
       echo "${SH_PUBLIC_HARNESS_URL:-http://127.0.0.1:8080}"
     else
       local stored
       stored="$(cm_value "$(configmap_json moca-settings)" SH_PUBLIC_HARNESS_URL)"
+      [[ "$stored" =~ ^http://[^/[:space:]]+:[0-9]{1,5}/?$ ]] || stored=''
       echo "${stored:-http://127.0.0.1:8080}"
     fi
   elif [[ "$TARGET" == ocp-single ]]; then echo "https://moca.$ROUTE_DOMAIN"
