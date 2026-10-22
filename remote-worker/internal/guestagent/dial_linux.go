@@ -76,9 +76,17 @@ func DialVsock(cid, port uint32) (net.Conn, error) {
 
 	remote := vsockAddr{cid: cid, port: port}
 	local := vsockAddr{cid: unix.VMADDR_CID_ANY}
-	if svm, ok := localSockaddrVM(int(f.Fd())); ok {
-		local = vsockAddr{cid: svm.CID, port: svm.Port}
-	}
+	// Through rc.Control rather than f.Fd(). Fd() puts the fd back into blocking mode whenever os
+	// itself set it non-blocking; here it does not (the fd is already non-blocking when NewFile
+	// sees it, so os records nothing to undo), but that hinges on the SetNonblock-before-NewFile
+	// order above. A blocking fd would let a pending Read hold it past Close, so a guest client
+	// that resets mid-tunnel would leak a goroutine and the host would never see EOF.
+	// TestDialedVsockCloseUnblocksAPendingRead pins the behaviour, not the call.
+	_ = rc.Control(func(fd uintptr) {
+		if svm, ok := localSockaddrVM(int(fd)); ok {
+			local = vsockAddr{cid: svm.CID, port: svm.Port}
+		}
+	})
 	return &vsockConn{File: f, local: local, remote: remote}, nil
 }
 
