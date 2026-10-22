@@ -108,8 +108,11 @@ func TestGateEgressThroughVsock(t *testing.T) {
 		chrootBase = o.ChrootBase
 	})
 
+	// Restore hardlinks workspace.img into the jail, so the workspace must share a device with
+	// the snapshot -- t.TempDir() is a tmpfs on the rig and fails with EXDEV, as poolFor notes.
+	workspace := sameDeviceSiblingDir(t, envOr("SH_SNAPSHOT_IMAGE_DIR", "/srv/snapshots/swebench-py311"))
 	vm, err := lc.Restore(context.Background(), RestoreRequest{
-		ID: "vm-egress-gate", Key: "egress-gate", WorkspaceDir: t.TempDir(), GuestRAMBytes: 256 << 20,
+		ID: "vm-egress-gate", Key: "egress-gate", WorkspaceDir: workspace, GuestRAMBytes: 256 << 20,
 	})
 	if err != nil {
 		t.Fatalf("Restore: %v", err)
