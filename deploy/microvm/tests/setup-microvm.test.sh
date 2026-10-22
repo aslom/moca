@@ -71,7 +71,7 @@ MOCK
 cat >"$TMP/bin/go" <<'MOCK'
 #!/usr/bin/env bash
 printf 'go %s\n' "$*" >>"$MOCK_LOG"
-while [ $# -gt 0 ]; do [ "$1" = "-o" ] && { printf 'fake-microvm-worker\n' >"$2"; }; shift; done
+while [ $# -gt 0 ]; do [ "$1" = "-o" ] && { printf 'fake-%s\n' "$(basename "$2")" >"$2"; }; shift; done
 MOCK
 # journalctl -o cat _SYSTEMD_INVOCATION_ID=<id>: the worker's attach line, only for the invocation that
 # logged it (MOCK_JOURNAL_INV; default the current one), so a test can stage a line the PREVIOUS
@@ -179,6 +179,34 @@ check "worker stopped, its presence record cleared, then started -- in that orde
   "systemctl stop microvm-worker.service|HDEL sh:sandbox:records moca_microvm_0|systemctl start microvm-worker.service|"
 check "attach verified against the presence records" \
   "$(grep -c 'podman exec sh-redis redis-cli HEXISTS sh:sandbox:records moca_microvm_0' "$MOCK_LOG")" "1"
+
+echo "== moca-egress (P4.1): binary, unit, allowlist seed, start order"
+E="$TMP/etc/moca-egress.env"
+check "egress binary installed" "$(cat "$TMP/usrbin/moca-egress")" "fake-moca-egress"
+check "egress binary is 0755" "$(mode "$TMP/usrbin/moca-egress")" "755"
+check "egress built from its own cmd" "$(grep -c 'go build .*-o .*moca-egress ./cmd/moca-egress$' "$MOCK_LOG")" "1"
+check "egress unit installed verbatim" "$(cmp -s "$DIR/moca-egress.service" "$TMP/units/moca-egress.service" && echo yes || echo no)" "yes"
+check "egress env seeded with the default allowlist" "$(val MOCA_EGRESS_ALLOW "$E")" \
+  "api.github.com,github.com,codeload.github.com,objects.githubusercontent.com"
+check "egress env is 0644 (no secret in it)" "$(mode "$E")" "644"
+check "egress enabled" "$(grep -c '^systemctl enable moca-egress.service$' "$MOCK_LOG")" "1"
+check "egress started before the worker" \
+  "$(grep -nE '^systemctl (re)?start moca-egress.service$|^systemctl start microvm-worker.service$' "$MOCK_LOG" | cut -d: -f2- | tr '\n' '|')" \
+  "systemctl restart moca-egress.service|systemctl start microvm-worker.service|"
+
+echo "== an operator's moca-egress.env survives a re-run; MOCA_EGRESS_ALLOW seeds only a fresh file"
+printf 'MOCA_EGRESS_ALLOW=example.test\n' >"$E"
+: >"$MOCK_LOG"
+check "exit 0" "$(MOCA_EGRESS_ALLOW=other.test run)" "0"
+check "the planted allowlist is untouched" "$(val MOCA_EGRESS_ALLOW "$E")" "example.test"
+check "egress restarted to load the edit" "$(grep -c '^systemctl restart moca-egress.service$' "$MOCK_LOG")" "0"
+printf 'MOCA_EGRESS_ALLOW=api.github.com,github.com,codeload.github.com,objects.githubusercontent.com\n' >"$E"
+rm -f "$E"
+: >"$MOCK_LOG"
+check "exit 0" "$(MOCA_EGRESS_ALLOW=seed.test run)" "0"
+check "a fresh file takes MOCA_EGRESS_ALLOW from the environment" "$(val MOCA_EGRESS_ALLOW "$E")" "seed.test"
+check "and egress is restarted for it, worker untouched" \
+  "$(grep -cE '^systemctl restart moca-egress.service$' "$MOCK_LOG")/$(grep -cE 'systemctl (stop|start) microvm-worker' "$MOCK_LOG")" "1/0"
 
 echo "== a re-run changes nothing"
 before="$(hash_tree)"; : >"$MOCK_LOG"

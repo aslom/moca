@@ -1,0 +1,59 @@
+# deploy/microvm/moca-egress.service
+#
+# Runs cmd/moca-egress (remote-worker/cmd/moca-egress): the host-side egress proxy for the P4
+# microVM tier (P4.1, rossoctl/moca#277). A guest reaches it as 127.0.0.1:3128 -> vsock 1025 ->
+# <jail>/run/v.sock_1025; the worker hands each VM's listening socket over the control socket below.
+#
+# WHY A DynamicUser NEEDS NO GROUP SHARING: moca-egress creates the control socket and chmods it 0600,
+# so only its owner (the dynamic user) can connect by mode. microvm-worker.service has no User=, so it
+# runs as root, and root bypasses file permissions; the server's peer check (SO_PEERCRED) admits UID 0
+# by default (MOCA_EGRESS_CONTROL_UIDS=0). RuntimeDirectoryMode=0750 is therefore enough, root
+# traverses it. If the worker ever drops root, add its UID to MOCA_EGRESS_CONTROL_UIDS and a group to
+# the runtime directory; do not loosen the socket to 0666.
+#
+# moca-egress only accepts on file descriptors it RECEIVES (SCM_RIGHTS), so the ownership of the
+# jail-side v.sock_1025 does not matter to it. It writes nothing to disk (audit goes to the journal),
+# which is what makes ProtectSystem=strict safe. DNS is UDP/TCP over inet, hence AF_INET/AF_INET6.
+#
+# Ordering is Wants= + After=, not Requires=: a moca-egress outage must not stop the worker. While it
+# is down, standby admission fails CLOSED per restore (P4.1 amendment item 7: a restore whose egress
+# registration fails is refused), so no VM ever runs with an unregistered proxy. On restart, the
+# worker's control client reconnects and re-registers every live VM.
+#
+# SH_VMM=cloud-hypervisor: the worker refuses egress on CHV by name, so such a host must drop
+# MOCA_EGRESS_CONTROL_SOCK from microvm-worker.service with a drop-in (see P4-ON-P6.md).
+
+[Unit]
+Description=moca-egress: allowlisted egress proxy for the microVM tier (moca P4.1)
+Documentation=https://github.com/rossoctl/moca
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+RuntimeDirectory=moca-egress
+RuntimeDirectoryMode=0750
+EnvironmentFile=/etc/serverless-harness/moca-egress.env
+ExecStart=/usr/local/bin/moca-egress
+Restart=always
+RestartSec=1s
+LimitNOFILE=65536
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
