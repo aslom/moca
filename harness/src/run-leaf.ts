@@ -188,7 +188,10 @@ export type LeafResult =
   | { status: 'responded'; text: string; usage?: LeafUsage }
   | {
       status: 'failed';
-      reason: 'no_verdict' | 'invalid_verdict' | 'bad_inputs' | 'error' | 'saturated';
+      // `owner_lost` is written only by the run-lease reaper (#558): the worker holding the run
+      // died without finalizing, and a survivor reconciled it. The others are run-leaf's own.
+      reason:
+        'no_verdict' | 'invalid_verdict' | 'bad_inputs' | 'error' | 'saturated' | 'owner_lost';
       message?: string;
     };
 
