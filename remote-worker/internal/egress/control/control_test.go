@@ -6,16 +6,19 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/unix"
 
 	egressv1 "github.com/rossoctl/moca/gen/go/egress/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 type regCall struct {
@@ -188,20 +191,58 @@ func TestRegisterWithANonListeningSocketIsRefused(t *testing.T) {
 	}
 }
 
+// The refusal must be the peer-UID check itself: the server closes a disallowed peer's
+// connection without reading a frame or sending a reply, so the client reads EOF. A dial
+// failure or any other error would not be this, and fails the test. (#582 review)
 func TestServerRefusesAPeerOutsideAllowedUIDs(t *testing.T) {
-	dir := shortDir(t)
-	h := newRecorder()
-	startServer(t, filepath.Join(dir, "c.sock"), []int{os.Getuid() + 1}, h)
-	c := NewClient(filepath.Join(dir, "c.sock"))
-	defer c.Close()
-	_, _, f := vmListener(t, dir, "vm.sock")
-	if err := c.Register(ctx(t), "vm-1", "s", nil, f); err == nil {
-		t.Fatal("register succeeded for a disallowed uid")
-	}
-	select {
-	case v := <-h.regs:
-		t.Fatalf("handler saw %v", v)
-	default:
+	for _, tc := range []struct {
+		name    string
+		allowed []int
+		refused bool
+	}{
+		{"disallowed uid", []int{os.Getuid() + 1}, true},
+		{"allowed uid (control)", []int{os.Getuid()}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := shortDir(t)
+			path := filepath.Join(dir, "c.sock")
+			h := newRecorder()
+			startServer(t, path, tc.allowed, h)
+			conn, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: path, Net: "unix"})
+			if err != nil {
+				t.Fatalf("dial: %v", err) // a dial failure is not the UID check
+			}
+			defer conn.Close()
+			_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+			req := &egressv1.ControlRequest{Msg: &egressv1.ControlRequest_Unregister{
+				Unregister: &egressv1.Unregister{VmId: "vm-x"}}}
+			// A refused peer may already be closed, so a failed write is expected there.
+			werr := writeFrame(conn, req, -1)
+			body, _, rerr := readFrame(conn)
+			if !tc.refused {
+				if werr != nil || rerr != nil {
+					t.Fatalf("allowed peer: write %v, read %v", werr, rerr)
+				}
+				var reply egressv1.ControlReply
+				if err := proto.Unmarshal(body, &reply); err != nil || !reply.GetOk() {
+					t.Fatalf("allowed peer got reply %v (%v)", &reply, err)
+				}
+				return
+			}
+			if rerr == nil {
+				t.Fatalf("disallowed peer got a reply frame (%d bytes)", len(body))
+			}
+			if !errors.Is(rerr, io.EOF) && !errors.Is(rerr, io.ErrUnexpectedEOF) && !errors.Is(rerr, syscall.ECONNRESET) {
+				t.Fatalf("disallowed peer: want the server to close without a reply (EOF), got %v", rerr)
+			}
+			select {
+			case v := <-h.regs:
+				t.Fatalf("handler saw %v", v)
+			case v := <-h.unregs:
+				t.Fatalf("handler saw Unregister(%s) from a disallowed peer", v)
+			default:
+			}
+		})
 	}
 }
 
