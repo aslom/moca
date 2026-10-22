@@ -13,6 +13,7 @@ package main
 import (
 	"flag"
 	"log"
+	"math"
 	"net"
 	"os"
 	"os/signal"
@@ -73,6 +74,9 @@ func main() {
 			log.Fatalf("guest-agent: egress listen %s: %v", *egressListen, err)
 		}
 		defer eln.Close()
+		if *egressPort == 0 || uint64(*egressPort) > math.MaxUint32 {
+			log.Fatalf("guest-agent: -egress-vsock-port %d out of range 1..%d", *egressPort, uint32(math.MaxUint32))
+		}
 		port := uint32(*egressPort)
 		fwd := &guestagent.EgressForwarder{
 			Dial: func() (net.Conn, error) { return guestagent.DialVsock(2, port) },

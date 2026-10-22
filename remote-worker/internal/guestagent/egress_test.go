@@ -12,8 +12,8 @@ import (
 	"time"
 )
 
-// startForwarder serves a forwarder on tcp 127.0.0.1:0 whose Dial connects to a
-// Unix-socket upstream; the returned func gives the forwarder's address.
+// startForwarder serves a forwarder on tcp 127.0.0.1:0 using the given Dial and
+// returns its address and a channel that receives Serve's result.
 func startForwarder(t *testing.T, dial func() (net.Conn, error)) (addr string, done chan error) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -80,6 +80,7 @@ func TestForwarderAnswers502WhenTheHostSideRefuses(t *testing.T) {
 	}
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(time.Second))
+	c.Write([]byte("CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"))
 	b, err := io.ReadAll(c)
 	if err != nil {
 		t.Fatalf("read: %v (got %q)", err, b)
@@ -88,6 +89,9 @@ func TestForwarderAnswers502WhenTheHostSideRefuses(t *testing.T) {
 	for _, want := range []string{
 		"HTTP/1.1 502 Bad Gateway\r\n",
 		"X-Moca-Egress-Error: egress_unreachable\r\n",
+		"Content-Type: text/plain\r\n",
+		"Connection: close\r\n",
+		"Content-Length: 37\r\n",
 		"\r\n\r\negress_unreachable: connection reset\n",
 	} {
 		if !strings.Contains(s, want) {
@@ -184,4 +188,50 @@ func TestForwarderSurvivesManyConcurrentConnections(t *testing.T) {
 		t.Fatalf("not accepting afterwards: %v", err)
 	}
 	c.Close()
+}
+
+type flakyListener struct {
+	net.Listener
+	once sync.Once
+}
+
+func (l *flakyListener) Accept() (net.Conn, error) {
+	var injected bool
+	l.once.Do(func() { injected = true })
+	if injected {
+		return nil, errors.New("accept: too many open files")
+	}
+	return l.Listener.Accept()
+}
+
+func TestForwarderKeepsServingAfterATransientAcceptError(t *testing.T) {
+	ul, dial := unixUpstream(t)
+	go echoServer(ul)
+	real, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &EgressForwarder{Dial: dial, Logf: t.Logf}
+	done := make(chan error, 1)
+	go func() { done <- f.Serve(&flakyListener{Listener: real}) }()
+	c, err := net.Dial("tcp", real.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetDeadline(time.Now().Add(2 * time.Second))
+	c.Write([]byte("ok"))
+	buf := make([]byte, 2)
+	if _, err := io.ReadFull(c, buf); err != nil || string(buf) != "ok" {
+		t.Fatalf("got %q, %v", buf, err)
+	}
+	c.Close()
+	real.Close()
+	select {
+	case err := <-done:
+		if !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("Serve returned %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not return after listener close")
+	}
 }

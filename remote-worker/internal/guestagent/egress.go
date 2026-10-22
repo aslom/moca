@@ -1,12 +1,14 @@
 package guestagent
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"strings"
 	"sync"
+	"time"
 )
 
 // EgressForwarder is the guest side of the P4.1 egress transport (spec §4, §12.1):
@@ -22,14 +24,25 @@ type EgressForwarder struct {
 
 // Serve accepts on ln until it is closed, handling each connection concurrently.
 func (f *EgressForwarder) Serve(ln net.Listener) error {
+	var delay time.Duration
 	for {
 		c, err := ln.Accept()
 		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				continue
+			if errors.Is(err, net.ErrClosed) {
+				return err
 			}
-			return err
+			// Transient (EMFILE, ENFILE, ...): guest code can trigger these by
+			// exhausting fds, and this runs in PID 1, so back off and keep serving.
+			if delay == 0 {
+				delay = 5 * time.Millisecond
+			} else if delay *= 2; delay > time.Second {
+				delay = time.Second
+			}
+			f.logf("guest-agent: egress accept: %v; retrying in %v", err, delay)
+			time.Sleep(delay)
+			continue
 		}
+		delay = 0
 		go f.handle(c)
 	}
 }
@@ -50,6 +63,13 @@ func (f *EgressForwarder) handle(client net.Conn) {
 		fmt.Fprintf(client, "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\n"+
 			"X-Moca-Egress-Error: egress_unreachable\r\nConnection: close\r\n"+
 			"Content-Length: %d\r\n\r\n%s", len(body), body)
+		// Half-close and briefly drain so a client that already sent its request
+		// sees the 502 instead of an RST-induced ECONNRESET.
+		if cw, ok := client.(closeWriter); ok {
+			_ = cw.CloseWrite()
+		}
+		_ = client.SetReadDeadline(time.Now().Add(time.Second))
+		_, _ = io.Copy(io.Discard, io.LimitReader(client, 64<<10))
 		_ = client.Close()
 		return
 	}

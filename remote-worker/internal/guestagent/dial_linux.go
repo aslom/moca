@@ -60,6 +60,10 @@ func DialVsock(cid, port uint32) (net.Conn, error) {
 			connErr = e
 		} else if soErr != 0 {
 			connErr = unix.Errno(soErr)
+		} else if _, e := unix.Getpeername(int(fd)); e == unix.ENOTCONN {
+			return false // spurious wakeup: not connected yet, keep waiting
+		} else if e != nil {
+			connErr = e
 		}
 		return true
 	}); err != nil {
