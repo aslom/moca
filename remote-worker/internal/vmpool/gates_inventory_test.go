@@ -46,6 +46,8 @@ var ciCoveredGates = map[string]string{
 	"TestGateParkedThenResumed":                     "parking/resume bookkeeping is the Pool's own, exercised against the fake launcher and clock",
 	"TestGateReclaimThenRedispatch":                 "Reclaim's contract and re-derivation are Pool-level; the fake launcher is enough",
 	"TestGateReclamationCannotDeleteALiveWorkspace": "the sweep-versus-re-created-key window is Pool bookkeeping plus real directories",
+	"TestGateEgressStandbyFailsClosed":              "Restore's Register failure path runs against a fake jailer script and a fake binder; no VM is needed",
+	"TestGateEgressTeardownOrdering":                "the SIGKILL, Unregister, unlink order is checked on a real sleep process and a real unix socket; no VM is needed",
 }
 
 // partiallyCoveredGates have a half that runs everywhere and a half that needs a rig. The
