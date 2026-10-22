@@ -137,6 +137,22 @@ case "${1-} ${2-}" in
   printf 'SH_CREDENTIAL_KEK=%s=\n' "$(hex 22 | cut -c1-43)"
   printf 'SH_EXCHANGE_TOKEN=%s\n' "$(hex 32)" ;;
 "delete pod") : ;;
+# Turning SH_WORKLOAD_SANDBOXES off: the component's objects, and with --delete-workload-sandboxes the
+# workloads' own. Deleting the StatefulSets clears MOCK_WORKLOAD_STS's stand-in.
+"delete statefulsets,services,secrets") rm -f "$MOCK_STATE/workload-sts" ;;
+"delete deployment/moca-provisioner" | "delete role/moca-provisioner" | "delete validatingadmissionpolicybinding/moca-provisioner") : ;;
+# Workload StatefulSets in moca-sandbox: one name per line in $MOCK_STATE/workload-sts.
+"get statefulsets") [[ ! -f "$MOCK_STATE/workload-sts" ]] || cat "$MOCK_STATE/workload-sts" ;;
+# kube_api_egress's reads. MOCK_NO_VAP=1: a cluster older than 1.30; MOCK_NO_API_ENDPOINTS=1: no addresses.
+"get --raw")
+  if [[ -n "${MOCK_NO_VAP-}" ]]; then echo '{"resources":[{"name":"mutatingwebhookconfigurations"}]}'
+  else echo '{"resources":[{"name":"validatingadmissionpolicies"},{"name":"validatingadmissionpolicybindings"}]}'; fi ;;
+"get service")
+  [[ "$3" == kubernetes && "$ns" == default ]] || { echo "mock kubectl: unhandled: $*" >&2; exit 2; }
+  echo '{"spec":{"clusterIP":"10.96.0.1","clusterIPs":["10.96.0.1"],"ports":[{"name":"https","port":443,"protocol":"TCP"}]}}' ;;
+"get endpointslices")
+  if [[ -n "${MOCK_NO_API_ENDPOINTS-}" ]]; then echo '{"items":[]}'
+  else echo '{"items":[{"endpoints":[{"addresses":["172.18.0.2"]}],"ports":[{"name":"https","port":6443,"protocol":"TCP"}]}]}'; fi ;;
 "rollout status" | "rollout restart") : ;;
 "exec redis-0") echo "${MOCK_RECORDS:-2}" ;;
 "get namespace")
@@ -1370,5 +1386,85 @@ jq '.data.SH_MODEL_CATALOG_HOSTS = "gw.example.com:4000"' "$MOCK_STATE/moca__Con
 (export SH_GITHUB_CLIENT_ID=Iv1.a; expect_fail --target kind --skip-build)
 expect_out "moca-settings holds SH_MODEL_CATALOG_HOSTS='gw.example.com:4000'"
 pass 'a malformed catalog allow-list is refused, given (before any apply) or stored'
+echo "== workload sandboxes (SH_WORKLOAD_SANDBOXES, workload sandboxes spec §4)"
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
+! grep -qE 'workload-sandboxes|moca-provisioner|ResourceQuota|PodTemplate' "$MOCK_STATE/applied-kustomization.yaml" ||
+  fail 'the generated overlay names a workload-sandboxes object with the feature off'
+[[ ! -f "$MOCK_STATE/moca__Secret__moca-provisioner.json" ]] || fail 'a moca-provisioner Secret was made with the feature off'
+! grep -qE 'get (--raw|endpointslices|statefulsets)|delete .*provisioner' "$MOCK_LOG" || fail 'the feature off read or deleted its objects'
+pass 'off by default: no component, quota, provisioner Secret or provisioner reads'
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_WORKLOAD_SANDBOXES=1; expect_ok --target kind --skip-build)
+grep -q '^  - ../../base/workload-sandboxes$' "$MOCK_STATE/applied-kustomization.yaml" || fail 'the component is not listed'
+[[ "$(sv moca moca-provisioner MOCA_ATTACH_PUBLIC_KEYS)" =~ ^[0-9a-f]{16}: ]] || fail 'no attach public keyset'
+[[ -n "$(sv moca moca-provisioner MOCA_ATTACH_PRIVATE_KEY)" ]] || fail 'no attach signing key'
+[[ "$(sv moca moca-provisioner MOCA_PROVISIONER_TOKEN)" =~ ^[0-9a-f]{64}$ ]] || fail 'no provisioner service token'
+[[ "$(sv moca moca-provisioner MOCA_ATTACH_PUBLIC_KEYS)" != "$(sv moca moca-mu1 SH_SESSION_TOKEN_PUBLIC_KEYS)" ]] ||
+  fail 'the attach key is the session-token key'
+grep -q 'rollout status deployment/moca-provisioner' "$MOCK_LOG" || fail 'the provisioner rollout is not awaited'
+attach_key="$(sv moca moca-provisioner MOCA_ATTACH_PRIVATE_KEY)"
+: >"$MOCK_LOG"
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
+grep -q '^  - ../../base/workload-sandboxes$' "$MOCK_STATE/applied-kustomization.yaml" || fail 'SH_WORKLOAD_SANDBOXES is not sticky'
+[[ "$(sv moca moca-provisioner MOCA_ATTACH_PRIVATE_KEY)" == "$attach_key" ]] || fail 'a re-run rotated the attach key'
+! grep -q 'run moca-genkeys' "$MOCK_LOG" || fail 'a re-run regenerated keys it already had'
+grep -qF '{ op: replace, path: /spec/egress, value: [{"to":[{"ipBlock":{"cidr":"10.96.0.1/32"}}],"ports":[{"protocol":"TCP","port":443}]},{"to":[{"ipBlock":{"cidr":"172.18.0.2/32"}}],"ports":[{"protocol":"TCP","port":6443}]}] }' "$MOCK_STATE/applied-kustomization.yaml" ||
+  fail "the provisioner's egress is not the API server's ClusterIP and endpoint"
+grep -qF '{ op: replace, path: /spec/hard/pods, value: "34" }' "$MOCK_STATE/applied-kustomization.yaml" ||
+  fail 'the sandbox pod quota is not SH_SANDBOX_COUNT + 32'
+grep -q 'target: { kind: PodTemplate, name: moca-workload-sandbox }' "$MOCK_STATE/applied-kustomization.yaml" ||
+  fail 'the workload sandbox template gets no image ID on kind'
+grep -q '^    newName: dev.local/moca-remote-worker$' "$MOCK_STATE/applied-kustomization.yaml" ||
+  fail "the component's images are not mapped to kind's loaded tags"
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_WORKLOAD_SANDBOXES=; expect_ok --target kind --skip-build)
+! grep -q 'workload-sandboxes' "$MOCK_STATE/applied-kustomization.yaml" || fail 'SH_WORKLOAD_SANDBOXES= did not turn it off'
+grep -q 'delete -n moca deployment/moca-provisioner' "$MOCK_LOG" || fail 'turning it off left the provisioner running'
+grep -q 'delete validatingadmissionpolicybinding/moca-provisioner' "$MOCK_LOG" || fail 'turning it off left the admission policy'
+! grep -q 'images:' "$MOCK_STATE/applied-kustomization.yaml" || fail 'the off render on kind is not the pre-feature one'
+pass 'SH_WORKLOAD_SANDBOXES=1 adds the component and makes the provisioner Secret once; sticky; empty turns it off and removes the provisioner'
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_WORKLOAD_SANDBOXES=1; expect_ok --target kind --skip-build)
+printf 'statefulset.apps/w-%s\n' "$(printf 'a%.0s' {1..32})" >"$MOCK_STATE/workload-sts"
+: >"$MOCK_LOG"
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_WORKLOAD_SANDBOXES=; expect_fail --target kind --skip-build)
+expect_out 'workload sandboxes still exist in moca-sandbox (1 StatefulSet(s)'
+expect_out 'DELETE /workloads/{id}'
+expect_out '--delete-workload-sandboxes'
+# The namespaces apply comes first on every run; neither the stack nor moca-setup is written.
+! grep -qE '^kubectl .*apply (-k|--server-side)' "$MOCK_LOG" || fail 'a refused disable reached kubectl apply'
+! grep -q '^kubectl .* delete ' "$MOCK_LOG" || fail 'a refused disable deleted something'
+: >"$MOCK_LOG"
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
+grep -q '^  - ../../base/workload-sandboxes$' "$MOCK_STATE/applied-kustomization.yaml" || fail 'a refused disable was recorded'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_WORKLOAD_SANDBOXES=; expect_ok --target kind --skip-build --delete-workload-sandboxes)
+grep -qF 'delete statefulsets,services,secrets -n moca-sandbox -l app=moca-workload-sandbox,app.kubernetes.io/managed-by=moca-provisioner' "$MOCK_LOG" ||
+  fail "--delete-workload-sandboxes did not delete the workloads' objects by label"
+[[ ! -f "$MOCK_STATE/workload-sts" ]] || fail 'the workload StatefulSets are still there'
+! grep -q 'workload-sandboxes' "$MOCK_STATE/applied-kustomization.yaml" || fail '--delete-workload-sandboxes did not turn it off'
+pass 'turning SH_WORKLOAD_SANDBOXES off is refused while workload sandboxes exist, and stays on; --delete-workload-sandboxes deletes them and turns it off'
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_WORKLOAD_SANDBOXES=1 MOCK_NO_API_ENDPOINTS=1; expect_fail --target kind --skip-build)
+expect_out 'has no ClusterIP or no endpoint addresses'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_WORKLOAD_SANDBOXES=1 MOCK_NO_VAP=1; expect_fail --target kind --skip-build)
+expect_out 'needs ValidatingAdmissionPolicy'
+! grep -q '^kubectl .*apply -k' "$MOCK_LOG" || fail 'an undeterminable API server address reached kubectl apply -k'
+pass "SH_WORKLOAD_SANDBOXES=1 refuses a cluster whose API server address it cannot read, or without ValidatingAdmissionPolicy, rather than open the provisioner's egress"
+
+reset_state
+(export SH_WORKLOAD_SANDBOXES=yes; expect_fail --target kind --skip-build)
+expect_out "SH_WORKLOAD_SANDBOXES='yes' must be 1"
+(export SH_WORKLOAD_SANDBOXES=1; expect_fail --target ocp-single)
+expect_out 'SH_WORKLOAD_SANDBOXES=1 needs a separate sandbox namespace'
+! grep -q '^kubectl .*apply' "$MOCK_LOG" || fail 'a refused SH_WORKLOAD_SANDBOXES reached kubectl apply'
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_WORKLOAD_SANDBOXES=1; expect_ok --target ocp)
+[[ "$(grep -c '^oc adm policy add-scc-to-user nonroot-v2' "$MOCK_LOG")" == 7 ]] || fail 'the provisioner and workload sandboxes got no SCC grant on ocp'
+grep -q '^oc adm policy add-scc-to-user nonroot-v2 -z moca-workload-sandbox -n moca-sandbox$' "$MOCK_LOG" ||
+  fail 'the workload sandbox ServiceAccount got no SCC grant on ocp'
+pass 'SH_WORKLOAD_SANDBOXES: a bad value and ocp-single are refused before any apply; ocp grants the provisioner and workload sandboxes their SCC'
 
 echo "setup.test.sh: all passed"

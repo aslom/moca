@@ -36,6 +36,7 @@ export {
   type AttachMintInput,
   type AttachTokenClaims,
 } from './attach-token.js';
+export { ownerScopeFor, workloadKeyFor, workloadRecordKey } from './workload-key.js';
 export { KEK_BYTES, credentialAad, keksFromBase64, open, seal, type Opened } from './envelope.js';
 export {
   CREDENTIAL_NAME_RE,

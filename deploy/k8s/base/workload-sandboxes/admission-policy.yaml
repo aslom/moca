@@ -1,0 +1,106 @@
+# What moca-provisioner may write in moca-sandbox, enforced by the API server whatever its Role allows
+# (spec §4.1). The Role lets it create StatefulSets, and a StatefulSet's pods could mount any Secret
+# in the namespace (moca-relay-attach, the shared pool's token) or run as any ServiceAccount. This
+# refuses, for requests from its ServiceAccount only: an object name that is not a workload's; a
+# Secret other than an Opaque `<wl>-attach`; and a pod template that references any other Secret
+# (volume, projected source, env or envFrom), a projected service-account token, a host path or host
+# namespace, a privileged container or added capability, a claim template, another ServiceAccount,
+# or a mounted service-account token.
+# Deletes are held to the same names, so it cannot delete the shared pool or another Secret either.
+#
+# admissionregistration.k8s.io/v1: Kubernetes 1.30 or newer (OpenShift 4.17 or newer).
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata: { name: moca-provisioner }
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: moca-sandbox } }
+    resourceRules:
+      - apiGroups: [apps]
+        apiVersions: [v1]
+        resources: [statefulsets]
+        operations: [CREATE, UPDATE, DELETE]
+      - apiGroups: ['']
+        apiVersions: [v1]
+        resources: [secrets, services]
+        operations: [CREATE, UPDATE, DELETE]
+  matchConditions:
+    - name: from-the-provisioner
+      expression: request.userInfo.username == 'system:serviceaccount:moca:moca-provisioner'
+  variables:
+    - name: obj
+      expression: "request.operation == 'DELETE' ? oldObject : object"
+    - name: kind
+      expression: request.resource.resource
+    - name: wl
+      expression: "variables.kind == 'secrets' ? variables.obj.metadata.name.replace('-attach', '') : variables.obj.metadata.name"
+    - name: attach
+      expression: variables.wl + '-attach'
+    # An optional field, so the type checker does not look for `type` on Services and StatefulSets.
+    - name: secretType
+      expression: "variables.kind == 'secrets' && request.operation != 'DELETE' ? object.?type.orValue('') : ''"
+    - name: pod
+      expression: "variables.kind == 'statefulsets' ? variables.obj.spec.template.spec : null"
+    - name: containers
+      expression: >-
+        variables.kind == 'statefulsets'
+        ? variables.pod.containers + (has(variables.pod.initContainers) ? variables.pod.initContainers : [])
+        : []
+  validations:
+    - expression: "variables.kind != 'secrets' || variables.obj.metadata.name.matches('^w-[0-9a-f]{32}-attach$')"
+      message: the provisioner may write only Secrets named w-<32 hex>-attach
+    - expression: "variables.kind != 'secrets' || request.operation == 'DELETE' || variables.secretType == 'Opaque'"
+      message: the provisioner may write only Opaque Secrets
+    - expression: "variables.kind == 'secrets' || variables.obj.metadata.name.matches('^w-[0-9a-f]{32}$')"
+      message: the provisioner may write only Services and StatefulSets named w-<32 hex>
+    - expression: >-
+        variables.kind != 'statefulsets' ||
+        (has(variables.obj.metadata.labels) && 'app' in variables.obj.metadata.labels &&
+         variables.obj.metadata.labels['app'] == 'moca-workload-sandbox' &&
+         has(variables.obj.spec.template.metadata.labels) && 'app' in variables.obj.spec.template.metadata.labels &&
+         variables.obj.spec.template.metadata.labels['app'] == 'moca-workload-sandbox')
+      message: a workload StatefulSet and its pods must be labelled app=moca-workload-sandbox
+    - expression: >-
+        variables.kind != 'statefulsets' ||
+        (has(variables.pod.serviceAccountName) && variables.pod.serviceAccountName == 'moca-workload-sandbox' &&
+         has(variables.pod.automountServiceAccountToken) && variables.pod.automountServiceAccountToken == false)
+      message: workload pods run as ServiceAccount moca-workload-sandbox with automountServiceAccountToken false
+    - expression: >-
+        variables.kind != 'statefulsets' ||
+        !((has(variables.pod.hostNetwork) && variables.pod.hostNetwork) ||
+          (has(variables.pod.hostPID) && variables.pod.hostPID) ||
+          (has(variables.pod.hostIPC) && variables.pod.hostIPC))
+      message: workload pods may not use a host namespace
+    # A claim template would let the StatefulSet controller adopt an existing PVC by name.
+    - expression: "variables.kind != 'statefulsets' || !has(variables.obj.spec.volumeClaimTemplates)"
+      message: workload StatefulSets may not carry volumeClaimTemplates
+    - expression: >-
+        variables.kind != 'statefulsets' || !has(variables.pod.volumes) ||
+        variables.pod.volumes.all(v, !has(v.hostPath) &&
+          (!has(v.secret) || (has(v.secret.secretName) && v.secret.secretName == variables.attach)) &&
+          (!has(v.projected) || !has(v.projected.sources) || v.projected.sources.all(s,
+            !has(s.serviceAccountToken) &&
+            (!has(s.secret) || (has(s.secret.name) && s.secret.name == variables.attach)))))
+      message: workload pods may mount no host path, service-account token, or Secret but their own <name>-attach
+    - expression: >-
+        variables.containers.all(c,
+          (!has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) ||
+            (has(e.valueFrom.secretKeyRef.name) && e.valueFrom.secretKeyRef.name == variables.attach))) &&
+          (!has(c.envFrom) || c.envFrom.all(f, !has(f.secretRef) ||
+            (has(f.secretRef.name) && f.secretRef.name == variables.attach))))
+      message: workload containers may read no Secret but their own <name>-attach into env
+    - expression: >-
+        variables.containers.all(c, !has(c.securityContext) ||
+          ((!has(c.securityContext.privileged) || !c.securityContext.privileged) &&
+           (!has(c.securityContext.allowPrivilegeEscalation) || !c.securityContext.allowPrivilegeEscalation) &&
+           (!has(c.securityContext.capabilities) || !has(c.securityContext.capabilities.add) ||
+            size(c.securityContext.capabilities.add) == 0)))
+      message: workload containers may not be privileged, allow privilege escalation, or add capabilities
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata: { name: moca-provisioner }
+spec:
+  policyName: moca-provisioner
+  validationActions: [Deny]

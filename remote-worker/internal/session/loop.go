@@ -7,6 +7,7 @@ import (
 	"log"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	pb "github.com/rossoctl/moca/gen/go/sandbox/v1"
@@ -96,7 +97,16 @@ type Session struct {
 	cfg    Config
 	runner wexec.Runner
 	cache  *Cache
+	// inflight counts admitted Execs whose terminal frame has not been sent, across every
+	// connection, so main.go can rotate its attach token at an idle moment (Idle).
+	inflight atomic.Int64
 }
+
+// Idle reports that no admitted Exec is queued or running. main.go reconnects with a rotated
+// token file only then (workload sandboxes spec §3.1), so a rotation cuts no Exec short. An Exec
+// that arrives between this check and the reconnect fails with "worker disconnected", as any
+// reconnect's would.
+func (s *Session) Idle() bool { return s.inflight.Load() == 0 }
 
 func New(cfg Config, r wexec.Runner) *Session {
 	if cfg.MaxConcurrent <= 0 {
@@ -450,10 +460,12 @@ func (s *Session) Serve(ctx context.Context, st Stream) error {
 				if sl == nil {
 					// Defensive only: the sole path that removes a slot before dequeue
 					// is accept's queue-full branch, and that branch never enqueues.
+					s.inflight.Add(-1)
 					continue
 				}
 				s.runOne(sl.ctx, enqueue, e)
 				c.reg.finish(e.GetReqId())
+				s.inflight.Add(-1)
 			}
 		}()
 	}
@@ -612,9 +624,12 @@ func (s *Session) enqueueAdmitted(
 			"(req_id is only probabilistically unique across replicas — see spec §3.1)", reqID)
 	}
 
+	// Counted before the send, so a pool goroutine that finishes it at once cannot go below zero.
+	s.inflight.Add(1)
 	select {
 	case c.queue <- e:
 	default:
+		s.inflight.Add(-1)
 		// remove, not finish: this caller still holds cancel and calls it outside the
 		// lock, which is the scope this branch has always had.
 		c.reg.remove(reqID)

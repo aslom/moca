@@ -1187,3 +1187,24 @@ func TestSignalledExitIsNotCached(t *testing.T) {
 		t.Errorf("runner calls = %d, want 2: the signalled exit was cached", n)
 	}
 }
+
+// Idle is what main.go's token rotation waits for (workload sandboxes spec §3.1): false from an
+// Exec's admission until its terminal frame, true again after.
+func TestIdleTracksExecsInFlight(t *testing.T) {
+	st := newFakeStream()
+	r := &scriptedRunner{block: make(chan struct{})}
+	s := session.New(testConfig(), r)
+	if !s.Idle() {
+		t.Fatal("a new session is not idle")
+	}
+	serve(t, s, st)
+	waitFor(t, "hello", func() bool { return len(st.sent()) >= 1 })
+	st.exec(&pb.Exec{ReqId: 1, Command: "sleep", Streaming: true})
+	waitFor(t, "the exec to start", func() bool { return r.count() == 1 })
+	if s.Idle() {
+		t.Error("idle with an Exec running")
+	}
+	close(r.block)
+	waitFor(t, "terminal frame", func() bool { return terminalFor(st.sent(), 1) != nil })
+	waitFor(t, "idle after the terminal frame", s.Idle)
+}
