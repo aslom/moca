@@ -3,6 +3,7 @@
 package conformance
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -133,7 +134,7 @@ func forgedSessionHeaderIgnored(ctx context.Context, t Target) error {
 			return err
 		}
 		for _, m := range h.seen {
-			if m["path"] == "/b" && (m["vm_id"] != "vm-b" || m["sid"] != "sid-b" || m["sub"] != nil) {
+			if m["path"] == "/b" && (m["vm_id"] != "vm-b" || m["sid"] != "sid-b" || !noSubject(m)) {
 				return fmt.Errorf("forged headers changed the caller: %v", m)
 			}
 		}
@@ -640,11 +641,14 @@ func unregisterAbortsInflight(ctx context.Context, t Target) error {
 
 // connectTunnelOpaque: after a checked CONNECT the proxy is a byte pipe. Bytes
 // pipelined behind the CONNECT request, bytes that look like HTTP, and binary
-// data all arrive unchanged; a half-close travels through; the tunnel event
+// data all arrive unchanged; a half-close travels upstream while the echo still
+// flows back, ending in a clean EOF; the tunnel event
 // counts the bytes each way and names the dialled address.
 //
 // pinned against: splicing from the raw guest conn instead of the buffered
-// reader in tunnel, which drops the bytes pipelined behind the CONNECT.
+// reader in tunnel, which drops the bytes pipelined behind the CONNECT; and
+// splice closing both conns on the first EOF instead of half-closing, which
+// loses the trailing echo.
 func connectTunnelOpaque(ctx context.Context, t Target) error {
 	var echo *echoUpstream
 	return run(ctx, t, func(h *harness) (err error) {
@@ -689,13 +693,29 @@ func connectTunnelOpaque(ctx context.Context, t Target) error {
 		if err := g.echoThrough(bin); err != nil {
 			return err
 		}
+		// Half-close: a trailing chunk, then CloseWrite at once, without
+		// waiting for its echo. The proxy must carry the EOF upstream and keep
+		// the downstream direction open, so the echo of the chunk still
+		// arrives, followed by a clean EOF (not a reset).
+		trail := make([]byte, 64<<10)
+		if _, err := rand.Read(trail); err != nil {
+			return err
+		}
+		if _, err := g.c.Write(trail); err != nil {
+			return fmt.Errorf("trailing write: %w", err)
+		}
 		if err := g.c.(*net.UnixConn).CloseWrite(); err != nil {
 			return err
 		}
-		if err := g.closedWithin(eventWait); err != nil {
-			return fmt.Errorf("half-close through the tunnel: %w", err)
+		_ = g.c.SetReadDeadline(time.Now().Add(eventWait))
+		rest, err := io.ReadAll(g.br)
+		if err != nil {
+			return fmt.Errorf("half-close through the tunnel: read after CloseWrite ended with %v after %d bytes, want a clean EOF", err, len(rest))
 		}
-		total := len(early) + len(bin)
+		if !bytes.Equal(rest, trail) {
+			return fmt.Errorf("half-close through the tunnel: got %d bytes after CloseWrite, want the %d-byte trailing echo", len(rest), len(trail))
+		}
+		total := len(early) + len(bin) + len(trail)
 		dial := net.JoinHostPort("127.0.0.1", strconv.Itoa(echo.port()))
 		if _, err := h.wait(event{"decision": "tunnel", "status": 200, "host": upName, "method": "CONNECT",
 			"dial_addr": dial, "bytes_up": total, "bytes_down": total}); err != nil {
@@ -890,5 +910,14 @@ func grantRefusedUnderSingle(ctx context.Context, t Target) error {
 		_ = inst.Stop()
 		return errors.New("MOCA_TENANCY=multi: the instance started, want a boot failure")
 	}
+	if !strings.Contains(err.Error(), EnvTenancy) {
+		return fmt.Errorf("MOCA_TENANCY=multi: boot failure %q does not name %s", err, EnvTenancy)
+	}
 	return nil
+}
+
+// noSubject reports whether an event carries no subject: sub absent or "".
+func noSubject(m map[string]any) bool {
+	v, ok := m["sub"]
+	return !ok || v == ""
 }

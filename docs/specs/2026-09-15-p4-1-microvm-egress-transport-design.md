@@ -6,7 +6,7 @@
 **Extends:** [P4 — MicroVM sandbox tier](2026-09-09-p4-microvm-sandbox-design.md)
 **Touches:** Z1 (identity spine) — partially, and behind an interface · MU2 (`sandbox-egress` credential delivery)
 
-> **Amendment, 2026-10-21 — the transport-first slice.** Seven decisions, none reversing the design.
+> **Amendment, 2026-10-21 — the transport-first slice.** Eight decisions, none reversing the design.
 >
 > 1. §12.2 is decided: the proxy is `moca-egress` ([MI1](2026-09-28-moca-multi-user-isolation-design.md)
 >    D4, §2.4, §14). Rossoctl/moca#277 is implemented as MI1 S4's transport and core, without S2.
@@ -27,6 +27,10 @@
 > 7. Standby admission requires `moca-egress`'s `Register` ack when egress is configured. A `moca-egress`
 >    outage therefore stops new standbys as well as egress, which is the fail-closed reading of §6. Ready
 >    standbys are unaffected.
+> 8. The audit event splits MI1 §8.5's `bytes` into `bytes_up` (guest to upstream) and `bytes_down`
+>    (upstream to guest), and adds `dial_addr`, the address actually dialled, which is the evidence for
+>    resolve-once. The conformance suite (`remote-worker/egress/conformance`) pins both, so MI1 §8.5 owes
+>    a matching amendment.
 
 ## 1. What this is, and what it is not
 

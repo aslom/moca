@@ -20,6 +20,32 @@
 // upstreams on 127.0.0.1 (permitted with MOCA_EGRESS_PERMIT_CIDRS where a case
 // needs to reach them), a fresh control socket and a fresh instance.
 //
+// Audit contract. The suite reads these fields of the audit events, and an
+// implementation must emit them as described:
+//
+//   - via: the string "moca-egress" on every event;
+//   - vm_id, sid: the VM and session the conn's listener was registered with;
+//   - sub: the subject, absent or "" when there is none (always, in this slice);
+//   - host: the destination host as requested, normalised (lower case, no
+//     trailing dot); for conn_cap, which is decided before any request is
+//     read, it is not checked;
+//   - method: the request method, CONNECT for a tunnel;
+//   - path: the escaped request path of a plain-HTTP request, with no query,
+//     fragment or userinfo;
+//   - status: the HTTP status the guest was answered with, as a number;
+//   - decision: one of tunnel, forward, destination_denied,
+//     destination_private, conn_cap, request_cap, no_binding,
+//     credential_unavailable, upstream_unreachable, bad_request, aborted;
+//     exactly one aborted event per conn ended by Unregister;
+//   - dial_addr: the ip:port actually dialled. It is the evidence for
+//     resolve-once: the suite requires it to equal the first, checked DNS
+//     answer;
+//   - bytes_up, bytes_down: the bytes carried guest→upstream and
+//     upstream→guest, as numbers. They refine MI1 section 8.5's single bytes
+//     field (P4.1 amendment of 2026-10-21, item 8).
+//
+// Other fields, such as time and credential, are not read.
+//
 // This is the transport slice (P4.1, docs/specs/2026-09-15-p4-1-microvm-egress-transport-design.md):
 // there is no TLS interception and no credential yet. The section 12.3 cases
 // that need interception are deferred to the interception slice (MI1 S2):
