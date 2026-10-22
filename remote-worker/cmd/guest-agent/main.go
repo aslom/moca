@@ -13,6 +13,7 @@ package main
 import (
 	"flag"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -26,6 +27,9 @@ func main() {
 		workDir    = flag.String("workdir", "/workspace", "the mounted workspace; every command's cwd")
 		scratchDir = flag.String("scratch", "/tmp/guest-agent", "guest tmpfs for staged command files")
 		shell      = flag.String("shell", "bash", "shell to park")
+
+		egressListen = flag.String("egress-listen", "", "loopback host:port for the egress forwarder (e.g. 127.0.0.1:3128); empty disables")
+		egressPort   = flag.Uint("egress-vsock-port", 1025, "host vsock port (CID 2) the egress forwarder splices to")
 	)
 	flag.Parse()
 
@@ -57,6 +61,28 @@ func main() {
 	// host destroying the VM after every command, not this process defending
 	// itself.
 	signal.Ignore(syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+
+	if *egressListen != "" {
+		// A configured egress that cannot bind is a broken image; fail loudly so the
+		// snapshot build probe catches it.
+		if err := guestagent.BringUpLoopback(); err != nil {
+			log.Fatalf("guest-agent: egress: %v", err)
+		}
+		eln, err := net.Listen("tcp", *egressListen)
+		if err != nil {
+			log.Fatalf("guest-agent: egress listen %s: %v", *egressListen, err)
+		}
+		defer eln.Close()
+		port := uint32(*egressPort)
+		fwd := &guestagent.EgressForwarder{
+			Dial: func() (net.Conn, error) { return guestagent.DialVsock(2, port) },
+		}
+		go func() {
+			// PID 1: a forwarder failure after startup is logged, never fatal.
+			log.Printf("guest-agent: egress forwarder stopped: %v", fwd.Serve(eln))
+		}()
+		log.Printf("guest-agent: egress %s -> vsock 2:%d", *egressListen, port)
+	}
 
 	ln, err := guestagent.Listen(*listenAddr)
 	if err != nil {

@@ -158,3 +158,39 @@ func TestListenUnknownScheme(t *testing.T) {
 		t.Fatalf("error = %q, want it to say unknown listen scheme", err)
 	}
 }
+
+// TestDialVsockLoopbackRoundTrip dials a listenVsock listener from CID 1 (loopback)
+// through DialVsock and round-trips bytes, including a CloseWrite half-close.
+func TestDialVsockLoopbackRoundTrip(t *testing.T) {
+	requireVsockLoopback(t)
+	const port = 9998
+	ln, err := listenVsock(port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		b, _ := io.ReadAll(c)
+		c.Write(b)
+	}()
+	c, err := DialVsock(unix.VMADDR_CID_LOCAL, port)
+	if err != nil {
+		t.Fatalf("DialVsock: %v", err)
+	}
+	defer c.Close()
+	if _, err := c.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.(interface{ CloseWrite() error }).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := io.ReadAll(c)
+	if err != nil || string(b) != "ping" {
+		t.Fatalf("got %q, %v", b, err)
+	}
+}
