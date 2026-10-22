@@ -111,11 +111,12 @@ export SH_CONTROL_PLANE_URL=http://127.0.0.1:8090
 mocactl login
 ```
 
-The control plane advertises the harness as `http://127.0.0.1:8080`, so the supervisor's forward
-must use local port 8080. `mocactl`
-runs from a checkout ([`packages/mocactl/QUICKSTART.md`](../../packages/mocactl/QUICKSTART.md)). The
-GitHub OAuth app needs **Enable Device Flow** ticked ([`deploy/vm/README.md`](../vm/README.md), "The
-GitHub OAuth app").
+The control plane advertises the harness as `http://127.0.0.1:8080` by default, so the supervisor's
+forward must use local port 8080. If 8080 conflicts with another local service, override it with
+`SH_PUBLIC_HARNESS_URL` at setup time (see §2's sticky settings). `mocactl` runs from a checkout
+([`packages/mocactl/QUICKSTART.md`](../../packages/mocactl/QUICKSTART.md)). The GitHub OAuth app
+needs **Enable Device Flow** ticked ([`deploy/vm/README.md`](../vm/README.md), "The GitHub OAuth
+app").
 
 **Without `SH_GITHUB_CLIENT_ID`,** the control plane is installed with 0 replicas, because nobody
 can log in without one, and `setup.sh` says so. It is rendered that way, not scaled down later, so

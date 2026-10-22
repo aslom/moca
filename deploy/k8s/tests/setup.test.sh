@@ -402,12 +402,45 @@ reset_state
 [[ "$(setting SH_PUBLIC_HARNESS_URL)" == http://127.0.0.1:18080 ]] ||
   fail 'kind: SH_PUBLIC_HARNESS_URL did not override the derived URL'
 expect_out 'port-forward svc/moca-supervisor 18080:8080'
-pass 'kind: SH_PUBLIC_HARNESS_URL overrides the ConfigMap value and the printed port-forward port'
+# Sticky: a plain re-run without the variable keeps the stored URL (the whole point of the fix).
+expect_ok --target kind --skip-build
+[[ "$(setting SH_PUBLIC_HARNESS_URL)" == http://127.0.0.1:18080 ]] ||
+  fail 'kind: a plain re-run reverted the stored URL to the default'
+expect_out 'port-forward svc/moca-supervisor 18080:8080'
+# Set-but-empty clears back to the default.
+(export SH_PUBLIC_HARNESS_URL=; expect_ok --target kind --skip-build)
+[[ "$(setting SH_PUBLIC_HARNESS_URL)" == http://127.0.0.1:8080 ]] ||
+  fail 'kind: SH_PUBLIC_HARNESS_URL= did not clear the stored override'
+pass 'kind: SH_PUBLIC_HARNESS_URL is sticky; a re-run keeps it, set-but-empty clears it'
 
 reset_state
-(export SH_PUBLIC_HARNESS_URL=not-a-url; expect_fail --target kind --skip-build)
-expect_out 'must be an http(s) URL'
-pass 'kind: a non-URL SH_PUBLIC_HARNESS_URL is refused up front'
+for bad in not-a-url https://127.0.0.1:8080 http://127.0.0.1 http://127.0.0.1:8080/path; do
+  (export SH_PUBLIC_HARNESS_URL="$bad"; expect_fail --target kind --skip-build)
+  expect_out 'must be http://HOST:PORT'
+done
+pass 'kind: non-URL, https, missing port, and path all refused up front'
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_PUBLIC_HARNESS_URL=http://127.0.0.1:18080; expect_ok --target ocp-single)
+[[ "$(jq -r '.data.SH_PUBLIC_HARNESS_URL' "$MOCK_STATE/moca-single__ConfigMap__moca-settings.json")" == http://127.0.0.1:18080 ]] ||
+  fail 'ocp-single without Routes: SH_PUBLIC_HARNESS_URL did not reach the ConfigMap'
+expect_out 'port-forward svc/moca-supervisor 18080:8080'
+pass 'ocp-single without Routes: SH_PUBLIC_HARNESS_URL overrides, and the printed port-forward matches'
+
+reset_state
+# A preinstalled TLS Secret, as the ocp-single-with-Routes tests below also stage.
+jq -nc '{apiVersion: "v1", kind: "Secret", metadata: {name: "op-cert", namespace: "moca-single"},
+  type: "kubernetes.io/tls", data: {"tls.crt": "Y3J0", "tls.key": "a2V5"}}' >"$MOCK_STATE/moca-single__Secret__op-cert.json"
+# Given this run alongside SH_ROUTE_DOMAIN -- refused once load_setup_inputs resolves the domain.
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=example.test SH_PUBLIC_HARNESS_URL=http://127.0.0.1:18080;
+  expect_fail --target ocp-single --tls-secret op-cert)
+expect_out 'meaningless when Routes are on'
+# Stored SH_ROUTE_DOMAIN (left by the preceding run), no env override -- same refusal.
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=example.test; expect_ok --target ocp-single --tls-secret op-cert)
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_PUBLIC_HARNESS_URL=http://127.0.0.1:18080;
+  expect_fail --target ocp-single)
+expect_out 'meaningless when Routes are on'
+pass 'ocp-single with Routes: SH_PUBLIC_HARNESS_URL is refused, given or stored SH_ROUTE_DOMAIN'
 
 # hash_of DEPLOYMENT: every settings hash the generated overlay stamps on DEPLOYMENT's pod template,
 # one per line (nothing when there is none). A Deployment may have several patch entries (ocp-single
