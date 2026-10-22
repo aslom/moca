@@ -130,7 +130,7 @@ header has `alg: EdDSA`, `typ: moca-attach+jwt` and a `kid`, with these claims, 
 | Claim | Meaning                                                                            |
 | ----- | ---------------------------------------------------------------------------------- |
 | `iss` | `moca-provisioner`                                                                 |
-| `aud` | `moca-relay-attach`, so it never passes as a session, API or sandbox token         |
+| `aud` | `moca-relay-attach`, never a session, API or sandbox token (seed use: §5.2)        |
 | `wl`  | the workload key: the record's existing Context name, `w-<32 hex>` per reservation |
 | `own` | the owner scope: `recordScope(owner)`, the hash the record key already uses        |
 | `gen` | the workload generation, so a re-created workload gets a different binding         |
@@ -223,11 +223,12 @@ grants (MI1 §4.2 I2). Until then the worker remains the trust root for routing,
 | `secrets`                | create, get, list, update, delete | the workload's attach token, re-minted       |
 | `services`               | create, get, delete               | the StatefulSet's headless governing Service |
 | `pods`                   | get, list                         | readiness, and the reconciler's view         |
-| `persistentvolumeclaims` | get                               | check that a resolved claim exists           |
+| `persistentvolumeclaims` | get                               | until PR 3; see §5.1 for its additions       |
 
 No create on bare pods. The governing Service is headless with no ports, as the shared pool's is:
 a workload sandbox accepts no connections. The provisioner has no rights outside `moca-sandbox`,
-and none on PVCs beyond `get`: Context Service creates and deletes the claim. The control plane,
+and in PR 2 none on PVCs beyond `get`. PR 3 adds create and delete, since the provisioner owns
+the workload's PVC (§5.1, 2026-10-22). The control plane,
 supervisor and relay stay without a Kubernetes token.
 
 Its internal API is reached only by the supervisor's workers (NetworkPolicy):
@@ -298,7 +299,11 @@ which the admission policy refuses (§4.1).
 
 Context Service's side does not move: the Context, the managed PVC `createContext` asks for, its
 helper pods and `CONTEXT_SERVICE_NAMESPACE` stay as they are, and no pod mounts that PVC. A phase 2
-workload therefore holds its revision twice, once in each PVC.
+workload therefore holds its revision twice, once in each PVC, and a `writable` one three times:
+Context Service's PVC, `revision/<revision>` and `moca-workspace`. `workspace.size` must cover the
+bundle's inflated size once for `read-only`, and twice plus the run's own writes for `writable`; the
+worker refuses a size below that with `400 workspace_size_too_small`, before any seed can hit
+`ENOSPC`.
 
 **What PR 3 adds to the provisioner's permissions.** The Role gains create, get and delete on
 `persistentvolumeclaims` in `moca-sandbox`. The admission policy (§4.1) gains PVCs: the
@@ -307,21 +312,34 @@ allowlist, and a workload pod may mount no PVC but its own `<wl>`.
 
 ### 5.2 Seeding
 
-The PVC is filled once, at provisioning, from the Context's frozen revision, through the same
-bundle export phase 1 delivery uses. The worker downloads the bundle as phase 1 does
+The PVC is filled once, at provisioning, from the Context's frozen revision, through the same bundle
+export phase 1 delivery uses. The worker downloads the bundle as phase 1 does
 (`GET /internal/v1/namespaces/{ns}/contexts/{name}/revisions/{sha256}/bundle`, with phase 1's size,
 inflate and entry ceilings) and hands it to the provisioner with
 `PUT /internal/v1/workloads/{name}/{generation}/bundle` before the `PUT` that creates the
-StatefulSet. The provisioner holds it, within a byte budget, until the seed has run. The init
-container fetches it from the provisioner's seed port (`GET /seed/v1/bundle`) with the workload's
-attach token (`SANDBOX_TOKEN_FILE`) as its bearer, and the token's `wl` and `gen` pick the bundle.
-So the provisioner needs no Context Service credential, and the bytes come from the same trusted
-export as in phase 1.
+StatefulSet. The provisioner holds it in memory until the seed has run, within
+`MOCA_PROVISIONER_SEED_BUDGET_BYTES` (default 1 GiB, about four bundles at phase 1's 256 MiB
+ceiling) across all workloads waiting to seed. A `PUT …/bundle` that would exceed it answers
+`503 seed_budget_full` with `Retry-After`, and the worker's activate answers the same, so a burst of
+activations queues on the client instead of growing the provisioner's memory. The init container
+fetches it from the provisioner's seed port (`GET /seed/v1/bundle`) with the workload's attach token
+(`SANDBOX_TOKEN_FILE`) as its bearer, and the token's `wl` and `gen` pick the bundle. So the
+provisioner needs no Context Service credential, and the bytes come from the same trusted export as
+in phase 1.
 
 This adds one NetworkPolicy pair: workload pods may reach the provisioner's seed port, which serves
-only that `GET`. Model code shares the pod's network and holds the token, so it can fetch the same
-bundle, which it can read anyway. A provisioner restart before the seed loses the bundle; the init
-container fails, the record stays `provisioning`, and the next activate retry sends it again.
+only that `GET`. The seed port is a separate listener on its own port (8081), so the NetworkPolicy
+that keeps `/internal/v1` to the supervisor's workers still holds: workload pods reach 8081 only,
+and nothing on 8081 routes to `/internal/v1`. **The attach token gains a second audience here.** The
+seed port accepts it as its bearer, checking `typ`, `iss`, `aud: moca-relay-attach`, `exp` and its
+own key, and only there; no other provisioner route accepts it. That widens the token's use, which
+is acceptable: its only extra power is reading its own workload's bundle. Model code shares the
+pod's network and holds the token, so it can fetch that bundle, which it can read anyway once
+seeded. A provisioner restart before the seed loses the bundle. The seed port then answers
+`404 seed_bundle_missing`, the init container keeps failing, and the provisioner's `GET` reports
+`seed: bundle_missing`, which the worker surfaces on `GET /workloads/{id}` as `provisioning` with
+`error: seed_bundle_missing`. The retry is client-driven: the next `POST /workloads/{id}/activate`
+sends the bundle again, and the error clears once the workload is `ready`.
 
 The PVC's layout:
 
@@ -367,7 +385,13 @@ from following them:
   its target (`revision/<revision>`, or `moca-workspace`) holds anything except a leftover temp dir
   of its own, which it removes. It extracts or copies into a fresh `mkdtemp` directory without
   following symlinks, then renames into place, so a crash mid-seed leaves no half-seeded tree that
-  looks complete.
+  looks complete. The rename is the completed marker: a target that exists is fully seeded.
+- **Only ordinal 0 seeds.** With `count > 1` the StatefulSet's pods start in parallel, all with
+  the annotation, so the init containers seed only in pod `<wl>-0` (its ordinal comes from the pod
+  name through the downward API). Every other pod's init container waits until both targets exist,
+  then exits 0; it never writes. One writer means no mutual exclusion is needed, on RWO or RWX, and
+  a pod that finds its targets already seeded (a restart while the annotation is still set) also
+  exits 0 without writing.
 
 **What writes do not become.** Nothing turns the writable tree back into a revision. The tree lives
 as long as the workload, is not exported, and is gone at `DELETE`. Snapshot and provenance are
@@ -603,6 +627,11 @@ each needs deeper work to confirm it is simpler without losing something we need
 - Re-seed: model code deletes the tree's contents and plants symlinks into `../revision/<rev>/`;
   after a pod restart the revision tree is unchanged, no seed ran (the annotation is gone), and a
   seed into a non-empty `moca-workspace` is refused. The Kind demo (PR 4) is the acceptance gate.
+- Seed: with `count: 2`, only `<wl>-0` writes and `<wl>-1` exits 0 once both targets exist; a full
+  seed budget answers `503 seed_budget_full`; after a provisioner restart, `GET /workloads/{id}`
+  shows `error: seed_bundle_missing` until the next activate; the seed port refuses a session or
+  sandbox token and another workload's attach token, and `/internal/v1` is unreachable from a
+  workload pod.
 
 ---
 
