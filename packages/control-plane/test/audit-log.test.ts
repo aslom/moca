@@ -32,6 +32,7 @@ const ALLOWED_KEYS = new Set([
   'writable',
   'family',
   'graceReplay', // boolean, not customer data; marks a Lua grace-replay rotation
+  'reaper', // boolean; marks a run_finalized written by the run-lease reaper, not the holder (#558)
   'leafSid',
   'attempt',
 ]);

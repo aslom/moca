@@ -7,7 +7,7 @@ import {
   reapOrphanedRuns,
   type RunLeaseStore,
 } from '../src/run-lease';
-import { readResult } from '../src/leaf-result-store';
+import { readResult, toResultRecord, writeResult } from '../src/leaf-result-store';
 
 /**
  * In-memory RunLeaseStore with real TTL semantics: `expires` holds absolute deadlines (ms) and
@@ -87,6 +87,14 @@ describe('runLeaseTimings', () => {
     expect(runLeaseTimings({ SH_RUN_HEARTBEAT_MS: '0', SH_RUN_STALE_MS: 'x' })).toEqual({
       heartbeatMs: 10_000,
       staleMs: 60_000,
+    });
+  });
+  it('clamps staleMs to at least twice the heartbeat interval', () => {
+    // 60000/60000 would make every live run read as dead between beats; the clamp keeps
+    // the reaper from failing them all.
+    expect(runLeaseTimings({ SH_RUN_HEARTBEAT_MS: '60000', SH_RUN_STALE_MS: '60000' })).toEqual({
+      heartbeatMs: 60_000,
+      staleMs: 120_000,
     });
   });
 });
@@ -190,6 +198,61 @@ describe('reapOrphanedRuns', () => {
     expect(record).toMatchObject({ status: 'failed', reason: 'owner_lost', sessionId: 'run/1/i1' });
     expect(store.data.get(runMarkerKey('run-1-i1'))).toBeUndefined();
     expect(store.data.get(runHeartbeatKey('run-1-i1'))).toBeUndefined();
+  });
+
+  it('leaves alone a run that finalized itself before its marker release was lost', async () => {
+    const store: FakeStore = fakeStore();
+    const startedAt = Date.parse('2026-10-21T00:00:00Z');
+    await store.set(
+      runMarkerKey('run-1-i1'),
+      JSON.stringify({ owner: 'pod-1:42', rawSessionId: 'run/1/i1', startedAt }),
+      { EX: 86400 },
+    );
+    // No heartbeat (expired) plus a result the holder wrote after the marker started: the
+    // SIGKILL-between-writeResult-and-release shape. The reaper must not turn it into
+    // owner_lost.
+    await writeResult(
+      store,
+      'run-1-i1',
+      toResultRecord(
+        { status: 'done', verdict: { item_id: 'i1', verdict: 'CLEAR', reason: 'ok' } },
+        'run/1/i1',
+        new Date(startedAt + 1000).toISOString(),
+      ),
+      86400,
+    );
+    const onReap = vi.fn();
+    const reaped = await reapOrphanedRuns(store, { ttlSeconds: 86400, onReap });
+    expect(reaped).toEqual([]);
+    expect(onReap).not.toHaveBeenCalled();
+    expect(await readResult(store, 'run-1-i1')).toMatchObject({ status: 'done' });
+    expect(store.data.get(runMarkerKey('run-1-i1'))).toBeUndefined();
+  });
+
+  it('still reaps over a record older than the marker (a previous run of the same sid)', async () => {
+    const store: FakeStore = fakeStore();
+    const startedAt = Date.parse('2026-10-21T00:00:00Z');
+    await store.set(
+      runMarkerKey('run-1-i1'),
+      JSON.stringify({ owner: 'pod-1:42', rawSessionId: 'run/1/i1', startedAt }),
+      { EX: 86400 },
+    );
+    await writeResult(
+      store,
+      'run-1-i1',
+      toResultRecord(
+        { status: 'done', verdict: { item_id: 'i1', verdict: 'CLEAR', reason: 'ok' } },
+        'run/1/i1',
+        new Date(startedAt - 5000).toISOString(),
+      ),
+      86400,
+    );
+    const reaped = await reapOrphanedRuns(store, { ttlSeconds: 86400 });
+    expect(reaped).toEqual([{ sid: 'run-1-i1', rawSessionId: 'run/1/i1', owner: 'pod-1:42' }]);
+    expect(await readResult(store, 'run-1-i1')).toMatchObject({
+      status: 'failed',
+      reason: 'owner_lost',
+    });
   });
 
   it('skips a run whose heartbeat is still alive', async () => {

@@ -1,4 +1,4 @@
-import { writeResult, toResultRecord, type RedisLike } from './leaf-result-store.js';
+import { writeResult, toResultRecord, readResult, type RedisLike } from './leaf-result-store.js';
 
 /**
  * In-flight markers for sync /runs leaves (#558). A sync run holds its entire lifecycle in the
@@ -39,8 +39,9 @@ export interface RunLeaseTimings {
   heartbeatMs: number;
   /**
    * The heartbeat key's TTL: how long a silent holder still reads as alive. Generous on purpose
-   * (6x the heartbeat interval) — a false-positive reap writes a failure a live run then has to
-   * overwrite, while a late reap only delays the reconciliation by the same margin.
+   * (default 6x the heartbeat interval; runLeaseTimings clamps it to at least 2x) — a
+   * false-positive reap writes a failure a live run then has to overwrite, while a late reap
+   * only delays the reconciliation by the same margin.
    */
   staleMs: number;
 }
@@ -53,10 +54,13 @@ function positiveInt(env: NodeJS.ProcessEnv, name: string, def: number): number 
 }
 
 export function runLeaseTimings(env: NodeJS.ProcessEnv = process.env): RunLeaseTimings {
-  return {
-    heartbeatMs: positiveInt(env, 'SH_RUN_HEARTBEAT_MS', 10_000),
-    staleMs: positiveInt(env, 'SH_RUN_STALE_MS', 60_000),
-  };
+  const heartbeatMs = positiveInt(env, 'SH_RUN_HEARTBEAT_MS', 10_000);
+  // `staleMs` must exceed the heartbeat interval or every live run reads as dead between beats
+  // and the reaper fails them all — an operator who raises the heartbeat to the stale default
+  // (60000/60000) hits exactly that. Clamped to 2x rather than warned about at boot: the
+  // failure is silent and total, and a clamp only ever makes reconciliation slower, never wrong.
+  const staleMs = Math.max(positiveInt(env, 'SH_RUN_STALE_MS', 60_000), 2 * heartbeatMs);
+  return { heartbeatMs, staleMs };
 }
 
 /**
@@ -217,6 +221,26 @@ export async function reapOrphanedRuns(
       rawSessionId: typeof marker.rawSessionId === 'string' ? marker.rawSessionId : sid,
       owner: typeof marker.owner === 'string' ? marker.owner : 'unknown',
     };
+    // A result written at or after the marker's start is the run's OWN final word: the holder
+    // finished (or a later re-run of the same sid did) and only the marker's release was lost —
+    // a SIGKILL between writeResult and release, or a best-effort DEL that failed. Reaping it
+    // would overwrite a `done`/`solved`/`responded` record with a failure and emit a second
+    // run_finalized, so the marker is dropped and nothing is reported. Comparing `ts`, not mere
+    // existence, is what keeps a re-run of the same session id working: an OLDER record (from
+    // before this marker) may still be replaced. Two unreadable cases sit on the safe side
+    // each: a record whose `ts` cannot be parsed reads as older (reap), while a marker with no
+    // readable `startedAt` cannot attribute any record to this run, so any record present
+    // suppresses the write.
+    const existing = await readResult(store, sid);
+    const startedAt = typeof marker.startedAt === 'number' ? marker.startedAt : undefined;
+    if (existing) {
+      const at = Date.parse(existing.ts);
+      if (startedAt === undefined || (Number.isFinite(at) && at >= startedAt)) {
+        await store.del(runHeartbeatKey(sid)).catch(() => {});
+        console.log(`[run-lease] run ${sid} already finalized; dropping its stale marker`);
+        continue;
+      }
+    }
     try {
       await writeResult(
         store,
