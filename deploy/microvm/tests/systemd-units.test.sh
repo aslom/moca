@@ -238,13 +238,20 @@ EGRESS="$DIR/moca-egress.service"
 check "moca-egress.service present" "$([ -f "$EGRESS" ] && echo yes || echo no)" "yes"
 for line in DynamicUser=yes RuntimeDirectory=moca-egress RuntimeDirectoryMode=0750 \
   EnvironmentFile=/etc/serverless-harness/moca-egress.env ExecStart=/usr/local/bin/moca-egress \
-  Restart=always RestartSec=1s NoNewPrivileges=yes ProtectSystem=strict ProtectHome=yes PrivateTmp=yes \
+  Type=notify Restart=always RestartSec=3s TimeoutStartSec=30s StartLimitIntervalSec=120 StartLimitBurst=5 \
+  NoNewPrivileges=yes ProtectSystem=strict ProtectHome=yes PrivateTmp=yes \
   'CapabilityBoundingSet=' 'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' LimitNOFILE=65536; do
   check "moca-egress.service has $line" "$(grep -cxF "$line" "$EGRESS")" "1"
 done
 check "CapabilityBoundingSet= is empty (no capability at all)" \
   "$(grep -E '^CapabilityBoundingSet=' "$EGRESS" | cut -d= -f2-)" ""
 check "no User=root in moca-egress.service" "$(grep -cE '^User=' "$EGRESS")" "0"
+# The start limits must sit in [Unit]: systemd ignores them in [Service] (see microvm-worker.service).
+egress_unit_section="$(awk '/^\[Unit\]/{u=1;next} /^\[/{u=0} u' "$EGRESS")"
+check "moca-egress StartLimit keys are in [Unit]" \
+  "$(printf '%s\n' "$egress_unit_section" | grep -cE '^StartLimit(IntervalSec|Burst)=')" "2"
+check "moca-egress sends READY=1 itself (Type=notify needs the binary to notify)" \
+  "$(grep -c 'sdNotify("READY=1")' "$DIR/../../remote-worker/cmd/moca-egress/main.go")" "1"
 check "worker is ordered after moca-egress" "$(grep -cxF 'After=moca-egress.service' "$SERVICE")" "1"
 check "worker Wants= (not Requires=) moca-egress" \
   "$(grep -cxF 'Wants=moca-egress.service' "$SERVICE")/$(grep -cE '^Requires=.*moca-egress' "$SERVICE")" "1/0"

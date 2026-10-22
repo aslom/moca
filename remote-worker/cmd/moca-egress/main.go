@@ -63,6 +63,12 @@ func main() {
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve() }()
 	log.Printf("moca-egress: serving %d allowlist entries, control socket %s", len(cfg.Allow), cc.Socket)
+	// The control socket is bound (NewServer listened on it above), so a worker ordered After=
+	// this Type=notify unit can connect from here on. A failed notify is logged, not fatal:
+	// systemd then fails the start on its own timeout, which names this unit.
+	if err := sdNotify("READY=1"); err != nil {
+		log.Printf("moca-egress: %v", err)
+	}
 
 	select {
 	case <-ctx.Done():

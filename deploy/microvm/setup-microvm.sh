@@ -31,7 +31,8 @@
 #
 # Env overrides: SH_UNIT_DIR, SH_ENV_DIR, SH_BIN_DIR, MICROVM_SANDBOX_ID, MICROVM_WORKSPACE_IDLE,
 # MICROVM_SNAPSHOT_DIR, MICROVM_BIN, MOCA_EGRESS_BIN, MOCA_EGRESS_ALLOW (seeds a NEW moca-egress.env
-# only), MICROVM_ATTACH_TIMEOUT, MICROVM_ATTACH_SETTLE (--remote: seconds
+# only), MOCA_EGRESS_READY_TIMEOUT (seconds to wait for its control socket, default 30),
+# MICROVM_ATTACH_TIMEOUT, MICROVM_ATTACH_SETTLE (--remote: seconds
 # an attach must hold before it counts, at least 1) -- defaults below -- and
 # MICROVM_MAX_COMMITTED_MB (unset by default): a VM-memory budget in MiB for a host smaller than the
 # shipped unit's 24 GiB, written as a drop-in that also lowers the unit's AssertMemory to match -- and
@@ -53,6 +54,10 @@ SANDBOX_ID_GIVEN="${MICROVM_SANDBOX_ID+x}" # --remote refuses a given id that di
 : "${MICROVM_SNAPSHOT_DIR:=/srv/snapshots/default}"
 : "${MICROVM_ATTACH_TIMEOUT:=60}"
 : "${MICROVM_ATTACH_SETTLE:=5}"
+# moca-egress's control socket (MOCA_EGRESS_CONTROL_SOCK in microvm-worker.service) and how long to
+# wait for it after starting the unit: overridable only so the tests can point it at a temp dir.
+: "${MOCA_EGRESS_SOCKET:=/run/moca-egress/control.sock}"
+: "${MOCA_EGRESS_READY_TIMEOUT:=30}"
 
 RELAY_DROPIN="50-moca-microvm.conf"
 WORKER_DROPIN="50-moca-p6.conf"
@@ -154,6 +159,8 @@ preflight() {
   fi
   [[ "$MICROVM_ATTACH_TIMEOUT" =~ ^[1-9][0-9]*$ ]] ||
     die "MICROVM_ATTACH_TIMEOUT='$MICROVM_ATTACH_TIMEOUT' must be a whole number of seconds, at least 1"
+  [[ "$MOCA_EGRESS_READY_TIMEOUT" =~ ^[1-9][0-9]*$ ]] ||
+    die "MOCA_EGRESS_READY_TIMEOUT='$MOCA_EGRESS_READY_TIMEOUT' must be a whole number of seconds, at least 1"
   # At least 1: the hold must outlast the worker's first reconnect backoff (at most 750ms), or a
   # rejected token's attached -> stream ended -> attached cycle could fall outside the window.
   [[ "$MICROVM_ATTACH_SETTLE" =~ ^[1-9][0-9]*$ ]] ||
@@ -491,11 +498,13 @@ apply() {
   # The restart severs in-flight guest connections (open tunnels die); new ones work at once.
   systemctl enable moca-egress.service
   if changed_any "$SH_BIN_DIR/moca-egress" "$SH_UNIT_DIR/moca-egress.service" "$SH_ENV_DIR/moca-egress.env"; then
+    systemctl reset-failed moca-egress.service || true
     systemctl restart moca-egress.service
   elif ! systemctl is-active --quiet moca-egress.service; then
     systemctl reset-failed moca-egress.service || true
     systemctl start moca-egress.service
   fi
+  wait_egress_ready
   systemctl enable microvm-worker.service
   if ((relay_restart)) || changed_any "$SH_BIN_DIR/microvm-worker" "$SH_UNIT_DIR/microvm-worker.service" \
     "$SH_UNIT_DIR/microvm-vms.slice" "$SH_UNIT_DIR/microvm-worker.service.d/$WORKER_DROPIN" \
@@ -511,6 +520,21 @@ apply() {
     systemctl reset-failed microvm-worker.service || true
     start_worker
   fi
+}
+
+# wait_egress_ready: the worker's startup probe Registers over moca-egress's control socket, so a
+# moca-egress that exits at boot (a bad moca-egress.env) would otherwise surface much later, as the
+# worker failing to attach, with this script pointing at the wrong unit. The unit is Type=notify, so
+# a successful start already means the socket is bound; this wait is the belt to that, and it is
+# what names moca-egress when the start did not succeed.
+wait_egress_ready() {
+  local deadline=$((SECONDS + MOCA_EGRESS_READY_TIMEOUT))
+  until [[ -S "$MOCA_EGRESS_SOCKET" ]]; do
+    if ((SECONDS >= deadline)); then
+      die "moca-egress did not bind $MOCA_EGRESS_SOCKET within ${MOCA_EGRESS_READY_TIMEOUT}s, so the worker could not register its VMs; the reason is in: journalctl -u moca-egress (often a bad $SH_ENV_DIR/moca-egress.env). Fix it and re-run"
+    fi
+    sleep 1
+  done
 }
 
 # start_worker drops the worker's presence record BEFORE starting it, so verify_attached can only

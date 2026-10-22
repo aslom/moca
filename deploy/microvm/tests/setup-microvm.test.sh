@@ -114,8 +114,13 @@ reset_host() { # a fresh P6 install: relay.env + its three units, a snapshot, no
   printf '{}\n' >"$TMP/snap/manifest.json"
   : >"$MOCK_LOG"
 }
+# moca-egress's control socket: a real Unix socket, bound once for the whole file, so every run sees
+# a ready proxy. The egress-readiness section below points the script elsewhere to test the failure.
+EGRESS_SOCK="$TMP/egress.sock"
+python3 -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$EGRESS_SOCK"
 export SH_UNIT_DIR="$TMP/units" SH_ENV_DIR="$TMP/etc" SH_BIN_DIR="$TMP/usrbin" \
-  MICROVM_SNAPSHOT_DIR="$TMP/snap" MICROVM_ATTACH_TIMEOUT=1 MICROVM_ATTACH_SETTLE=1
+  MICROVM_SNAPSHOT_DIR="$TMP/snap" MICROVM_ATTACH_TIMEOUT=1 MICROVM_ATTACH_SETTLE=1 \
+  MOCA_EGRESS_SOCKET="$EGRESS_SOCK" MOCA_EGRESS_READY_TIMEOUT=2
 run() { bash "$SCRIPT" >"$TMP/run.log" 2>&1; echo $?; }
 val() { grep -E "^$1=" "$2" | tail -1 | cut -d= -f2-; }
 hash_tree() { (cd "$TMP" && find units etc usrbin -type f -exec cksum {} + | sort); }
@@ -199,7 +204,8 @@ printf 'MOCA_EGRESS_ALLOW=example.test\n' >"$E"
 : >"$MOCK_LOG"
 check "exit 0" "$(MOCA_EGRESS_ALLOW=other.test run)" "0"
 check "the planted allowlist is untouched" "$(val MOCA_EGRESS_ALLOW "$E")" "example.test"
-check "egress restarted to load the edit" "$(grep -c '^systemctl restart moca-egress.service$' "$MOCK_LOG")" "0"
+check "an operator-edited env is not overwritten and does not restart moca-egress" \
+  "$(grep -c '^systemctl restart moca-egress.service$' "$MOCK_LOG")" "0"
 rm -f "$E"
 : >"$MOCK_LOG"
 check "exit 0" "$(MOCA_EGRESS_ALLOW=seed.test run)" "0"
@@ -649,6 +655,20 @@ check "mixed, SH_SANDBOX_DEFAULT_TIER=microvm: not warned (it is recorded)" "$(g
 unset MOCK_PODMAN_PS MOCK_RECORDS
 check "mixed -> P4-only: the stored microvm default is named as dropped" \
   "$(run >/dev/null; grep -c "stored SH_SANDBOX_DEFAULT_TIER=microvm in $TE is dropped with it" "$TMP/run.log")" "1"
+
+echo "== moca-egress readiness: setup waits for the control socket and names moca-egress if it never comes"
+reset_host
+: >"$MOCK_LOG"
+check "exit 1 when the control socket never appears" \
+  "$(MOCA_EGRESS_SOCKET="$TMP/no-such.sock" MOCA_EGRESS_READY_TIMEOUT=1 run)" "1"
+check "the failure names journalctl -u moca-egress" \
+  "$(grep -cF 'journalctl -u moca-egress' "$TMP/run.log")" "1"
+check "and the worker is never started against a missing proxy" \
+  "$(grep -cE 'systemctl (start|restart) microvm-worker' "$MOCK_LOG")" "0"
+check "a changed moca-egress is reset-failed before its restart (it may have hit its start limit)" \
+  "$(grep -nE 'systemctl (reset-failed|restart) moca-egress.service' "$MOCK_LOG" | head -2 | sed -E 's/^[0-9]+:systemctl ([a-z-]+).*/\1/' | tr '\n' ' ')" "reset-failed restart "
+check "a non-numeric MOCA_EGRESS_READY_TIMEOUT is refused" "$(MOCA_EGRESS_READY_TIMEOUT=soon run)" "1"
+reset_host
 
 if [ "$fails" -eq 0 ]; then echo "PASS"; else echo "FAIL ($fails)"; fi
 exit "$fails"

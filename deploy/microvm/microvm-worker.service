@@ -47,8 +47,11 @@ Wants=network-online.target
 # P4.1 egress proxy. Wants=, not Requires=: a mid-run moca-egress stop or restart does not stop the
 # worker; while it is down, new standbys fail closed per restore (a VM is never restored without its
 # egress registration). At worker start it is different: the startup probe performs a Register, so a
-# moca-egress outage then fails the worker, and Restart=on-failure retries it until moca-egress is up.
-# Started first by setup-microvm.sh; see moca-egress.service.
+# moca-egress that is down then fails the worker. Restart=on-failure retries it, but only within the
+# start limit below (5 per 300 s); past that the worker stays `failed` until
+# `systemctl reset-failed microvm-worker` (setup-microvm.sh does that on a re-run). moca-egress is
+# Type=notify, so After= already waits for its control socket. Started first by setup-microvm.sh;
+# see moca-egress.service.
 After=moca-egress.service
 Wants=moca-egress.service
 # Spec §6: "KVM unavailable at startup ... Fail the unit at start with an explicit

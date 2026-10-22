@@ -516,9 +516,14 @@ Verified on 2026-09-30:
 `127.0.0.1:3128` -> vsock port 1025 -> `<jail>/run/v.sock_1025` -> `moca-egress`, which allows only the
 hosts in its allowlist and refuses everything else with a named error, never a timeout. The worker
 registers each VM's listener over `/run/moca-egress/control.sock` (the worker runs as root; the
-proxy's `DynamicUser` needs no group). While `moca-egress` is down, restores fail closed. If it is down
-when the worker starts, the worker's startup probe fails and systemd retries the worker until
-`moca-egress` is up.
+proxy's `DynamicUser` needs no group). While `moca-egress` is down, restores fail closed.
+
+- **If it is down when the worker starts:** the worker's startup probe fails, and systemd retries the
+  worker only within its start limit (5 per 300 s). A `moca-egress` that keeps exiting (for example a
+  bad `moca-egress.env`) reaches `failed` too, after 5 starts in 120 s. `setup-microvm.sh` waits for
+  the control socket and fails naming `journalctl -u moca-egress` if it never appears. By hand, after
+  fixing the cause: `systemctl restart moca-egress`, then `systemctl reset-failed microvm-worker`, then
+  `systemctl start microvm-worker`. Re-running `setup-microvm.sh` does the same.
 
 - **Snapshot:** a golden snapshot built before P4.1 has no guest egress listener. Rebuild it with
   `build-snapshot.sh` for egress to work.
