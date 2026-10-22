@@ -165,7 +165,7 @@ re-running with just that one:
 - `SH_PUBLIC_HARNESS_URL` (kind and `--target ocp-single` without Routes) overrides the default
   `http://127.0.0.1:8080` the control plane advertises via `GET /v1/discovery`; set it when 8080
   conflicts with another local service. The port in the URL also becomes the printed `kubectl
-  port-forward svc/moca-supervisor` local port. Must be http(s); refused on Route-reached stacks,
+port-forward svc/moca-supervisor` local port. Must be http(s); refused on Route-reached stacks,
   where the Route host is authoritative.
 - `SH_SANDBOX_COUNT`, and on OpenShift `--image` and `--sandbox-image`, live in the ConfigMap
   `moca-setup` (namespace `moca`, nothing secret in it). A given value replaces the stored one.
