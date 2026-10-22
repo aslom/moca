@@ -557,8 +557,12 @@ export HTTPS_PROXY=http://127.0.0.1:3128
 export https_proxy=http://127.0.0.1:3128
 export HTTP_PROXY=http://127.0.0.1:3128
 export http_proxy=http://127.0.0.1:3128
-export NO_PROXY=
-export no_proxy=
+# NO_PROXY names only the guest's own loopback. That opens no bypass -- the guest has no
+# network device, so loopback is the guest itself (T7) -- and it keeps an in-guest server
+# (a test suite on localhost:8000) reachable: sent to moca-egress instead, it would be
+# refused as a loopback destination, correctly, since there it means the HOST's loopback.
+export NO_PROXY=localhost,127.0.0.1,::1
+export no_proxy=localhost,127.0.0.1,::1
 export GH_TOKEN=moca-placeholder
 export GITHUB_TOKEN=moca-placeholder
 

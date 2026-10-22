@@ -1621,7 +1621,7 @@ echo "== egress (P4.1): proxy env + inert placeholder baked into init, build-tim
 # Each must be exported INSIDE the init heredoc and BEFORE the agent exec.
 for v in 'HTTPS_PROXY=http://127.0.0.1:3128' 'https_proxy=http://127.0.0.1:3128' \
   'HTTP_PROXY=http://127.0.0.1:3128' 'http_proxy=http://127.0.0.1:3128' \
-  'NO_PROXY=' 'no_proxy=' 'GH_TOKEN=moca-placeholder' 'GITHUB_TOKEN=moca-placeholder'; do
+  'NO_PROXY=localhost,127.0.0.1,::1' 'no_proxy=localhost,127.0.0.1,::1' 'GH_TOKEN=moca-placeholder' 'GITHUB_TOKEN=moca-placeholder'; do
   ln=""
   if [ -n "$init_start" ] && [ -n "$init_end" ]; then
     ln=$(awk -v s="$init_start" -v e="$init_end" -v want="export $v" \

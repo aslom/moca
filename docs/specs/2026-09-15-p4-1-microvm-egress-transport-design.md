@@ -161,7 +161,11 @@ nameserver — and none of the guest-side renumbering Firecracker's clone recipe
 
 Mediated L7 means **tools that ignore proxy environment variables have no network.** `curl`, `git`, `gh`
 and HTTP-transport MCP honour it; stdio-transport MCP servers run in-guest and need nothing. `ssh`, raw
-sockets, and anything doing its own DNS do not work. `NO_PROXY` must be empty.
+sockets, and anything doing its own DNS do not work. `NO_PROXY` names only the guest's own loopback
+(`localhost,127.0.0.1,::1`) and never a remote host. _Amended 2026-10-22 (#582 review):_ it was
+"must be empty", but an empty `NO_PROXY` sends in-guest loopback to `moca-egress`, which refuses it
+as a loopback destination, breaking any in-guest server. Exempting loopback opens no bypass: the
+guest has no network device (T7), so its loopback is the guest itself.
 
 This is the price of T1 and T7 together, and it is the same trade Z5 §5.2 already accepted for
 cert-pinning clients — narrower here, because on this tier the documented "route it around the proxy"
