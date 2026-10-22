@@ -22,7 +22,10 @@
 # SH_MODEL_CATALOG_HOSTS (every target: comma-separated bare hostnames the control plane's model
 # catalog may contact besides api.anthropic.com and the default inference endpoint; empty, the
 # default, allows only those; a URL, port or path is refused -- the control plane would refuse to
-# boot on it), SH_SOURCE_ONLY=1 (define the functions and stop, for tests).
+# boot on it), SH_PUBLIC_HARNESS_URL (kind and ocp-single-without-Routes only: override the default
+# http://127.0.0.1:8080 when 8080 conflicts on the host; the port in the URL also becomes the
+# supervisor port-forward's local port in print_access), SH_SOURCE_ONLY=1 (define the functions and
+# stop, for tests).
 #
 # Idempotent: a re-run converges and never rotates a secret. Inputs are sticky: a re-run keeps every
 # setting, --image, --sandbox-image (ocp), SH_SANDBOX_COUNT, SH_P4_SANDBOX_IDS,
@@ -174,6 +177,14 @@ parse_args() {
   SH_SANDBOX_COUNT="${SH_SANDBOX_COUNT:-}"
   [[ -z "$SH_SANDBOX_COUNT" || "$SH_SANDBOX_COUNT" =~ ^[0-9]{1,4}$ ]] ||
     die "SH_SANDBOX_COUNT='$SH_SANDBOX_COUNT' must be a whole number of at most 4 digits (0 runs no container sandboxes)"
+  # SH_PUBLIC_HARNESS_URL overrides the derived URL on port-forward-reached targets; refused on
+  # Route-reached stacks, where the Route host is authoritative.
+  if [[ -n "${SH_PUBLIC_HARNESS_URL-}" ]]; then
+    [[ "$SH_PUBLIC_HARNESS_URL" =~ ^https?://[^[:space:]]+$ ]] ||
+      die "SH_PUBLIC_HARNESS_URL='$SH_PUBLIC_HARNESS_URL' must be an http(s) URL"
+    is_kind || [[ "$TARGET" == ocp-single && -z "${SH_ROUTE_DOMAIN-}" ]] ||
+      die "SH_PUBLIC_HARNESS_URL applies only to port-forward-reached stacks; on $TARGET the Route host is the harness URL"
+  fi
   # The token lifetimes: validated here when given; a stored one is checked in write_settings.
   local ttl
   for ttl in SH_API_TOKEN_TTL_SECONDS SH_SESSION_TOKEN_TTL_SECONDS; do
@@ -699,11 +710,11 @@ CLIENT_ID=''
 client_id() { printf '%s' "$CLIENT_ID"; }
 
 public_harness_url() {
-  if is_kind; then echo 'http://127.0.0.1:8080'
-  elif [[ "$TARGET" == ocp-single ]]; then
-    # Routes are opt-in (README §12.5): with a domain, the supervisor's passthrough Route is the
-    # public URL; without one, the port-forward localhost one.
-    if [[ -n "$ROUTE_DOMAIN" ]]; then echo "https://moca.$ROUTE_DOMAIN"; else echo 'http://127.0.0.1:8080'; fi
+  # SH_PUBLIC_HARNESS_URL overrides the default on port-forward targets, so an operator with a local
+  # 8080 conflict can advertise a different localhost port (parse_args validates it).
+  if is_kind || ([[ "$TARGET" == ocp-single ]] && [[ -z "$ROUTE_DOMAIN" ]]); then
+    echo "${SH_PUBLIC_HARNESS_URL:-http://127.0.0.1:8080}"
+  elif [[ "$TARGET" == ocp-single ]]; then echo "https://moca.$ROUTE_DOMAIN"
   else echo "https://$SUP_HOST"; fi
 }
 
@@ -719,9 +730,10 @@ sha256() {
 # roll -- the next run renders the same new hash.
 #
 # Sticky: each input variable that is UNSET keeps the value moca-settings already holds; one that is
-# set, even to empty (SH_ADMIN_SUBJECTS=), replaces it. SH_PUBLIC_HARNESS_URL is not an input: it is
-# derived from the target (and the Route host) on every run; nor are SH_SANDBOX_TIERS and
-# SH_SANDBOX_DEFAULT_TIER, which derive_tiers derives from the stack (its sticky input lives in
+# set, even to empty (SH_ADMIN_SUBJECTS=), replaces it. SH_PUBLIC_HARNESS_URL is an input on
+# port-forward-reached targets (public_harness_url); on Route-reached stacks it is derived from the
+# Route host every run (parse_args refuses a given value there). SH_SANDBOX_TIERS and
+# SH_SANDBOX_DEFAULT_TIER are derived too, by derive_tiers from the stack (its sticky input lives in
 # moca-setup). They are written even when '' so every stack hashes the same nine keys; an empty
 # token lifetime is the control plane's default, and an empty catalog allow-list its own.
 write_settings() {
@@ -1186,10 +1198,13 @@ wait_records() {
 }
 
 print_access() {
+  # The local port of the supervisor's port-forward: honor SH_PUBLIC_HARNESS_URL's port when given.
+  local sup_port=8080
+  [[ "$(public_harness_url)" =~ :([0-9]+)/?$ ]] && sup_port="${BASH_REMATCH[1]}"
   if is_kind; then
     cat >&2 <<EOF
 P6 is up on kind (context $KIND_CONTEXT). Reach it with two port-forwards:
-  kubectl --context $KIND_CONTEXT -n $NS port-forward svc/moca-supervisor 8080:8080
+  kubectl --context $KIND_CONTEXT -n $NS port-forward svc/moca-supervisor $sup_port:8080
   kubectl --context $KIND_CONTEXT -n $NS port-forward svc/moca-control-plane 8090:8080
 then:  mocactl --control-plane-url http://127.0.0.1:8090 login
 EOF
@@ -1205,7 +1220,7 @@ EOF
     else
       cat >&2 <<EOF
 P6 is up on OpenShift, namespace $NS (single-namespace dev/test target; no Routes). Reach it by port-forward:
-  kubectl -n $NS port-forward svc/moca-supervisor 8080:8080
+  kubectl -n $NS port-forward svc/moca-supervisor $sup_port:8080
   kubectl -n $NS port-forward svc/moca-control-plane 8090:8080
 then:  mocactl --control-plane-url http://127.0.0.1:8090 login
 EOF

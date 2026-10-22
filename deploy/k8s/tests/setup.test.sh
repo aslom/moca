@@ -397,6 +397,18 @@ grep -q '^  - ../../overlays/kind$' "$MOCK_STATE/applied-kustomization.yaml" || 
 expect_out 'port-forward svc/moca-supervisor 8080:8080'
 pass 'kind: generated overlay applied; control plane held at 0 without a client id; access printed'
 
+reset_state
+(export SH_PUBLIC_HARNESS_URL=http://127.0.0.1:18080; expect_ok --target kind --skip-build)
+[[ "$(setting SH_PUBLIC_HARNESS_URL)" == http://127.0.0.1:18080 ]] ||
+  fail 'kind: SH_PUBLIC_HARNESS_URL did not override the derived URL'
+expect_out 'port-forward svc/moca-supervisor 18080:8080'
+pass 'kind: SH_PUBLIC_HARNESS_URL overrides the ConfigMap value and the printed port-forward port'
+
+reset_state
+(export SH_PUBLIC_HARNESS_URL=not-a-url; expect_fail --target kind --skip-build)
+expect_out 'must be an http(s) URL'
+pass 'kind: a non-URL SH_PUBLIC_HARNESS_URL is refused up front'
+
 # hash_of DEPLOYMENT: every settings hash the generated overlay stamps on DEPLOYMENT's pod template,
 # one per line (nothing when there is none). A Deployment may have several patch entries (ocp-single
 # adds an env patch for the supervisor), so every entry targeting it is read.
