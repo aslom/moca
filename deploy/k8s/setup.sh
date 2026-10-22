@@ -184,7 +184,7 @@ parse_args() {
     [[ "$SH_PUBLIC_HARNESS_URL" =~ ^http://[^/[:space:]]+:[0-9]{1,5}/?$ ]] ||
       die "SH_PUBLIC_HARNESS_URL='$SH_PUBLIC_HARNESS_URL' must be http://HOST:PORT (plain HTTP, no path; https and routed targets are not supported)"
     is_kind || [[ "$TARGET" == ocp-single ]] ||
-      die "SH_PUBLIC_HARNESS_URL applies only to port-forward-reached stacks (kind, ocp-single); got --target $TARGET"
+      die "SH_PUBLIC_HARNESS_URL applies only to port-forward-reached stacks (kind, kind-ci, ocp-single); got --target $TARGET"
   fi
   # The token lifetimes: validated here when given; a stored one is checked in write_settings.
   local ttl
@@ -714,7 +714,12 @@ route_hosts() {
 CLIENT_ID=''
 client_id() { printf '%s' "$CLIENT_ID"; }
 
+# Memoised across the write_settings + print_access callers so the stored-URL lookup only
+# issues one kubectl get per run. Cleared on each public_harness_url call that resolves
+# fresh, which only happens the first time per setup.
+PUBLIC_HARNESS_URL=''
 public_harness_url() {
+  [[ -z "$PUBLIC_HARNESS_URL" ]] || { printf '%s' "$PUBLIC_HARNESS_URL"; return; }
   # On port-forward-reached stacks: a given SH_PUBLIC_HARNESS_URL wins (set-but-empty clears back
   # to the default -- the same unset/set-empty convention as every other sticky input); otherwise
   # the stored value in moca-settings; otherwise the default. parse_args validates a given value.
@@ -723,15 +728,16 @@ public_harness_url() {
   # dead host and break the printed port extraction.
   if is_kind || [[ "$TARGET" == ocp-single && -z "$ROUTE_DOMAIN" ]]; then
     if [[ -n "${SH_PUBLIC_HARNESS_URL+x}" ]]; then
-      echo "${SH_PUBLIC_HARNESS_URL:-http://127.0.0.1:8080}"
+      PUBLIC_HARNESS_URL="${SH_PUBLIC_HARNESS_URL:-http://127.0.0.1:8080}"
     else
       local stored
       stored="$(cm_value "$(configmap_json moca-settings)" SH_PUBLIC_HARNESS_URL)"
       [[ "$stored" =~ ^http://[^/[:space:]]+:[0-9]{1,5}/?$ ]] || stored=''
-      echo "${stored:-http://127.0.0.1:8080}"
+      PUBLIC_HARNESS_URL="${stored:-http://127.0.0.1:8080}"
     fi
-  elif [[ "$TARGET" == ocp-single ]]; then echo "https://moca.$ROUTE_DOMAIN"
-  else echo "https://$SUP_HOST"; fi
+  elif [[ "$TARGET" == ocp-single ]]; then PUBLIC_HARNESS_URL="https://moca.$ROUTE_DOMAIN"
+  else PUBLIC_HARNESS_URL="https://$SUP_HOST"; fi
+  printf '%s' "$PUBLIC_HARNESS_URL"
 }
 
 # sha256: stdin's SHA-256, hex. sha256sum (Linux, coreutils) or shasum (macOS), whichever is present.

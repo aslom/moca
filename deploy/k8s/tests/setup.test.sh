@@ -435,8 +435,10 @@ jq -nc '{apiVersion: "v1", kind: "Secret", metadata: {name: "op-cert", namespace
 (export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=example.test SH_PUBLIC_HARNESS_URL=http://127.0.0.1:18080;
   expect_fail --target ocp-single --tls-secret op-cert)
 expect_out 'meaningless when Routes are on'
-# Stored SH_ROUTE_DOMAIN (left by the preceding run), no env override -- same refusal.
-(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=example.test; expect_ok --target ocp-single --tls-secret op-cert)
+# Stored SH_ROUTE_DOMAIN -- seed moca-setup directly so a failing seeder would not confuse the
+# diagnostic -- no env override, same refusal.
+jq -nc '{apiVersion: "v1", kind: "ConfigMap", metadata: {name: "moca-setup", namespace: "moca-single"},
+  data: {SH_ROUTE_DOMAIN: "example.test"}}' >"$MOCK_STATE/moca-single__ConfigMap__moca-setup.json"
 (export SH_GITHUB_CLIENT_ID=Iv1.a SH_PUBLIC_HARNESS_URL=http://127.0.0.1:18080;
   expect_fail --target ocp-single)
 expect_out 'meaningless when Routes are on'
