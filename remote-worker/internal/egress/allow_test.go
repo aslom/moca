@@ -92,3 +92,17 @@ func TestNormalizeHost(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeHostHygiene(t *testing.T) {
+	for _, in := range []string{"K.example", "k\u212a.example", "a\x00b", "a\x7fb", "a\\b", "a%2eb", "a?b", "a#b", "a*b", "bücher.example"} {
+		if got, err := NormalizeHost(in); err == nil {
+			t.Errorf("NormalizeHost(%q)=%q, want error", in, got)
+		}
+	}
+	if got, err := NormalizeHost("XN--BCHER-KVA.example"); err != nil || got != "xn--bcher-kva.example" {
+		t.Errorf("punycode: %q %v", got, err)
+	}
+	if e, err := ParseAllow("*.xn--bcher-kva.example"); err != nil || !e[0].Wildcard {
+		t.Errorf("wildcard punycode: %+v %v", e, err)
+	}
+}

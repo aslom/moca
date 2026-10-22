@@ -5,7 +5,6 @@ import (
 	"io"
 	"net/url"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -50,14 +49,13 @@ type Event struct {
 type AuditSink interface{ Emit(Event) }
 
 type jsonSink struct {
-	mu       sync.Mutex
-	enc      *json.Encoder
-	failures atomic.Int64 // write errors; not exposed
+	mu  sync.Mutex
+	enc *json.Encoder
 }
 
 // NewJSONSink returns a sink writing one JSON line per event to w. Via is
 // forced to "moca-egress" and a zero Time is filled with the current UTC time.
-// Write errors are ignored and counted.
+// Write errors are ignored.
 func NewJSONSink(w io.Writer) AuditSink {
 	return &jsonSink{enc: json.NewEncoder(w)}
 }
@@ -69,9 +67,7 @@ func (s *jsonSink) Emit(e Event) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.enc.Encode(e); err != nil {
-		s.failures.Add(1)
-	}
+	_ = s.enc.Encode(e) // write errors are deliberately ignored: auditing must not stall the proxy
 }
 
 // RedactPath returns the escaped path of u and nothing else: no query,

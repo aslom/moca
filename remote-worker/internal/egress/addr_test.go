@@ -59,3 +59,44 @@ func TestCheckAddrPermitsOnlyListedPrivate(t *testing.T) {
 		}
 	}
 }
+
+func TestCheckAddrEmbeddedIPv4(t *testing.T) {
+	cases := []struct {
+		addr   string
+		permit []netip.Prefix
+		refuse bool
+	}{
+		{"::a9fe:a9fe", nil, true},
+		{"::a9fe:a9fe", pfx("::/0"), true},
+		{"64:ff9b::a9fe:a9fe", pfx("169.254.0.0/16"), true},
+		{"2002:a9fe:a9fe::", pfx("169.254.0.0/16"), true},
+		{"64:ff9b::a00:1", nil, true},
+		{"64:ff9b::a00:1", pfx("10.0.0.0/8"), false},
+		{"64:ff9b:1::a00:1", nil, true},
+		{"2002:0a00:0001::", nil, true},
+		{"2002:7f00:1::", nil, true},
+		{"fec0::1", nil, true},
+		{"fec0::1", pfx("fec0::/10"), true},
+		{"64:ff9b::808:808", nil, false},
+		{"2002:808:808::", nil, false},
+	}
+	for _, c := range cases {
+		err := CheckAddr(netip.MustParseAddr(c.addr), c.permit, nil)
+		if c.refuse != errors.Is(err, ErrPrivate) {
+			t.Errorf("%s: err=%v refuse=%v", c.addr, err, c.refuse)
+		}
+	}
+	if err := CheckAddr(netip.MustParseAddr("64:ff9b::cb00:7109"), nil, []netip.Addr{netip.MustParseAddr("203.0.113.9")}); !errors.Is(err, ErrPrivate) {
+		t.Errorf("embedded local: %v", err)
+	}
+}
+
+func TestCheckAddrZonedLocal(t *testing.T) {
+	local := []netip.Addr{netip.MustParseAddr("2001:db8::1")}
+	if err := CheckAddr(netip.MustParseAddr("2001:db8::1%eth0"), nil, local); !errors.Is(err, ErrPrivate) {
+		t.Fatalf("zoned local: %v", err)
+	}
+	if err := CheckAddr(netip.MustParseAddr("2001:db8::1"), nil, []netip.Addr{netip.MustParseAddr("2001:db8::1%eth0")}); !errors.Is(err, ErrPrivate) {
+		t.Fatalf("zoned entry: %v", err)
+	}
+}

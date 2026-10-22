@@ -2,7 +2,7 @@
 // L7 egress proxy for the microVM tier: the destination allowlist, the
 // resolved-address check, and the redacted audit record. It implements the
 // consequences recorded in P4.1 (docs/specs/2026-09-15-p4-1-microvm-egress-transport-design.md,
-// section 11) and the policy order and audit shape of MI1
+// section 11) and the audit shape of MI1
 // (docs/specs/2026-09-28-moca-multi-user-isolation-design.md, section 8.5).
 //
 // Host-wide blast radius (P4.1 T3, section 11 item 1). One moca-egress

@@ -24,17 +24,19 @@ func NormalizeHost(h string) (string, error) {
 	if strings.HasPrefix(h, "[") && strings.HasSuffix(h, "]") {
 		h = h[1 : len(h)-1]
 	}
-	h = strings.ToLower(h)
 	h = strings.TrimSuffix(h, ".")
 	if h == "" {
 		return "", errors.New("empty host")
 	}
-	if strings.ContainsAny(h, "/@") || strings.IndexFunc(h, func(r rune) bool {
-		return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\v' || r == '\f' || r == 0x85 || r == 0xA0
-	}) >= 0 {
-		return "", fmt.Errorf("invalid host %q", h)
+	for i := 0; i < len(h); i++ {
+		c := h[i]
+		// Hosts arrive punycoded: no non-ASCII, no controls, no URL syntax.
+		if c >= 0x80 || c <= 0x20 || c == 0x7f || strings.IndexByte("/@\\?#%*", c) >= 0 {
+			return "", fmt.Errorf("invalid host %q", h)
+		}
 	}
-	return h, nil
+	// Lower-case only after the ASCII check, so U+212A cannot fold to "k".
+	return strings.ToLower(h), nil
 }
 
 // ParseAllow parses a comma-separated allowlist. Each item is a hostname or IP
