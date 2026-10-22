@@ -741,13 +741,14 @@ sha256() {
 # remembers "changed" between runs, so a run that writes new settings and then fails cannot lose the
 # roll -- the next run renders the same new hash.
 #
-# Sticky: each input variable that is UNSET keeps the value moca-settings already holds; one that is
-# set, even to empty (SH_ADMIN_SUBJECTS=), replaces it. SH_PUBLIC_HARNESS_URL is an input on
-# port-forward-reached targets (public_harness_url); on Route-reached stacks it is derived from the
-# Route host every run (parse_args refuses a given value there). SH_SANDBOX_TIERS and
-# SH_SANDBOX_DEFAULT_TIER are derived too, by derive_tiers from the stack (its sticky input lives in
-# moca-setup). They are written even when '' so every stack hashes the same nine keys; an empty
-# token lifetime is the control plane's default, and an empty catalog allow-list its own.
+# Sticky: each input variable that is UNSET keeps the value moca-settings already holds; one that
+# is set, even to empty (SH_ADMIN_SUBJECTS=), replaces it. SH_PUBLIC_HARNESS_URL is an input on
+# port-forward-reached targets (public_harness_url); on Route-reached stacks it is derived from
+# the Route host every run (load_setup_inputs refuses a given value once ROUTE_DOMAIN resolves on).
+# SH_SANDBOX_TIERS and SH_SANDBOX_DEFAULT_TIER are derived too, by derive_tiers from the stack
+# (its sticky input lives in moca-setup). They are written even when '' so every stack hashes the
+# same nine keys; an empty token lifetime is the control plane's default, and an empty catalog
+# allow-list its own.
 write_settings() {
   local before after admins fb api_ttl session_ttl catalog_hosts url
   before="$(configmap_json moca-settings)"
