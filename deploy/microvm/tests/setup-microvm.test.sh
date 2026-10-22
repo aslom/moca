@@ -57,6 +57,11 @@ cat >"$TMP/bin/systemctl" <<'MOCK'
 printf 'systemctl %s\n' "$*" >>"$MOCK_LOG"
 # is-active answers MOCK_IS_ACTIVE's exit code (0 = active, 3 = inactive/failed, as systemd does).
 [ "$1" = is-active ] && exit "${MOCK_IS_ACTIVE:-0}"
+# MOCK_EGRESS_START_FAILS=1: a Type=notify start of moca-egress that exits before READY=1, which
+# systemd reports by failing the start/restart job itself (exit 1).
+if [ -n "${MOCK_EGRESS_START_FAILS:-}" ] && { [ "$1" = start ] || [ "$1" = restart ]; } && [ "$2" = moca-egress.service ]; then
+  echo "Job for moca-egress.service failed because the control process exited with error code." >&2; exit 1
+fi
 [ "$1" = show ] && { echo "${MOCK_INVOCATION:-inv-1}"; exit 0; } # show -p InvocationID --value <unit>
 # try-restart of a unit systemd cannot find is refused, exit 5, as systemd does: a P6 host installed
 # before #366 has no sh-control-plane.service. The installed units are the files under SH_UNIT_DIR.
@@ -668,6 +673,14 @@ check "and the worker is never started against a missing proxy" \
 check "a changed moca-egress is reset-failed before its restart (it may have hit its start limit)" \
   "$(grep -nE 'systemctl (reset-failed|restart) moca-egress.service' "$MOCK_LOG" | head -2 | sed -E 's/^[0-9]+:systemctl ([a-z-]+).*/\1/' | tr '\n' ' ')" "reset-failed restart "
 check "a non-numeric MOCA_EGRESS_READY_TIMEOUT is refused" "$(MOCA_EGRESS_READY_TIMEOUT=soon run)" "1"
+reset_host
+: >"$MOCK_LOG"
+check "exit 1 when the moca-egress start job itself fails (a notify unit that exits before READY=1)" \
+  "$(MOCK_EGRESS_START_FAILS=1 run)" "1"
+check "that failure also names journalctl -u moca-egress (set -e must not pre-empt the hint)" \
+  "$(grep -cF 'moca-egress failed to start; the reason is in: journalctl -u moca-egress' "$TMP/run.log")" "1"
+check "and the worker is not started after it" \
+  "$(grep -cE 'systemctl (start|restart) microvm-worker' "$MOCK_LOG")" "0"
 reset_host
 
 if [ "$fails" -eq 0 ]; then echo "PASS"; else echo "FAIL ($fails)"; fi

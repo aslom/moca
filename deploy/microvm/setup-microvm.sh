@@ -497,12 +497,15 @@ apply() {
   # stop/start) is enough, the worker's control client re-registers live VMs on reconnect.
   # The restart severs in-flight guest connections (open tunnels die); new ones work at once.
   systemctl enable moca-egress.service
+  # A Type=notify start that exits or times out before READY=1 -- a bad moca-egress.env -- makes
+  # systemctl itself fail, so it gets the same hint as a socket that never appears.
+  local egress_hint="the reason is in: journalctl -u moca-egress (often a bad $SH_ENV_DIR/moca-egress.env). Fix it and re-run"
   if changed_any "$SH_BIN_DIR/moca-egress" "$SH_UNIT_DIR/moca-egress.service" "$SH_ENV_DIR/moca-egress.env"; then
     systemctl reset-failed moca-egress.service || true
-    systemctl restart moca-egress.service
+    systemctl restart moca-egress.service || die "moca-egress failed to start; $egress_hint"
   elif ! systemctl is-active --quiet moca-egress.service; then
     systemctl reset-failed moca-egress.service || true
-    systemctl start moca-egress.service
+    systemctl start moca-egress.service || die "moca-egress failed to start; $egress_hint"
   fi
   wait_egress_ready
   systemctl enable microvm-worker.service
