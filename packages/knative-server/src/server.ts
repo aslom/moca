@@ -449,6 +449,12 @@ const NO_CAPACITY = new Set([
   'SandboxPoolEmptyError',
   // P6.3: the session's own sandbox is briefly absent. Same advice: retry after Retry-After.
   'SandboxAffinityPendingError',
+  // #452: the sandbox WAS leased and its host refused the exec on a memory or MaxRuns
+  // ceiling. The odd one out — the three above are raised before a turn starts, this one
+  // mid-turn — but the advice is identical, and 503 is what makes the same prompt retryable
+  // instead of answering 200 with the host's admission arithmetic quoted back as the
+  // model's reply.
+  'SandboxCapacityRefusedError',
 ]);
 
 export function turnErrorStatus(err: unknown): number {

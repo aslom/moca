@@ -5,7 +5,12 @@ import {
   type FileEntry,
 } from '@earendil-works/pi-coding-agent';
 import { RedisSessionBackend } from '@moca/session-backend';
-import { k8sSandboxExtension, KubectlTransport } from '@moca/k8s-sandbox';
+import {
+  createCapacityLatch,
+  k8sSandboxExtension,
+  KubectlTransport,
+  SandboxCapacityRefusedError,
+} from '@moca/k8s-sandbox';
 import {
   selectPoolSandbox,
   SandboxPoolSaturatedError,
@@ -335,6 +340,29 @@ export function leafTurnConfig(config?: TurnConfig): TurnConfig | undefined {
   return rest;
 }
 
+/**
+ * The leaf result for a throw that means "no capacity", or null when the throw means
+ * something else and the caller's generic `error` mapping applies.
+ *
+ * TWO ERRORS, ONE REASON, and they are NOT interchangeable.
+ * `SandboxPoolSaturatedError` is raised at lease time, before any exec: no sandbox could
+ * be had. `SandboxCapacityRefusedError` is raised mid-turn by a sandbox that WAS leased,
+ * whose host then refused the work on its memory or MaxRuns ceiling (#452). They reach
+ * different catch blocks and only the first can occur before a turn starts.
+ *
+ * `reason: 'saturated'` is what they share, and it is load-bearing in two places: the
+ * sync /runs path bounded-waits and then answers 503 Retry-After (spec §4.3), and
+ * classifyOutcome keeps the run RETRYABLE for the async path so it drains as hosts free
+ * up. Mapping the second to `reason: 'error'` would have spent the run permanently on a
+ * condition that clears by itself.
+ */
+function noCapacityFailure(err: unknown): LeafResult | null {
+  if (err instanceof SandboxPoolSaturatedError || err instanceof SandboxCapacityRefusedError) {
+    return { status: 'failed', reason: 'saturated', message: err.message };
+  }
+  return null;
+}
+
 export async function runLeaf(
   env: LeafEnvelope,
   config?: TurnConfig,
@@ -363,9 +391,11 @@ export async function runLeaf(
     // Saturation is a distinct, transient signal: the sync /runs path bounded-waits and returns
     // 503 Retry-After on it (spec §4.3), and classifyOutcome keeps it retryable for the async
     // path (drains as leases free). Every other throw is a generic "error".
-    if (err instanceof SandboxPoolSaturatedError) {
-      return { status: 'failed', reason: 'saturated', message: err.message };
-    }
+    //
+    // This catch covers the WHOLE of produce(), which is why a mid-turn host refusal lands
+    // here too and not only a lease-time one — see noCapacityFailure (#452).
+    const noCapacity = noCapacityFailure(err);
+    if (noCapacity) return noCapacity;
     return {
       status: 'failed',
       reason: 'error',
@@ -416,8 +446,8 @@ export async function runSolveLeaf(
   try {
     await produce(env, config, capture, produceDeps);
   } catch (err) {
-    if (err instanceof SandboxPoolSaturatedError)
-      return { status: 'failed', reason: 'saturated', message: err.message };
+    const noCapacity = noCapacityFailure(err);
+    if (noCapacity) return noCapacity;
     return {
       status: 'failed',
       reason: 'error',
@@ -483,13 +513,18 @@ async function runPromptLeaf(
   } catch (err) {
     // Saturation stays a distinct transient signal, as for the other kinds: the sync /runs path
     // bounded-waits then 503s on it, and classifyOutcome keeps it retryable for the async queue.
-    if (err instanceof SandboxPoolSaturatedError) {
-      return { status: 'failed', reason: 'saturated', message: err.message };
-    }
+    // Only the lease-time error can reach THIS catch — selectPoolSandbox runs no exec — but it
+    // shares the mapping with the mid-turn one (noCapacityFailure).
+    const noCapacity = noCapacityFailure(err);
+    if (noCapacity) return noCapacity;
     // Its own reason, so the sync /runs path answers 503 workload_sandbox_unavailable rather than
     // a terminal failure: the workload's sandboxes may be starting or restarting. A deployment
     // that can never serve a workload run (WorkloadSandboxMisconfiguredError) falls through to a
     // terminal `error`, as SandboxRequiredError does.
+    //
+    // AFTER the no-capacity check, which is where it already sat relative to saturation: the two
+    // are disjoint today, and keeping the generic "no capacity anywhere" answer ahead of the
+    // workload-specific one means a future error that is both reads as the broader condition.
     if (err instanceof WorkloadSandboxUnavailableError) {
       return { status: 'failed', reason: 'workload_sandbox_unavailable', message: err.message };
     }
@@ -615,6 +650,14 @@ async function runPromptLeaf(
   } catch (err) {
     // A throw from the turn must not escape past the finally: a lease held past a crashed turn
     // shrinks pool capacity until its TTL expires.
+    //
+    // executeTurn throws SandboxCapacityRefusedError here when the leased sandbox's host
+    // refused mid-turn, which is the one throw from exec() that must stay retryable (#452).
+    // Note what this does NOT need: `r.stopReason`. The refusal never became a stop reason,
+    // precisely because Pi's loop reports `end_turn` for a turn whose tool calls were
+    // refused — which is the bug.
+    const noCapacity = noCapacityFailure(err);
+    if (noCapacity) return noCapacity;
     return {
       status: 'failed',
       reason: 'error',
@@ -740,11 +783,20 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture, deps)
     // model's edits (relative or absolute) land where captureWorkspaceDiff reads them.
     const agentConfig = { ...selected.config, podCwd: workspaceRef };
 
+    // This leaf builds its own Pi stack rather than going through executeTurn, so it needs
+    // its own latch — executeTurn's is unreachable from here (#452).
+    //
+    // INERT TODAY, and wired anyway. No `transport` is passed below, so the extension
+    // builds a KubectlTransport — and only GrpcRelayTransport raises
+    // SandboxCapacityRefusedError. The converge/diff path around it is kubectl-only too,
+    // so nothing on this leaf can latch until it starts using the leased transport. The
+    // wiring is what keeps that change from silently reintroducing #452 here.
+    const capacity = createCapacityLatch();
     const { settingsManager, loaderOptions } = turnLoaderInputs({
       config,
       cwd,
       extensionFactories: [
-        k8sSandboxExtension({ config: agentConfig }),
+        k8sSandboxExtension({ config: agentConfig, capacity }),
         flushExtension(backend),
         checkpointExtension(store, sessionManager),
       ],
@@ -769,6 +821,12 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture, deps)
           )
         : buildSolvePrompt(env.problemStatement!, workspaceRef);
       await session.prompt(prompt);
+      // BEFORE the diff capture, not after. A solve leaf's whole output is its patch, and a
+      // turn whose tool calls were refused for capacity produces a half-written worktree —
+      // returning that as `status: 'solved'` would hand the caller a partial patch with no
+      // indication it was cut short, which is worse than the error #452 is about. The
+      // enclosing finally still flushes the session, so the work done so far is resumable.
+      capacity.throwIfRefused();
       // Per-leaf token usage (cumulative across all solve turns) for run cost pricing. Sum assistant
       // usage off the session branch — the same defensive pattern budget-voter.ts:branchSpend uses
       // (session.getSessionStats() accesses message.usage non-defensively and throws on this pi build).
@@ -919,13 +977,20 @@ export const realProduceVerdict: ProduceVerdict = async (item, env, config, capt
     const allowVerdict =
       !item.require_approval || gateState.gateDecisions.length > 0 || seed.record != null;
 
+    // Own latch, for the same reason realProduceSolve has one: this path builds its Pi stack
+    // directly and never passes through executeTurn (#452).
+    const capacity = createCapacityLatch();
     const { settingsManager, loaderOptions } = turnLoaderInputs({
       config,
       cwd,
       extensionFactories: [
         ...(allowVerdict ? [submitVerdictExtension(capture, sessionManager)] : []),
         requestApprovalExtension(capture, sessionManager, gateState.nextGateId),
-        k8sSandboxExtension({ config: selected?.config ?? null, transport: selected?.transport }),
+        k8sSandboxExtension({
+          config: selected?.config ?? null,
+          transport: selected?.transport,
+          capacity,
+        }),
         flushExtension(backend),
         checkpointExtension(store, sessionManager),
         verdictTerminationExtension(capture, { maxTurns: env.maxTurns }),
@@ -948,6 +1013,14 @@ export const realProduceVerdict: ProduceVerdict = async (item, env, config, capt
         const recovered = verdictFromCustomEntry(row?.entry);
         if (recovered) capture.verdict = recovered;
       }
+      // LAST, and only if this leaf produced nothing. Unlike a solve leaf, a verdict leaf
+      // can reach its answer before the host fills up — `submit_verdict` and
+      // `request_approval` are harness-side tools that never touch the sandbox — and a
+      // captured verdict or gate IS the leaf's result. Discarding one to report a transient
+      // condition would make the run retry work it had already finished. With nothing
+      // captured, the refusal is the only honest outcome: `no_verdict` would blame the model
+      // for a turn the host refused to run (#452).
+      if (!capture.verdict && !capture.gate && !capture.aborted) capacity.throwIfRefused();
     } finally {
       await backend.flush();
     }
