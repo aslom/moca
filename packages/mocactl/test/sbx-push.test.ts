@@ -989,6 +989,10 @@ describe('pull --apply never writes local agent configuration or hooks (final re
     '.codex/skills/x/SKILL.md',
     '.agents/skills/x/SKILL.md',
     '.agents/skills/x/run.sh',
+    '.pi/extensions/x.ts',
+    '.pi/extensions/x/index.ts',
+    '.pi/skills/x/SKILL.md',
+    '.pi/prompts/x.md',
     '.vscode/tasks.json',
     '.vscode/settings.json',
     '.husky/pre-commit',
@@ -1005,6 +1009,8 @@ describe('pull --apply never writes local agent configuration or hooks (final re
     '.EnvRC',
     '.CODEX/config.toml',
     '.ＣODEX/config.toml',
+    '.PI/extensions/x.ts',
+    '.Ｐi/extensions/x.ts',
     // Windows aliases (#554 review): trailing dots and spaces, a backslash separator, 8.3 names.
     '.claude./settings.json',
     '.envrc ',
@@ -1046,6 +1052,7 @@ describe('pull --apply never writes local agent configuration or hooks (final re
       '.opencode',
       '.codex',
       '.agents',
+      '.pi',
       '.husky',
       '.ſbx',
       'src/mcp.json',
@@ -1057,6 +1064,10 @@ describe('pull --apply never writes local agent configuration or hooks (final re
       'agents/skills/x/SKILL.md',
       '.agentsrc',
       'docs/agents/x.md',
+      '.pirc',
+      'pi/extensions/x.ts',
+      'pi-fork/src/index.ts',
+      'docs/pi/x.md',
       'opencode.json5',
       '.vscode',
       '.vscode/extensions.json',
@@ -1071,7 +1082,15 @@ describe('pull --apply never writes local agent configuration or hooks (final re
       'AGENTS.md',
     ]) {
       // A bare directory name is matched too (a file or link where the directory goes).
-      const want = ['.claude', '.opencode', '.codex', '.agents', '.husky', '.vscode'].includes(p);
+      const want = [
+        '.claude',
+        '.opencode',
+        '.codex',
+        '.agents',
+        '.pi',
+        '.husky',
+        '.vscode',
+      ].includes(p);
       expect(isAgentConfigPath(p), p).toBe(want);
     }
   });
