@@ -513,8 +513,10 @@ async function remintOne(deps: ProvisionerDeps, s: KubeObject): Promise<boolean>
     return false;
   };
   // Every value that goes into a token or a Secret is checked first, as a PUT would make it.
-  if (typeof k.wl !== 'string' || !ATTACH_WORKLOAD_RE.test(k.wl)) return skip('no valid workload label');
-  if (typeof k.own !== 'string' || !ATTACH_OWNER_RE.test(k.own)) return skip('no valid owner label');
+  if (typeof k.wl !== 'string' || !ATTACH_WORKLOAD_RE.test(k.wl))
+    return skip('no valid workload label');
+  if (typeof k.own !== 'string' || !ATTACH_OWNER_RE.test(k.own))
+    return skip('no valid owner label');
   if (s.metadata.name !== k.wl) return skip('named off its workload label');
   if (typeof gen !== 'string' || !GENERATION_RE.test(gen)) return skip('no valid generation');
   const keyOk = typeof recordKey === 'string' && RECORD_KEY_RE.test(recordKey);

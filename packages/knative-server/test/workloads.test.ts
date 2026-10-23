@@ -850,10 +850,12 @@ describe('a workload with sandboxes of its own (phase 2)', () => {
       { status: 422, error: 'workload_refused' },
     ]) {
       prov.failPut = fail;
-      expect(await call('POST', '/workloads/demo/activate', alice, { revision: REVISION })).toEqual({
-        status: fail.status,
-        body: { error: fail.error },
-      });
+      expect(await call('POST', '/workloads/demo/activate', alice, { revision: REVISION })).toEqual(
+        {
+          status: fail.status,
+          body: { error: fail.error },
+        },
+      );
       expect((await call('GET', '/workloads/demo', alice)).body).toMatchObject({
         status: 'provisioning',
         error: fail.error,
