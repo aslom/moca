@@ -48,14 +48,19 @@ Run each command on its own and copy the ids it prints into the next one. Shell 
 survive between an agent's tool calls, and a single command matches the permission rules below.
 
 1. Pack the directory into a `.moca-delegate/` subdirectory of the working tree. The packed file is
-   a full copy of the directory, so keep it out of commits and out of future packs: add
-   `.moca-delegate/` to `.gitignore`, and `ctx pack` honours `.gitignore` so it will not pack
-   itself. `.git` is skipped unless you add `--include-git`; symbolic links are refused.
+   a full copy of the directory, so when packing the working tree itself (`ctx pack .`), `ctx pack`
+   would otherwise pack `.moca-delegate/repo.context` into the next `.moca-delegate/repo.context`.
+   Make sure `.moca-delegate/` is in a `.gitignore` the pack honours before step 1: `ctx pack`
+   skips files `.gitignore` lists, so with that entry it will not pack itself. `.git` is skipped
+   unless you add `--include-git`; symbolic links are refused.
 
    ```bash
    mkdir -p .moca-delegate
    contextctl ctx pack ./repo -o .moca-delegate/repo.context
    ```
+
+   When packing a subdirectory of the working tree (`ctx pack ./subpkg`), the `.moca-delegate/` dir
+   is outside the packed tree, so no gitignore entry is needed.
 
 2. Create the workload. Keep the id it prints: there is no command that lists workloads.
 
@@ -142,7 +147,8 @@ agent, not a control. Choose one of two sets and add it to `.claude/settings.jso
 `~/.claude/settings.json`:
 
 - [`settings.example.json`](settings.example.json): every delegation command, including the upload
-  and the scoped cleanup.
+  and the scoped cleanup. The cleanup allow is the literal `rm -r .moca-delegate`, not a wildcard
+  `rm -r *` grant, so it stays scoped to this skill's one directory.
 - [`settings.restricted.example.json`](settings.restricted.example.json): only the commands that
   run, watch and clean up tasks. Claude Code still asks before `ctx pack` and `workloads create`,
   and those two steps then also need the classifier, or a person, to approve them.
