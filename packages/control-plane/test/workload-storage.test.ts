@@ -47,4 +47,18 @@ describe("a mounted workload's PVC caps (workload sandboxes spec §5.1, §6.3)",
       'storage_class_not_allowed',
     );
   });
+
+  it('treats storageClass: null as naming no class, with or without an allowlist', () => {
+    const none = { maxMiB: 1024, classes: new Map() };
+    expect(resolveWorkloadStorage({ size: '1Gi', storageClass: null }, none)).toEqual({
+      size: '1Gi',
+      access: 'rwo',
+    });
+    const some = { maxMiB: 1024, classes: parseStorageClasses('fast:rwo,nfs:rwx') };
+    expect(resolveWorkloadStorage({ size: '1Gi', storageClass: null }, some)).toEqual({
+      size: '1Gi',
+      storageClass: 'fast',
+      access: 'rwo',
+    });
+  });
 });

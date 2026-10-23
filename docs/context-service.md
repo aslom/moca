@@ -204,10 +204,11 @@ provisioner's refusals pass through on activate:
 | `400` (other `sandbox*` codes)                  | The provisioner refused the request itself (`sandbox_tier_unavailable`, `sandboxes_count_invalid`, ...).                                                                                                                                                                     | `DELETE`, then re-create                                    |
 | `409 workload_object_conflict`                  | An object under the workload's derived name in `moca-sandbox` is not this workload's.                                                                                                                                                                                        | An operator removes it                                      |
 | `422 workload_refused`                          | The cluster refused the workload's objects: the admission policy (an operator's PodTemplate outside its rules, or a PVC class outside its allowlist) or an invalid object.                                                                                                   | An operator fixes the PodTemplate, then repeat, or `DELETE` |
-| `400 workspace_size_too_small`                  | A mounted workload's `workspace.size` cannot hold the revision once (`read-only`) or twice (`writable`); checked by the worker before the hand-off.                                                                                                                          | `DELETE`, then re-create with a larger `size`               |
+| `400 workspace_size_too_small`                  | A mounted workload's `workspace.size` cannot hold the seed: the compressed bundle plus the revision once (`read-only`) or twice (`writable`), plus 10% and 16 MiB for the filesystem; checked by the worker before the hand-off.                                             | `DELETE`, then re-create with a larger `size`               |
 | `400` (other `workspace*` and `storage*` codes) | The provisioner refused a mounted workload's `mount` or storage (`workspace_mount_invalid`, `workspace_size_invalid`, `storage_class_not_allowed`, ...): its `MOCA_WORKLOAD_MAX_STORAGE` or `MOCA_WORKLOAD_STORAGE_CLASSES` differs from the workers'. An operator mismatch. | `DELETE`, then re-create                                    |
-| `503 seed_budget_full`                          | Every workload waiting to seed shares `MOCA_PROVISIONER_SEED_BUDGET_BYTES`, and it is full. Has `Retry-After`.                                                                                                                                                               | Repeat the activate                                         |
-| `error: seed_bundle_missing` (on `GET`)         | Not an answer but the record's `error`: the provisioner restarted before pod 0 seeded, and lost the held bundle.                                                                                                                                                             | Repeat the activate with the same revision                  |
+| `503 seed_budget_full`                          | Every workload waiting to seed shares `MOCA_PROVISIONER_SEED_BUDGET_BYTES`, at most half of it per owner, and it (or the owner's half) is full. Has `Retry-After`.                                                                                                           | Repeat the activate                                         |
+| `413 bundle_too_large`                          | The bundle is within the workers' `MOCA_CONTEXT_BUNDLE_MAX_BYTES` but over the provisioner's. An operator mismatch: the two must be equal.                                                                                                                                   | An operator aligns them, then repeat the activate           |
+| `error: seed_bundle_missing` (on `GET`)         | Not an answer but the record's `error`: the provisioner no longer holds the bundle and pod 0 has not seeded. It restarted, or `MOCA_PROVISIONER_SEED_HOLD_S` (default 10 minutes) passed without a seed, for example with the claim Pending.                                 | Repeat the activate with the same revision                  |
 | `502 provisioner_error`                         | The provisioner could not be reached, or Kubernetes failed behind it.                                                                                                                                                                                                        | Repeat the activate                                         |
 
 A refusal no repeat can fix leaves the record `provisioning` with that `error`: the revision is
@@ -265,23 +266,27 @@ no pod mounts it.
 - **The seed.** At activation the worker downloads the frozen bundle, with phase 1's limits, and
   hands it to the provisioner (`PUT /internal/v1/workloads/{name}/{generation}/bundle`). The
   provisioner holds it in memory, within `MOCA_PROVISIONER_SEED_BUDGET_BYTES` (default 1 GiB) across
-  every workload waiting to seed; past that, activate answers `503 seed_budget_full` with
-  `Retry-After`. Pod `<wl>-0`'s init containers fetch it from the provisioner's seed port (8081,
+  every workload waiting to seed, at most half of it per owner, and for
+  `MOCA_PROVISIONER_SEED_HOLD_S` (default 10 minutes) at most; past the budget, activate answers
+  `503 seed_budget_full` with `Retry-After`. Pod `<wl>-0`'s init containers fetch it from the provisioner's seed port (8081,
   `GET /seed/v1/bundle`, authenticated with the workload's attach token) and extract it into
   `revision/<revision>/`, read-only; for `writable`, a second one copies that into `moca-workspace/`.
   The other pods wait for pod 0 and never write. Once pod 0's init containers have finished, the
   provisioner removes the `moca.dev/seed-revision` annotation from the pod template and drops the
   bundle, so a pod that restarts later never seeds again.
-- **Size.** `size` must hold the bundle's inflated size once (`read-only`) or twice, plus whatever
-  runs write (`writable`); activate refuses a smaller one with `400 workspace_size_too_small`.
+- **Size.** `size` must hold the compressed bundle (the seed downloads it onto the claim) plus its
+  inflated size once (`read-only`) or twice, plus whatever runs write (`writable`), and 10% and
+  16 MiB more for the filesystem; activate refuses a smaller one with
+  `400 workspace_size_too_small`.
 - **Runs.** The context is mounted at `/workspace/context`: `read-only` at the revision, `writable`
   at the workload's own tree, which later runs (on any of its sandboxes) see as the last one left it.
   A run starts there, at `workspace/` when that is the revision's only content root, as with a copy.
   `contextWritable: true` on a `read-only` mount gives that run its own copy; on a `writable` one it
   changes nothing. Concurrent runs of a `writable` workload share the tree; MOCA adds no locking.
-- **A provisioner restart before the seed** loses the held bundle: pod 0's init container keeps
-  failing, and `GET /workloads/{id}` shows `provisioning` with `error: seed_bundle_missing`. Repeat
-  the activate, with the same revision, to resend it.
+- **A provisioner restart before the seed**, or a seed that has not run within
+  `MOCA_PROVISIONER_SEED_HOLD_S`, loses the held bundle: pod 0's init container keeps failing, and
+  `GET /workloads/{id}` shows `provisioning` with `error: seed_bundle_missing`. Repeat the activate,
+  with the same revision, to resend it.
 
 Nothing turns the writable tree back into a revision, and nothing exports it; it goes with the
 workload at `DELETE`.

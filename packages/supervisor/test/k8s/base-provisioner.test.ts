@@ -312,6 +312,11 @@ describe.skipIf(NO_KUBECTL)('deploy/k8s workload-sandboxes component (setup.sh o
       'size(variables.pod.volumes.filter(v, has(v.persistentVolumeClaim))) <= 1',
       'object.spec.storageClassName in variables.storageClasses',
       "m == 'ReadWriteMany' && object.spec.storageClassName in variables.rwxClasses",
+      // A PVC is created empty: never a clone, a restore, a bound PV or a raw device.
+      '!has(object.spec.dataSource) && !has(object.spec.dataSourceRef)',
+      '!has(object.spec.volumeName) && !has(object.spec.selector)',
+      "object.spec.?volumeMode.orValue('Filesystem') == 'Filesystem'",
+      '!has(c.volumeDevices)',
     ]) {
       expect(cel, needle).toContain(needle);
     }
@@ -341,7 +346,16 @@ describe.skipIf(NO_KUBECTL)('deploy/k8s workload-sandboxes component (setup.sh o
       const c = podSpec(dep).containers[0];
       expect(envVar(c, 'MOCA_WORKLOAD_STORAGE_CLASSES')?.value, name).toBe('standard:rwo,nfs:rwx');
       expect(envVar(c, 'MOCA_WORKLOAD_MAX_STORAGE')?.value, name).toBe('10Gi');
+      // The bundle ceilings: the workers' and the provisioner's are the same, or a hand-off the
+      // workers accepted is refused (413 bundle_too_large).
+      expect(envVar(c, 'MOCA_CONTEXT_BUNDLE_MAX_BYTES')?.value, name).toBe('268435456');
+      expect(envVar(c, 'MOCA_CONTEXT_BUNDLE_MAX_ENTRIES')?.value, name).toBe('10000');
     }
+    // One owner holds at most half the seed budget, so it is at least twice the largest bundle.
+    const prov = podSpec(find(objs, 'Deployment', 'moca-provisioner', 'moca')).containers[0];
+    expect(
+      Number(envVar(prov, 'MOCA_PROVISIONER_SEED_BUDGET_BYTES')?.value),
+    ).toBeGreaterThanOrEqual(2 * Number(envVar(prov, 'MOCA_CONTEXT_BUNDLE_MAX_BYTES')?.value));
     const binding = find(objs, 'ValidatingAdmissionPolicyBinding', 'moca-provisioner');
     expect(binding.spec).toEqual({ policyName: 'moca-provisioner', validationActions: ['Deny'] });
   });

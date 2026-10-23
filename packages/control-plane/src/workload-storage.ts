@@ -72,12 +72,12 @@ export function resolveWorkloadStorage(
   const mib = storageMiB(request.size);
   if (mib === null || mib > caps.maxMiB) return 'workspace_size_invalid';
   const size = request.size as string;
+  // `null` names no class, as an absent field does, in both branches.
+  const requested = request.storageClass ?? undefined;
   if (caps.classes.size === 0) {
-    return request.storageClass === undefined
-      ? { size, access: 'rwo' }
-      : 'storage_class_not_allowed';
+    return requested === undefined ? { size, access: 'rwo' } : 'storage_class_not_allowed';
   }
-  const storageClass = request.storageClass ?? caps.classes.keys().next().value!;
+  const storageClass = requested ?? caps.classes.keys().next().value!;
   if (typeof storageClass !== 'string' || !caps.classes.has(storageClass)) {
     return 'storage_class_not_allowed';
   }

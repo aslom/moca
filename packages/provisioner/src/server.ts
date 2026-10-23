@@ -9,6 +9,7 @@ import {
   ProvisionError,
   putBundle,
   putWorkload,
+  reserveBundle,
   type ProvisionerDeps,
   type WorkloadRef,
 } from './provisioner.js';
@@ -45,7 +46,7 @@ export interface ServerDeps extends ProvisionerDeps {
   serviceToken: string;
   /** SH_SESSION_TOKEN_PUBLIC_KEYS: the control plane's public keys, for the forwarded API token. */
   userKeys: Map<string, KeyObject>;
-  /** MOCA_PROVISIONER_BUNDLE_MAX_BYTES: the largest bundle one hand-off may carry. */
+  /** MOCA_CONTEXT_BUNDLE_MAX_BYTES: the largest bundle one hand-off may carry, as the workers'. */
   maxBundleBytes: number;
 }
 
@@ -81,6 +82,43 @@ async function readBody(req: IncomingMessage, max: number): Promise<Buffer> {
     chunks.push(chunk);
   }
   return Buffer.concat(chunks, size);
+}
+
+/**
+ * A bundle hand-off's body, read into one buffer of its declared Content-Length: never more than
+ * that in memory, and no concat copy. The caller has already reserved those bytes of the seed
+ * budget. A body shorter or longer than declared (the worker gave up) is a 400.
+ */
+async function readBundle(req: IncomingMessage, declared: number): Promise<Buffer> {
+  const out = Buffer.allocUnsafe(declared);
+  let size = 0;
+  try {
+    for await (const chunk of req as AsyncIterable<Buffer>) {
+      if (size + chunk.length > declared) break;
+      chunk.copy(out, size);
+      size += chunk.length;
+    }
+  } catch {
+    // The worker closed the connection mid-body (it gave up).
+    throw new ProvisionError(400, 'bundle_length_mismatch');
+  }
+  if (size !== declared) throw new ProvisionError(400, 'bundle_length_mismatch');
+  return out;
+}
+
+/**
+ * A bundle hand-off's declared size. It is required, so the seed budget is reserved before the body
+ * is read: 411 without it, 413 bundle_too_large past MOCA_CONTEXT_BUNDLE_MAX_BYTES, 400 when empty.
+ */
+function bundleLength(req: IncomingMessage, max: number): number {
+  const raw = header(req, 'content-length');
+  if (raw === undefined || !/^\d{1,15}$/.test(raw.trim())) {
+    throw new ProvisionError(411, 'bundle_length_required');
+  }
+  const declared = Number(raw);
+  if (declared > max) throw new ProvisionError(413, 'bundle_too_large');
+  if (declared === 0) throw new ProvisionError(400, 'bundle_empty');
+  return declared;
 }
 
 async function readJson(req: IncomingMessage): Promise<unknown> {
@@ -138,9 +176,15 @@ export async function handle(
       if (header(req, 'content-type')?.split(';', 1)[0]?.trim() !== BUNDLE_TYPE) {
         throw new ProvisionError(415, 'bundle_content_type_invalid');
       }
-      const bytes = await readBody(req, deps.maxBundleBytes);
-      if (bytes.length === 0) throw new ProvisionError(400, 'bundle_empty');
-      return send(res, 200, await putBundle(deps, ref, bytes));
+      // Reserved before a byte is read (503 seed_budget_full), and given back however this ends:
+      // held bundles plus hand-offs in flight never pass MOCA_PROVISIONER_SEED_BUDGET_BYTES.
+      const declared = bundleLength(req, deps.maxBundleBytes);
+      const release = reserveBundle(deps, ref, declared);
+      try {
+        return send(res, 200, await putBundle(deps, ref, await readBundle(req, declared)));
+      } finally {
+        release();
+      }
     }
     if (req.method === 'PUT') {
       const spec = parseSandboxSpec(await readJson(req), deps.config);
@@ -153,6 +197,8 @@ export async function handle(
     if (err instanceof ProvisionError) {
       if (err.status >= 500) console.error('provisioner:', err.message);
       if (err.code === 'seed_budget_full') res.setHeader('Retry-After', String(SEED_RETRY_AFTER_S));
+      // A refused hand-off's body is never read: close, so the worker stops sending it.
+      if (bundle && !req.readableEnded) res.setHeader('Connection', 'close');
       return send(res, err.status, { error: err.code });
     }
     console.error('provisioner: request failed:', err instanceof KubeError ? err.message : err);
@@ -196,6 +242,9 @@ export async function handleSeed(
   // Not held: a provisioner restart lost it, or the seed has finished. The worker's next activate
   // resends it (spec §5.2).
   if (!held || held.gen !== claims.gen) return send(res, 404, { error: 'seed_bundle_missing' });
+  // Counted against the seed budget until sent, even if the bundle is dropped meanwhile.
+  const done = deps.bundles.serve(held.bytes);
+  res.once('close', done);
   res
     .writeHead(200, { 'Content-Type': BUNDLE_TYPE, 'Content-Length': held.bytes.length })
     .end(held.bytes);

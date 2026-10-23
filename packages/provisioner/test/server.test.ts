@@ -302,12 +302,18 @@ describe('the bundle hand-off and the seed port (spec §5.2)', () => {
     expect((await putBundle(gen, BUNDLE, { type: 'application/json' })).status).toBe(415);
     expect((await putBundle(gen, Buffer.alloc(0))).status).toBe(400);
     expect((await putBundle(gen, Buffer.alloc(deps.maxBundleBytes + 1))).status).toBe(413);
-    // Fill the budget (1 MiB in these deps) with another workload's bundle first.
-    deps.bundles.put('w-' + '0'.repeat(32), { gen: 'g', bytes: Buffer.alloc(1024 * 1024), at: 0 });
-    deps.bundles.drop('w-' + '0'.repeat(32));
+    // Fill the budget (1 MiB in these deps) with other owners' bundles first.
+    const half = 512 * 1024;
     deps.bundles.put('w-' + '0'.repeat(32), {
       gen: 'g',
-      bytes: Buffer.alloc(1024 * 1024 - BUNDLE.length),
+      own: 'x',
+      bytes: Buffer.alloc(half),
+      at: 0,
+    });
+    deps.bundles.put('w-' + '1'.repeat(32), {
+      gen: 'g',
+      own: 'y',
+      bytes: Buffer.alloc(half - BUNDLE.length),
       at: 0,
     });
     expect((await putBundle(gen, BUNDLE)).status).toBe(200);
@@ -315,6 +321,91 @@ describe('the bundle hand-off and the seed port (spec §5.2)', () => {
     expect(full.status).toBe(503);
     expect(full.headers.get('retry-after')).toBe('15');
     expect(await full.json()).toEqual({ error: 'seed_budget_full' });
+  });
+
+  /** A hand-off whose body is written by the test: `declared` bytes, or chunked with none. */
+  const rawHandOff = (gen: string, user: string, declared?: number) => {
+    const req = http.request(`${base}${path(gen)}/bundle`, {
+      method: 'PUT',
+      headers: {
+        authorization: `Bearer ${SERVICE}`,
+        'x-moca-user-token': user,
+        'content-type': 'application/vnd.rossoctl.context',
+        ...(declared === undefined ? {} : { 'content-length': String(declared) }),
+      },
+    });
+    const answer = new Promise<{ status: number; body: unknown }>((resolve, reject) => {
+      req.on('response', (res) => {
+        let text = '';
+        res.on('data', (c: Buffer) => (text += c.toString()));
+        res.on('end', () => resolve({ status: res.statusCode!, body: JSON.parse(text || 'null') }));
+      });
+      req.on('error', reject);
+    });
+    answer.catch(() => {});
+    return { req, answer };
+  };
+  const until = async (cond: () => boolean) => {
+    for (let i = 0; i < 200 && !cond(); i++) await new Promise((r) => setTimeout(r, 5));
+    expect(cond()).toBe(true);
+  };
+
+  it('reserves the seed budget from Content-Length before reading a body: concurrent hand-offs past it get 503 at once', async () => {
+    const size = 400 * 1024;
+    const alice = rawHandOff(randomUUID(), apiToken('github:alice'), size);
+    const bob = rawHandOff(randomUUID(), apiToken('github:bob'), size);
+    alice.req.write(Buffer.alloc(1024));
+    bob.req.write(Buffer.alloc(1024));
+    await until(() => deps.bundles.reservedBytes === 2 * size);
+    // A third would pass the 1 MiB budget: refused before any of its body is read, while the
+    // other two are still in flight, and nothing is held yet.
+    const carol = rawHandOff(randomUUID(), apiToken('github:carol'), size);
+    carol.req.flushHeaders();
+    expect(await carol.answer).toEqual({ status: 503, body: { error: 'seed_budget_full' } });
+    carol.req.destroy();
+    expect(deps.bundles.heldBytes).toBe(0);
+    expect(deps.bundles.inMemory).toBe(2 * size);
+    // Alice's worker gives up mid-body: her reservation is given back.
+    alice.req.destroy();
+    await until(() => deps.bundles.reservedBytes === size);
+    bob.req.end(Buffer.alloc(size - 1024));
+    expect(await bob.answer).toEqual({ status: 200, body: { held: true } });
+    expect(deps.bundles.reservedBytes).toBe(0);
+    expect(deps.bundles.heldBytes).toBe(size);
+  });
+
+  it('refuses a hand-off without a Content-Length (411), or shorter than it declared (400), keeping no reservation', async () => {
+    const chunked = rawHandOff(randomUUID(), apiToken('github:alice'));
+    // Written before end(), so Node sends it chunked, with no Content-Length.
+    chunked.req.write(BUNDLE);
+    chunked.req.end();
+    expect(await chunked.answer).toEqual({
+      status: 411,
+      body: { error: 'bundle_length_required' },
+    });
+    const short = rawHandOff(randomUUID(), apiToken('github:alice'), 100);
+    short.req.write(Buffer.alloc(10));
+    await until(() => deps.bundles.reservedBytes === 100);
+    short.req.destroy();
+    await until(() => deps.bundles.reservedBytes === 0);
+    expect(deps.bundles.heldBytes).toBe(0);
+  });
+
+  it('counts a bundle a seed GET is still sending, even once it is dropped', async () => {
+    const gen = randomUUID();
+    await putBundle(gen, BUNDLE);
+    const wl = workloadKeyFor('github:alice', 'demo', gen);
+    const done = deps.bundles.serve(deps.bundles.get(wl)!.bytes);
+    deps.bundles.drop(wl);
+    expect(deps.bundles.heldBytes).toBe(0);
+    expect(deps.bundles.inMemory).toBe(BUNDLE.length);
+    done();
+    expect(deps.bundles.inMemory).toBe(0);
+    // Served end to end: nothing left counted after the response.
+    await putBundle(gen, BUNDLE);
+    expect((await seed(attachFor('github:alice', gen))).status).toBe(200);
+    deps.bundles.drop(wl);
+    await until(() => deps.bundles.inMemory === 0);
   });
 
   it("GET reports a mounted workload's seed: pending while held, bundle_missing when not", async () => {

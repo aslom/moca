@@ -797,15 +797,18 @@ disable_workload_sandboxes() {
       waited=$((waited + 1))
     done
   fi
-  sets="$(kc get statefulsets -n "$SBX_NS" -l "$WORKLOAD_SELECTOR" -o name)"
-  if [[ -n "$sets" ]]; then
-    if [[ -z "$DELETE_WORKLOAD_SANDBOXES" ]]; then
-      kc scale deployment/moca-provisioner -n "$NS" --replicas=1 >/dev/null ||
-        log 'WARNING: could not start moca-provisioner again; re-run with SH_WORKLOAD_SANDBOXES=1'
-      die "SH_WORKLOAD_SANDBOXES is being turned off, but workload sandboxes still exist in $SBX_NS ($(grep -c . <<<"$sets") StatefulSet(s) labelled $WORKLOAD_SELECTOR). Delete those workloads first (DELETE /workloads/{id}, or mocactl workloads delete ID), or re-run with --delete-workload-sandboxes to delete their StatefulSets, Services, Secrets and PVCs"
-    fi
+  # A PVC (the user's data) or Secret can outlive its StatefulSet -- a DELETE answered 202 while the
+  # claim's finalizer held it and was never repeated -- so those count as a workload's too.
+  if [[ -n "$DELETE_WORKLOAD_SANDBOXES" ]]; then
     log "--delete-workload-sandboxes: deleting every workload's sandboxes in $SBX_NS"
     kc delete statefulsets,services,secrets,persistentvolumeclaims -n "$SBX_NS" -l "$WORKLOAD_SELECTOR" --ignore-not-found >/dev/null
+  else
+    sets="$(kc get statefulsets,persistentvolumeclaims,secrets -n "$SBX_NS" -l "$WORKLOAD_SELECTOR" -o name)"
+    if [[ -n "$sets" ]]; then
+      kc scale deployment/moca-provisioner -n "$NS" --replicas=1 >/dev/null ||
+        log 'WARNING: could not start moca-provisioner again; re-run with SH_WORKLOAD_SANDBOXES=1'
+      die "SH_WORKLOAD_SANDBOXES is being turned off, but workload sandboxes still exist in $SBX_NS ($(grep -c . <<<"$sets") StatefulSet(s), PVC(s) or Secret(s) labelled $WORKLOAD_SELECTOR). Delete those workloads first (DELETE /workloads/{id}, or mocactl workloads delete ID), or re-run with --delete-workload-sandboxes to delete their StatefulSets, Services, Secrets and PVCs"
+    fi
   fi
   log 'SH_WORKLOAD_SANDBOXES off: removing moca-provisioner and its policies'
   kc delete -n "$NS" deployment/moca-provisioner service/moca-provisioner \
@@ -858,6 +861,19 @@ workload_storage_classes() {
   json="$(kc get storageclass -o json)" || json=''
   if [[ -n "$WORKLOAD_CLASSES_INPUT" ]]; then
     WORKLOAD_CLASSES="$WORKLOAD_CLASSES_INPUT"
+    # A typo would install cleanly and leave every mounted activate Pending: refuse a class the
+    # cluster does not have. Unlistable, only warned: the admission policy still holds the allowlist.
+    if [[ -n "$json" ]]; then
+      local c missing=''
+      for c in $WORKLOAD_CLASSES; do
+        jq -e --arg n "${c%:*}" 'any(.items[]; .metadata.name == $n)' <<<"$json" >/dev/null ||
+          missing="${missing:+$missing, }${c%:*}"
+      done
+      [[ -z "$missing" ]] ||
+        die "SH_WORKLOAD_STORAGE_CLASSES names StorageClass(es) this cluster does not have: $missing (kubectl get storageclass)"
+    else
+      log 'WARNING: could not list StorageClasses to check SH_WORKLOAD_STORAGE_CLASSES against them'
+    fi
   else
     [[ -n "$json" ]] ||
       die 'SH_WORKLOAD_SANDBOXES=1: could not list StorageClasses to find the default one: set SH_WORKLOAD_STORAGE_CLASSES (<class>:rwo, comma-separated)'

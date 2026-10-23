@@ -9,8 +9,13 @@ import {
 } from '@moca/control-plane';
 import type { KeyObject } from 'node:crypto';
 import { inClusterOptions, RestKube } from './kube.js';
-import { remintExpiring, settleSeeds, type ProvisionerConfig } from './provisioner.js';
-import { BundleStore } from './seed.js';
+import {
+  remintExpiring,
+  settleSeeds,
+  type ProvisionerConfig,
+  type ProvisionerDeps,
+} from './provisioner.js';
+import { BundleStore, DEFAULT_SEED_HOLD_S } from './seed.js';
 import { startSeedServer, startServer, type ServerDeps } from './server.js';
 
 /**
@@ -61,23 +66,65 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): ServerDeps & {
   const userKeys = parseKeyset(env.SH_SESSION_TOKEN_PUBLIC_KEYS);
   if (userKeys.size === 0) throw new Error('SH_SESSION_TOKEN_PUBLIC_KEYS is required');
   const namespace = env.MOCA_SANDBOX_NAMESPACE?.trim() || 'moca-sandbox';
+  const budget = positiveIntEnv(env, 'MOCA_PROVISIONER_SEED_BUDGET_BYTES', 1024 * 1024 * 1024);
+  const maxBundleBytes = positiveIntEnv(env, 'MOCA_CONTEXT_BUNDLE_MAX_BYTES', 256 * 1024 * 1024);
+  // One owner holds at most half the budget, so a largest bundle must fit in half of it.
+  if (maxBundleBytes > Math.floor(budget / 2)) {
+    throw new Error(
+      'MOCA_PROVISIONER_SEED_BUDGET_BYTES must be at least twice MOCA_CONTEXT_BUNDLE_MAX_BYTES',
+    );
+  }
   return {
     kube: new RestKube(inClusterOptions(env, namespace)),
     signer,
     // The seed port verifies attach tokens with this provisioner's own public key.
     attachKeys: new Map([[signer.kid, publicKeyFromBase64(signer.publicKeyBase64)]]),
     config: configFromEnv(env),
+    // Held bundles and hand-offs in flight together, half of it per owner; each held at most
+    // MOCA_PROVISIONER_SEED_HOLD_S (spec §5.2).
     bundles: new BundleStore(
-      positiveIntEnv(env, 'MOCA_PROVISIONER_SEED_BUDGET_BYTES', 1024 * 1024 * 1024),
+      budget,
+      positiveIntEnv(env, 'MOCA_PROVISIONER_SEED_HOLD_S', DEFAULT_SEED_HOLD_S),
     ),
-    // Phase 1's ceiling on a downloaded bundle (MOCA_CONTEXT_BUNDLE_MAX_BYTES), held to again here.
-    maxBundleBytes: positiveIntEnv(env, 'MOCA_CONTEXT_BUNDLE_MAX_BYTES', 256 * 1024 * 1024),
+    // Phase 1's ceiling on a downloaded bundle (MOCA_CONTEXT_BUNDLE_MAX_BYTES), held to again here:
+    // setup.sh gives the provisioner the workers' value.
+    maxBundleBytes,
     serviceToken: required(
       credentialValue(env, 'MOCA_PROVISIONER_TOKEN'),
       'MOCA_PROVISIONER_TOKEN',
     ),
     userKeys,
     reconcileS: positiveIntEnv(env, 'MOCA_PROVISIONER_RECONCILE_S', 300),
+  };
+}
+
+/** How often seeds are checked while one may be in progress. */
+export const SEED_POLL_MS = 5000;
+
+/**
+ * The seed-settle pass (settleSeeds), run once at startup by the reconcile tick and then every
+ * SEED_POLL_MS while a bundle is held or a StatefulSet still carries the seed annotation: a seed
+ * that finishes after a restart (nothing held) is settled in seconds, not at the next reconcile, so
+ * GET does not report bundle_missing for a seed that succeeded. One pass at a time.
+ */
+export function seedSettler(deps: ProvisionerDeps) {
+  let pending = 0;
+  let running: Promise<void> | null = null;
+  const run = (): Promise<void> =>
+    (running ??= settleSeeds(deps)
+      .then((r) => {
+        pending = r.pending;
+        if (r.settled > 0) console.log(`provisioner: ${r.settled} workload PVC(s) seeded`);
+      })
+      .catch((err: unknown) => console.error('provisioner: seed pass failed:', err))
+      .finally(() => {
+        running = null;
+      }));
+  return {
+    run,
+    /** The poll: a pass only while something may still seed. */
+    poll: (): Promise<void> =>
+      pending > 0 || deps.bundles.heldBytes > 0 ? run() : Promise.resolve(),
   };
 }
 
@@ -89,22 +136,18 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     deps,
     positiveIntEnv(process.env, 'MOCA_PROVISIONER_SEED_PORT', 8081),
   );
-  const settle = () =>
-    settleSeeds(deps)
-      .then((n) => n > 0 && console.log(`provisioner: ${n} workload PVC(s) seeded`))
-      .catch((err: unknown) => console.error('provisioner: seed pass failed:', err));
+  const settle = seedSettler(deps);
   // Re-mint attach tokens nearing expiry (spec §3.1), and finish seeds a restart left behind
   // (spec §5.3). The orphan sweep of spec §6.2 joins this loop in a later PR.
   const tick = () => {
-    void settle();
+    void settle.run();
     return remintExpiring(deps)
       .then((n) => n > 0 && console.log(`provisioner: re-minted ${n} attach token(s)`))
       .catch((err: unknown) => console.error('provisioner: re-mint pass failed:', err));
   };
   void tick();
   const timer = setInterval(tick, deps.reconcileS * 1000);
-  // While a bundle is held, check for its seed every few seconds, so it is not held long.
-  const seedTimer = setInterval(() => deps.bundles.heldBytes > 0 && void settle(), 5000);
+  const seedTimer = setInterval(() => void settle.poll(), SEED_POLL_MS);
   process.on('SIGTERM', () => {
     clearInterval(timer);
     clearInterval(seedTimer);

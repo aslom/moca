@@ -96,6 +96,13 @@ spec:
                 value: 'http://moca-provisioner.moca.svc:8081/seed/v1/bundle',
               }
             - { name: MOCA_PROVISIONER_SEED_BUDGET_BYTES, value: '1073741824' }
+            # How long a bundle is held, seeded or not; the next activate resends it.
+            - { name: MOCA_PROVISIONER_SEED_HOLD_S, value: '600' }
+            # Phase 1's bundle ceilings, which the workers download with (patch-supervisor.yaml sets
+            # the same values there). KEEP THEM EQUAL: a bundle over the provisioner's size is
+            # refused, and activate answers 413 bundle_too_large. The budget is at least twice this.
+            - { name: MOCA_CONTEXT_BUNDLE_MAX_BYTES, value: '268435456' }
+            - { name: MOCA_CONTEXT_BUNDLE_MAX_ENTRIES, value: '10000' }
             # The control plane's public keys, to verify the API token a worker forwards.
             - name: SH_SESSION_TOKEN_PUBLIC_KEYS
               valueFrom: { secretKeyRef: { name: moca-mu1, key: SH_SESSION_TOKEN_PUBLIC_KEYS } }
@@ -114,7 +121,10 @@ spec:
             httpGet: { path: /healthz, port: http }
             initialDelaySeconds: 10
             periodSeconds: 10
-          # The limit covers MOCA_PROVISIONER_SEED_BUDGET_BYTES of held bundles plus a bundle in flight.
+          # The memory bound: every bundle byte in the process -- held, being read (a hand-off
+          # reserves its Content-Length before reading, into one buffer of that size) or still being
+          # sent to a seed -- is within MOCA_PROVISIONER_SEED_BUDGET_BYTES (1024Mi), plus 640Mi for
+          # Node itself (heap, HTTP buffers): 1024 + 640 = 1664Mi. Raise both together.
           resources:
             requests: { cpu: 20m, memory: 192Mi }
             limits: { memory: 1664Mi }

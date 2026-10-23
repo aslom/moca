@@ -11,9 +11,10 @@ import {
   deleteWorkload,
   getWorkload,
   parseSandboxSpec,
-  putBundle,
+  putBundle as holdBundle,
   putWorkload,
   remintExpiring,
+  reserveBundle,
   settleSeeds,
   type ProvisionerConfig,
   type ProvisionerDeps,
@@ -44,6 +45,15 @@ const ref = (owner: string, name = 'demo', generation = randomUUID()): WorkloadR
   name,
   generation,
 });
+/** A hand-off as the server makes it: reserve its bytes, hold it, give the reservation back. */
+async function putBundle(d: ProvisionerDeps, r: WorkloadRef, bytes: Buffer) {
+  const release = reserveBundle(d, r, bytes.length);
+  try {
+    return await holdBundle(d, r, bytes);
+  } finally {
+    release();
+  }
+}
 const tokenIn = (wl: string) =>
   Buffer.from(kube.objects.secrets.get(`${wl}-attach`)!.data.token, 'base64').toString();
 
@@ -744,14 +754,122 @@ describe("a mounted workload's PVC and seed (spec §5)", () => {
 
   it('holds the bundle within the seed budget across workloads: 503 seed_budget_full past it', async () => {
     deps = { ...deps, bundles: new BundleStore(100) };
-    await putBundle(deps, ref('github:alice', 'one'), Buffer.alloc(60));
-    await expect(putBundle(deps, ref('github:bob', 'two'), Buffer.alloc(60))).rejects.toMatchObject(
-      {
-        status: 503,
-        code: 'seed_budget_full',
-      },
+    await putBundle(deps, ref('github:alice', 'one'), Buffer.alloc(45));
+    await putBundle(deps, ref('github:bob', 'two'), Buffer.alloc(45));
+    await expect(
+      putBundle(deps, ref('github:carol', 'three'), Buffer.alloc(20)),
+    ).rejects.toMatchObject({ status: 503, code: 'seed_budget_full' });
+    expect(deps.bundles.heldBytes).toBe(90);
+    expect(deps.bundles.reservedBytes).toBe(0);
+  });
+
+  it("holds one owner to half the budget, so one owner's stuck workloads never starve another", async () => {
+    deps = { ...deps, bundles: new BundleStore(100) };
+    await putBundle(deps, ref('github:alice', 'one'), Buffer.alloc(30));
+    await putBundle(deps, ref('github:alice', 'two'), Buffer.alloc(20));
+    // Alice's third would pass the budget's half; Bob still has his half.
+    await expect(
+      putBundle(deps, ref('github:alice', 'three'), Buffer.alloc(10)),
+    ).rejects.toMatchObject({ status: 503, code: 'seed_budget_full' });
+    expect(await putBundle(deps, ref('github:bob', 'one'), Buffer.alloc(50))).toEqual({
+      held: true,
+    });
+    // A resend for a workload replaces its own bundle: it is not counted twice.
+    const one = ref('github:carol', 'one');
+    deps = { ...deps, bundles: new BundleStore(100) };
+    await putBundle(deps, one, Buffer.alloc(50));
+    expect(await putBundle(deps, one, Buffer.alloc(50))).toEqual({ held: true });
+    expect(deps.bundles.heldBytes).toBe(50);
+  });
+
+  it('drops a held bundle after MOCA_PROVISIONER_SEED_HOLD_S whether or not its StatefulSet exists, and GET then reports bundle_missing', async () => {
+    deps = { ...deps, bundles: new BundleStore(1024 * 1024, 600) };
+    const r = ref('github:alice');
+    const wl = keysFor(r);
+    const unclaimed = ref('github:alice', 'never-put');
+    await putBundle(deps, r, Buffer.from('bundle'));
+    await putBundle(deps, unclaimed, Buffer.from('bundle'));
+    await putWorkload(deps, r, mounted('read-only'));
+    // Pod 0 never initializes (a Pending claim, a crash-looping seed).
+    kube.runPods(wl);
+    now += 300;
+    // The next activate resends it, which restarts its hold.
+    await putBundle(deps, r, Buffer.from('bundle'));
+    now += 301;
+    expect(await settleSeeds(deps)).toEqual({ settled: 0, pending: 1 });
+    expect(deps.bundles.get(wl)).toBeDefined();
+    expect(deps.bundles.get(keysFor(unclaimed))).toBeUndefined();
+    now += 300;
+    await settleSeeds(deps);
+    expect(deps.bundles.get(wl)).toBeUndefined();
+    expect(deps.bundles.heldBytes).toBe(0);
+    expect(await getWorkload(deps, r)).toMatchObject({ seed: 'bundle_missing' });
+    // And the next activate holds it again.
+    expect(await putBundle(deps, r, Buffer.from('bundle'))).toEqual({ held: true });
+    expect(await getWorkload(deps, r)).toMatchObject({ seed: 'pending' });
+  });
+
+  it('settles each StatefulSet on its own: one that throws is logged, the rest and the expiry still run', async () => {
+    deps = { ...deps, bundles: new BundleStore(1024 * 1024, 600) };
+    const bad = ref('github:alice', 'bad');
+    const good = ref('github:bob', 'good');
+    const stale = ref('github:carol', 'stale');
+    const old = ref('github:dave', 'old');
+    for (const r of [bad, good, stale]) {
+      await putBundle(deps, r, Buffer.from('bundle'));
+      await putWorkload(deps, r, mounted('read-only'));
+      kube.runPods(keysFor(r));
+      kube.objects.pods.get(`${keysFor(r)}-0`)!.status = {
+        conditions: [{ type: 'Initialized', status: 'True' }],
+      };
+    }
+    await putBundle(deps, old, Buffer.from('bundle'));
+    now += 601;
+    // The stale one: listed, then deleted before its patch (a concurrent DELETE).
+    const list = kube.list.bind(kube);
+    kube.list = async (kind, sel) => {
+      const items = await list(kind, sel);
+      if (kind === 'statefulsets') kube.objects.statefulsets.delete(keysFor(stale));
+      return items;
+    };
+    const get = kube.get.bind(kube);
+    kube.get = async (kind, name) => {
+      if (kind === 'pods' && name === `${keysFor(bad)}-0`) throw new Error('pods get failed');
+      return get(kind, name);
+    };
+    const errors: string[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((m: string) => void errors.push(m));
+    try {
+      expect(await settleSeeds(deps)).toEqual({ settled: 1, pending: 1 });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(errors.some((m) => /seed check of StatefulSet .* failed: pods get failed/.test(m))).toBe(
+      true,
     );
-    expect(deps.bundles.heldBytes).toBe(60);
+    expect(
+      stsOf(keysFor(good)).spec.template.metadata.annotations['moca.dev/seed-revision'],
+    ).toBeNull();
+    // No patch of the deleted one, and every bundle past its hold is gone, the bad one's too.
+    expect(kube.calls).not.toContain(`patch statefulsets ${keysFor(stale)}`);
+    expect(deps.bundles.entries()).toEqual([]);
+  });
+
+  it('a bundle hand-off that lands after DELETE is refused, never held again', async () => {
+    const r = ref('github:alice');
+    await putWorkload(deps, r, mounted('read-only'));
+    // The worker gave up on an activate; its hand-off is still on the wire when DELETE runs.
+    const late = putBundle(deps, r, Buffer.from('bundle'));
+    const del = deleteWorkload(deps, r);
+    expect(await late).toEqual({ held: true });
+    await del;
+    expect(deps.bundles.get(keysFor(r))).toBeUndefined();
+    await expect(putBundle(deps, r, Buffer.from('bundle'))).rejects.toMatchObject({
+      status: 404,
+      code: 'workload_not_found',
+    });
+    expect(deps.bundles.heldBytes).toBe(0);
+    expect(deps.bundles.reservedBytes).toBe(0);
   });
 
   it("removes the seed annotation and drops the bundle once pod 0's init containers completed, and only then", async () => {
@@ -764,16 +882,16 @@ describe("a mounted workload's PVC and seed (spec §5)", () => {
     const initialized = { conditions: [{ type: 'Initialized', status: 'True' }] };
     // Pod 1 is not the writer: its init containers finishing says nothing about the seed.
     kube.objects.pods.get(`${wl}-1`)!.status = initialized;
-    expect(await settleSeeds(deps)).toBe(0);
+    expect(await settleSeeds(deps)).toEqual({ settled: 0, pending: 1 });
     expect(deps.bundles.get(wl)).toBeDefined();
     kube.objects.pods.get(`${wl}-0`)!.status = initialized;
-    expect(await settleSeeds(deps)).toBe(1);
+    expect(await settleSeeds(deps)).toEqual({ settled: 1, pending: 0 });
     expect(stsOf(wl).spec.template.metadata.annotations['moca.dev/seed-revision']).toBeNull();
     expect(deps.bundles.get(wl)).toBeUndefined();
     expect(await getWorkload(deps, r)).toMatchObject({ seed: 'done' });
     // A repeat activate after the seed holds nothing: it would never be fetched.
     expect(await putBundle(deps, r, Buffer.from('bundle'))).toEqual({ held: false });
-    expect(await settleSeeds(deps)).toBe(0);
+    expect(await settleSeeds(deps)).toEqual({ settled: 0, pending: 0 });
   });
 
   it('reports bundle_missing when the claim is unseeded and nothing is held (a provisioner restart)', async () => {

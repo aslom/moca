@@ -7,8 +7,9 @@
 # template with a volume other than emptyDir, configMap, downwardAPI, its own `<wl>-attach` Secret or
 # one claim on its own `<wl>` PVC, an env or envFrom read of any other Secret, a host namespace, a
 # privileged container or added capability, a claim template, another ServiceAccount, or a mounted
-# service-account token. PVCs (spec §5.1): it may write only one named `<wl>`, created in an
-# allowlisted StorageClass with an access mode that class allows.
+# service-account token, or a raw device (volumeDevices). PVCs (spec §5.1): it may write only one
+# named `<wl>`, created empty (no dataSource, dataSourceRef, volumeName or selector) as a Filesystem
+# claim in an allowlisted StorageClass with an access mode that class allows.
 # Deletes are held to the same names, so it cannot delete the shared pool or another Secret either.
 #
 # admissionregistration.k8s.io/v1: Kubernetes 1.30 or newer (OpenShift 4.17 or newer).
@@ -95,6 +96,17 @@ spec:
       message: >-
         a workload PVC must use an allowlisted StorageClass (MOCA_WORKLOAD_STORAGE_CLASSES), and
         ReadWriteOnce, or ReadWriteMany only on a class allowlisted as rwx
+    # A fresh, empty Filesystem claim only: a dataSource or dataSourceRef would clone another
+    # workload's PVC or restore a snapshot or populator, and volumeName or selector would bind a
+    # pre-provisioned PV. Block mode is a raw device, never a tree.
+    - expression: >-
+        variables.kind != 'persistentvolumeclaims' || request.operation != 'CREATE' ||
+        (!has(object.spec.dataSource) && !has(object.spec.dataSourceRef) &&
+         !has(object.spec.volumeName) && !has(object.spec.selector) &&
+         object.spec.?volumeMode.orValue('Filesystem') == 'Filesystem')
+      message: >-
+        a workload PVC must be a new, empty Filesystem claim: no dataSource, dataSourceRef,
+        volumeName or selector, and no Block volumeMode
     - expression: >-
         variables.kind != 'statefulsets' ||
         (has(variables.obj.metadata.labels) && 'app' in variables.obj.metadata.labels &&
@@ -134,6 +146,9 @@ spec:
         variables.kind != 'statefulsets' || !has(variables.pod.volumes) ||
         size(variables.pod.volumes.filter(v, has(v.persistentVolumeClaim))) <= 1
       message: workload pods may mount their own <name> PVC through one volume only
+    # A claim's raw device, which the Filesystem rule above already keeps from existing.
+    - expression: 'variables.containers.all(c, !has(c.volumeDevices))'
+      message: workload containers may not attach a volume as a raw device (volumeDevices)
     - expression: >-
         variables.containers.all(c,
           (!has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) ||

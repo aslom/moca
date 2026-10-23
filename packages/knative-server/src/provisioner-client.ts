@@ -74,7 +74,19 @@ async function call(
     },
     ...(body === undefined
       ? {}
-      : { body: raw ? new Blob([new Uint8Array(body)]) : JSON.stringify(body) }),
+      : // The bundle's own bytes, never copied: fetch sends them with their Content-Length,
+        // which the provisioner requires to reserve its seed budget first.
+        {
+          body: raw
+            ? // A view of the Buffer's memory, not a copy. Node Buffers never sit on a
+              // SharedArrayBuffer, which is all the cast rules out.
+              (new Uint8Array(
+                (body as Buffer).buffer,
+                (body as Buffer).byteOffset,
+                (body as Buffer).length,
+              ) as Uint8Array<ArrayBuffer>)
+            : JSON.stringify(body),
+        }),
     signal: AbortSignal.timeout(timeout),
   }).catch((err: unknown) => {
     throw new ProvisionerError(`the provisioner is unreachable: ${String(err)}`);

@@ -1,35 +1,95 @@
 /**
  * Seeding a workload's PVC (workload sandboxes spec §5.2, §5.3). The worker hands the provisioner
  * the frozen bundle it downloaded from Context Service's export; the provisioner holds it here, in
- * memory and within MOCA_PROVISIONER_SEED_BUDGET_BYTES across all workloads, until pod `<wl>-0`'s
- * init containers have seeded the claim. They fetch it from the seed port with the workload's attach
- * token, whose `wl` and `gen` pick the bundle. A provisioner restart before the seed loses it: the
- * seed port answers 404 seed_bundle_missing, the GET reports it, and the worker's next activate
- * sends it again.
+ * memory and within MOCA_PROVISIONER_SEED_BUDGET_BYTES across all workloads (half of it per owner),
+ * until pod `<wl>-0`'s init containers have seeded the claim, or for MOCA_PROVISIONER_SEED_HOLD_S at
+ * most. They fetch it from the seed port with the workload's attach token, whose `wl` and `gen` pick
+ * the bundle. A provisioner restart before the seed loses it, as does the hold running out: the seed
+ * port answers 404 seed_bundle_missing, the GET reports it, and the worker's next activate sends it
+ * again.
  */
 
 export interface HeldBundle {
   /** The generation it was handed over for: a token of another generation never fetches it. */
   gen: string;
+  /** The owner scope it was handed over for: its share of the budget (BundleStore.ownerBudget). */
+  own: string;
   bytes: Buffer;
-  /** Epoch seconds it was handed over. */
+  /** Epoch seconds it was handed over; a later hand-off (the next activate) refreshes it. */
   at: number;
 }
 
+/** How long a bundle is held, by default (MOCA_PROVISIONER_SEED_HOLD_S). */
+export const DEFAULT_SEED_HOLD_S = 600;
+
+/**
+ * Bundles held for seeding, and the bytes reserved for hand-offs still being read. A hand-off
+ * reserves its Content-Length before its body is read (reserve), so held bundles, hand-offs in
+ * flight and bundles dropped while a seed GET still sends them (serve) together never pass the
+ * budget, and one owner's never pass `ownerBudget`, half of it: one owner's
+ * stuck workloads cannot starve every other owner. Every bundle is dropped `holdS` after its last
+ * hand-off, whether or not its seed ran (expire): a seed that never starts (a Pending claim, a
+ * crash-looping init container) frees its share, and GET reports `seed: bundle_missing` until the
+ * next activate resends it.
+ */
 export class BundleStore {
   private held = new Map<string, HeldBundle>();
   private bytes = 0;
+  private reservedTotal = 0;
+  private reservedBy = new Map<string, number>();
+  /** Buffers a seed GET is sending, and how many GETs; one dropped meanwhile still counts. */
+  private serving = new Map<Buffer, number>();
+  private lingering = new Set<Buffer>();
+  private lingeringBytes = 0;
+  /** Workloads DELETE removed, with when: a late hand-off for one is never held again. */
+  private retiredAt = new Map<string, number>();
+  /** The most one owner may hold and reserve together: half the budget. */
+  readonly ownerBudget: number;
 
-  /** MOCA_PROVISIONER_SEED_BUDGET_BYTES: every held bundle together. */
-  constructor(readonly budget: number) {}
+  /** `budget`: MOCA_PROVISIONER_SEED_BUDGET_BYTES; `holdS`: MOCA_PROVISIONER_SEED_HOLD_S. */
+  constructor(
+    readonly budget: number,
+    readonly holdS = DEFAULT_SEED_HOLD_S,
+  ) {
+    this.ownerBudget = Math.floor(budget / 2);
+  }
 
-  /** Hold `bundle` for `wl`, replacing an earlier one. False when it does not fit the budget. */
-  put(wl: string, bundle: HeldBundle): boolean {
-    const previous = this.held.get(wl)?.bytes.length ?? 0;
-    if (this.bytes - previous + bundle.bytes.length > this.budget) return false;
-    this.bytes += bundle.bytes.length - previous;
-    this.held.set(wl, bundle);
+  private ownerBytes(own: string): number {
+    let n = this.reservedBy.get(own) ?? 0;
+    for (const b of this.held.values()) if (b.own === own) n += b.bytes.length;
+    return n;
+  }
+
+  /**
+   * Reserve `n` bytes for a hand-off to `wl` before reading it. A bundle already held for `wl` (the
+   * same owner's earlier activate) does not count against it: it is dropped here, since the new one
+   * replaces it, so the bytes in memory never pass what is held and reserved. False when it does not
+   * fit the budget or the owner's share of it; nothing is reserved or dropped then.
+   */
+  reserve(wl: string, own: string, n: number): boolean {
+    const prev = this.held.get(wl);
+    const replaced = prev && prev.own === own ? prev.bytes.length : 0;
+    if (this.inMemory - replaced + n > this.budget) return false;
+    if (this.ownerBytes(own) - replaced + n > this.ownerBudget) return false;
+    if (replaced) this.drop(wl);
+    this.reservedTotal += n;
+    this.reservedBy.set(own, (this.reservedBy.get(own) ?? 0) + n);
     return true;
+  }
+
+  /** Give back a reservation, once its bundle is held or its hand-off failed. */
+  release(own: string, n: number): void {
+    this.reservedTotal -= n;
+    const left = (this.reservedBy.get(own) ?? 0) - n;
+    if (left > 0) this.reservedBy.set(own, left);
+    else this.reservedBy.delete(own);
+  }
+
+  /** Hold `bundle` for `wl`, replacing an earlier one. Its bytes were reserved before the read. */
+  put(wl: string, bundle: HeldBundle): void {
+    this.drop(wl);
+    this.bytes += bundle.bytes.length;
+    this.held.set(wl, bundle);
   }
 
   get(wl: string): HeldBundle | undefined {
@@ -41,6 +101,53 @@ export class BundleStore {
     if (!b) return;
     this.bytes -= b.bytes.length;
     this.held.delete(wl);
+    // Still being sent: in memory until the last GET ends, so it stays counted until then.
+    if (this.serving.has(b.bytes) && !this.lingering.has(b.bytes)) {
+      this.lingering.add(b.bytes);
+      this.lingeringBytes += b.bytes.length;
+    }
+  }
+
+  /** A seed GET starts sending `bytes`; call the returned function once it has ended. */
+  serve(bytes: Buffer): () => void {
+    this.serving.set(bytes, (this.serving.get(bytes) ?? 0) + 1);
+    let ended = false;
+    return () => {
+      if (ended) return;
+      ended = true;
+      const left = (this.serving.get(bytes) ?? 1) - 1;
+      if (left > 0) return void this.serving.set(bytes, left);
+      this.serving.delete(bytes);
+      if (this.lingering.delete(bytes)) this.lingeringBytes -= bytes.length;
+    };
+  }
+
+  /** DELETE removed `wl`: drop its bundle, and refuse to hold one for it again (retired). */
+  retire(wl: string, now: number): void {
+    this.drop(wl);
+    this.retiredAt.set(wl, now);
+  }
+
+  retired(wl: string): boolean {
+    return this.retiredAt.has(wl);
+  }
+
+  /**
+   * Drop every bundle handed over more than `holdS` ago. A retired workload is forgotten after an
+   * hour (or `holdS`, if longer), well past any hand-off a worker still waits on; its key names one
+   * generation, so it is never provisioned again. Returns the bundles dropped.
+   */
+  expire(now: number): number {
+    let dropped = 0;
+    for (const [wl, b] of this.held) {
+      if (now - b.at > this.holdS) {
+        this.drop(wl);
+        dropped++;
+      }
+    }
+    const forget = Math.max(this.holdS, 3600);
+    for (const [wl, at] of this.retiredAt) if (now - at > forget) this.retiredAt.delete(wl);
+    return dropped;
   }
 
   entries(): [string, HeldBundle][] {
@@ -49,6 +156,15 @@ export class BundleStore {
 
   get heldBytes(): number {
     return this.bytes;
+  }
+
+  get reservedBytes(): number {
+    return this.reservedTotal;
+  }
+
+  /** Held, reserved, and dropped but still being sent: never more than `budget`. */
+  get inMemory(): number {
+    return this.bytes + this.reservedTotal + this.lingeringBytes;
   }
 }
 

@@ -1,10 +1,11 @@
-import { createHash, generateKeyPairSync, randomUUID } from 'node:crypto';
+import { createHash, generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
 import http from 'node:http';
 import { gzipSync } from 'node:zlib';
 import { createClient } from 'redis';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { keyIdFor, makeSigner, publicKeyToBase64 } from '@moca/control-plane';
 import { startServer } from '../src/server.js';
+import { seedBytesNeeded } from '../src/workloads.js';
 
 // The workload lifecycle against a real Redis (its Lua compare-and-set is the point) and a fake
 // Context Service that implements the trusted API's observable rules.
@@ -12,6 +13,7 @@ import { startServer } from '../src/server.js';
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
 const REVISION = 'a'.repeat(64);
 const OTHER_REVISION = 'b'.repeat(64);
+const MIB = 1024 * 1024;
 
 const { privateKey, publicKey } = generateKeyPairSync('ed25519');
 const signer = makeSigner(privateKey.export({ format: 'pem', type: 'pkcs8' }).toString());
@@ -658,13 +660,13 @@ describe('lifecycle races', () => {
 class FakeProvisioner {
   calls: { method: string; path: string; auth: string; user: string; body: unknown }[] = [];
   /** Bundles handed over, as received (spec §5.2). */
-  bundles: { path: string; type: string; bytes: Buffer }[] = [];
+  bundles: { path: string; type: string; length?: string; bytes: Buffer }[] = [];
   /** Pods every DELETE reports as still terminating. */
   podsLeft = 0;
   /** One-shot: the next PUT fails with this status and code. */
   failPut?: { status: number; error: string };
   /** One-shot: the next bundle hand-off fails with this status and code. */
-  failBundle?: { status: number; error: string };
+  failBundle?: { status: number; error: string; retryAfter?: string };
   /** What GET reports as the seed. */
   seed?: string;
   /** When set, a PUT holds until it resolves: a slow API server behind the provisioner. */
@@ -690,11 +692,14 @@ class FakeProvisioner {
       this.bundles.push({
         path: req.url,
         type: String(req.headers['content-type']),
+        length: req.headers['content-length'],
         bytes: Buffer.concat(chunks),
       });
       const fail = this.failBundle;
       this.failBundle = undefined;
-      if (fail) return reply(fail.status, { error: fail.error }, { 'retry-after': '7' });
+      if (fail) {
+        return reply(fail.status, { error: fail.error }, { 'retry-after': fail.retryAfter ?? '7' });
+      }
       return reply(200, { held: true });
     }
     if (req.method === 'PUT' && this.putGate) await this.putGate;
@@ -1020,6 +1025,8 @@ describe('a workload with sandboxes of its own (phase 2)', () => {
       expect(prov.bundles).toHaveLength(1);
       expect(prov.bundles[0]!.type).toBe('application/vnd.rossoctl.context');
       expect(prov.bundles[0]!.bytes).toEqual(cs.bundle);
+      // Sent with its length, which the provisioner reserves its seed budget from.
+      expect(prov.bundles[0]!.length).toBe(String(cs.bundle.length));
       expect(prov.bundles[0]!.path).toMatch(
         /^\/internal\/v1\/workloads\/demo\/[0-9a-f-]{36}\/bundle$/,
       );
@@ -1032,11 +1039,14 @@ describe('a workload with sandboxes of its own (phase 2)', () => {
       });
     });
 
-    it('refuses a size that cannot hold the revision (twice for writable): 400 workspace_size_too_small', async () => {
-      // 1.5 MiB inflated: fits 2Mi read-only, not 2Mi writable.
-      cs.bundle = gzipSync(Buffer.alloc(1536 * 1024, 'x'));
+    it('refuses a size that cannot hold the seed: bundle plus revision (twice for writable) plus a margin', async () => {
+      // 10 MiB of x: tiny compressed. Read-only needs (c + 10 MiB) * 1.1 + 16 MiB, about 27 MiB;
+      // writable (c + 20 MiB) * 1.1 + 16 MiB, about 38 MiB.
+      expect(seedBytesNeeded(0, 10 * MIB, 'read-only')).toBe(Math.ceil(11 * MIB) + 16 * MIB);
+      expect(seedBytesNeeded(MIB, 10 * MIB, 'writable')).toBe(Math.ceil(21 * 1.1 * MIB) + 16 * MIB);
+      cs.bundle = gzipSync(Buffer.alloc(10 * MIB, 'x'));
       await create(alice, 'demo', {
-        workspace: { mount: 'writable', size: '2Mi' },
+        workspace: { mount: 'writable', size: '30Mi' },
         sandboxes: { count: 1 },
       });
       cs.upload(alice);
@@ -1053,13 +1063,47 @@ describe('a workload with sandboxes of its own (phase 2)', () => {
         error: 'workspace_size_too_small',
       });
       await create(bob, 'demo', {
-        workspace: { mount: 'read-only', size: '2Mi' },
+        workspace: { mount: 'read-only', size: '30Mi' },
         sandboxes: { count: 1 },
       });
       cs.upload(bob);
       expect(
         (await call('POST', '/workloads/demo/activate', bob, { revision: REVISION })).status,
       ).toBe(202);
+      // Incompressible: the compressed bundle the seed downloads onto the claim counts too, so the
+      // same 30Mi read-only no longer fits (about 38 MiB needed).
+      cs.bundle = gzipSync(randomBytes(10 * MIB));
+      const carol = `github:carol-${randomUUID()}`;
+      await create(carol, 'demo', {
+        workspace: { mount: 'read-only', size: '30Mi' },
+        sandboxes: { count: 1 },
+      });
+      cs.upload(carol);
+      expect(await call('POST', '/workloads/demo/activate', carol, { revision: REVISION })).toEqual(
+        { status: 400, body: { error: 'workspace_size_too_small' } },
+      );
+    });
+
+    it('passes a provisioner 413 through as 413 bundle_too_large, and a malformed Retry-After as 15', async () => {
+      await create(alice, 'demo', { workspace: { mount: 'read-only' }, sandboxes: { count: 1 } });
+      cs.upload(alice);
+      prov.failBundle = { status: 413, error: 'bundle_too_large' };
+      expect(await call('POST', '/workloads/demo/activate', alice, { revision: REVISION })).toEqual(
+        { status: 413, body: { error: 'bundle_too_large' } },
+      );
+      for (const retryAfter of ['soon', '99999', '-1', '1.5']) {
+        prov.failBundle = { status: 503, error: 'seed_budget_full', retryAfter };
+        const response = await fetch(`${base}/workloads/demo/activate`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${apiToken(alice)}`,
+          },
+          body: JSON.stringify({ revision: REVISION }),
+        });
+        expect(response.status, retryAfter).toBe(503);
+        expect(response.headers.get('retry-after'), retryAfter).toBe('15');
+      }
     });
 
     it('passes 503 seed_budget_full through with Retry-After, and the retry resends the bundle', async () => {

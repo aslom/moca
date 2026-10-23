@@ -680,7 +680,8 @@ export function deleteWorkload(
 
 async function removeWorkload(deps: ProvisionerDeps, k: Keys): Promise<{ remaining: number }> {
   const { kube } = deps;
-  deps.bundles.drop(k.wl);
+  // Retired, not only dropped: a late hand-off for it is refused, never held again.
+  deps.bundles.retire(k.wl, nowOf(deps));
   let claimLeft = 0;
   for (const [kind, name] of [
     ['statefulsets', k.wl],
@@ -699,71 +700,112 @@ async function removeWorkload(deps: ProvisionerDeps, k: Keys): Promise<{ remaini
 }
 
 /**
- * Hold the frozen bundle a mounted workload's init containers seed from (spec §5.2), until
- * settleSeeds sees the seed done. Not held when the workload's sandboxes have already seeded: a
- * repeat activate resends it, and it would never be fetched.
+ * Reserve `bytes` of the seed budget for a bundle hand-off to `ref`'s workload, before its body is
+ * read (spec §5.2): the budget bounds what is in memory, not only what is held. Throws 503
+ * seed_budget_full when it does not fit the budget or the owner's half of it. The caller gives the
+ * reservation back with the returned function once the bundle is held or the hand-off failed.
  */
-export async function putBundle(
+export function reserveBundle(deps: ProvisionerDeps, ref: WorkloadRef, bytes: number): () => void {
+  const k = keysOf(ref);
+  if (!deps.bundles.reserve(k.wl, k.own, bytes)) throw new ProvisionError(503, 'seed_budget_full');
+  let released = false;
+  return () => {
+    if (!released) deps.bundles.release(k.own, bytes);
+    released = true;
+  };
+}
+
+/**
+ * Hold the frozen bundle a mounted workload's init containers seed from (spec §5.2), until
+ * settleSeeds sees the seed done or MOCA_PROVISIONER_SEED_HOLD_S passes. Its bytes were reserved
+ * first (reserveBundle). Not held when the workload's sandboxes have already seeded (a repeat
+ * activate resends it, and it would never be fetched), nor once DELETE has removed the workload: on
+ * the owner's queue, so a hand-off from an activate the worker gave up on, landing after the DELETE,
+ * is refused instead of held for nothing.
+ */
+export function putBundle(
   deps: ProvisionerDeps,
   ref: WorkloadRef,
   bytes: Buffer,
 ): Promise<{ held: boolean }> {
   const k = keysOf(ref);
-  const sts = await deps.kube.get('statefulsets', k.wl);
-  if (sts && !ours(sts, k)) conflict('StatefulSet', k.wl);
-  if (sts && !sts.spec?.template?.metadata?.annotations?.[SEED_ANNOTATION]) return { held: false };
-  // The budget holds across every workload waiting to seed: a burst of activations waits on the
-  // client (Retry-After), not in this process's memory.
-  if (!deps.bundles.put(k.wl, { gen: ref.generation, bytes, at: nowOf(deps) })) {
-    throw new ProvisionError(503, 'seed_budget_full');
-  }
-  return { held: true };
+  return serialized(k.own, async () => {
+    if (deps.bundles.retired(k.wl)) throw new ProvisionError(404, 'workload_not_found');
+    const sts = await deps.kube.get('statefulsets', k.wl);
+    if (sts && !ours(sts, k)) conflict('StatefulSet', k.wl);
+    if (sts && !sts.spec?.template?.metadata?.annotations?.[SEED_ANNOTATION]) {
+      return { held: false };
+    }
+    deps.bundles.put(k.wl, { gen: ref.generation, own: k.own, bytes, at: nowOf(deps) });
+    return { held: true };
+  });
 }
-
-/** How long a bundle is held for a workload whose StatefulSet never came (a failed PUT). */
-const UNCLAIMED_BUNDLE_S = 600;
 
 /**
  * Finish seeds (spec §5.3): for each workload StatefulSet still carrying the seed annotation, once
  * pod `<wl>-0` is Initialized (its init containers, the seed's one writer, completed), remove the
- * annotation and drop the held bundle. OnDelete keeps that patch from restarting any pod; a pod created later
- * comes up without it, so its init containers do nothing. Also drops bundles nothing will fetch.
+ * annotation and drop the held bundle. OnDelete keeps that patch from restarting any pod; a pod
+ * created later comes up without it, so its init containers do nothing. Then drop every bundle held
+ * past MOCA_PROVISIONER_SEED_HOLD_S, seeded or not. Each StatefulSet is settled on its own: one that
+ * fails is logged and skipped. `pending` counts the StatefulSets still carrying the annotation, which
+ * main.ts keeps checking every few seconds.
  */
-export async function settleSeeds(deps: ProvisionerDeps): Promise<number> {
+export async function settleSeeds(
+  deps: ProvisionerDeps,
+): Promise<{ settled: number; pending: number }> {
   const sets = await deps.kube.list(
     'statefulsets',
     `app=${APP_LABEL},${MANAGED_BY_LABEL}=${MANAGED_BY}`,
   );
   let settled = 0;
+  let pending = 0;
   for (const s of sets) {
-    const l = s.metadata.labels ?? {};
-    const k = { wl: l[WORKLOAD_LABEL], own: l[OWNER_LABEL] };
-    if (!k.wl || !k.own || s.metadata.name !== k.wl) continue;
-    if (!s.spec?.template?.metadata?.annotations?.[SEED_ANNOTATION]) {
-      deps.bundles.drop(k.wl);
-      continue;
+    try {
+      const r = await settleOne(deps, s);
+      if (r === 'settled') settled++;
+      if (r === 'pending') pending++;
+    } catch (err) {
+      pending++;
+      const why = err instanceof Error ? err.message : String(err);
+      console.error(`provisioner: seed check of StatefulSet ${s.metadata.name} failed: ${why}`);
     }
-    const first = await deps.kube.get('pods', `${k.wl}-0`);
-    const seeded =
-      first !== null &&
-      ours(first, k) &&
-      ((first.status?.conditions ?? []) as { type: string; status: string }[]).some(
-        (c) => c.type === 'Initialized' && c.status === 'True',
-      );
-    if (!seeded) continue;
-    await serialized(k.own, () =>
-      deps.kube.patch('statefulsets', k.wl, {
-        spec: { template: { metadata: { annotations: { [SEED_ANNOTATION]: null } } } },
-      }),
-    );
+  }
+  deps.bundles.expire(nowOf(deps));
+  return { settled, pending };
+}
+
+async function settleOne(
+  deps: ProvisionerDeps,
+  s: KubeObject,
+): Promise<'settled' | 'pending' | 'skip'> {
+  const l = s.metadata.labels ?? {};
+  const k = { wl: l[WORKLOAD_LABEL], own: l[OWNER_LABEL] };
+  if (!k.wl || !k.own || s.metadata.name !== k.wl) return 'skip';
+  if (!s.spec?.template?.metadata?.annotations?.[SEED_ANNOTATION]) {
     deps.bundles.drop(k.wl);
-    settled++;
+    return 'skip';
   }
-  const live = new Set(sets.map((s) => s.metadata.name));
-  for (const [wl, b] of deps.bundles.entries()) {
-    if (!live.has(wl) && nowOf(deps) - b.at > UNCLAIMED_BUNDLE_S) deps.bundles.drop(wl);
-  }
-  return settled;
+  const first = await deps.kube.get('pods', `${k.wl}-0`);
+  const seeded =
+    first !== null &&
+    ours(first, k) &&
+    ((first.status?.conditions ?? []) as { type: string; status: string }[]).some(
+      (c) => c.type === 'Initialized' && c.status === 'True',
+    );
+  if (!seeded) return 'pending';
+  const patched = await serialized(k.own, async () => {
+    // Read again under the owner's queue: a DELETE may have removed it since the list.
+    const cur = await deps.kube.get('statefulsets', k.wl);
+    if (!cur || !ours(cur, k)) return false;
+    if (cur.spec?.template?.metadata?.annotations?.[SEED_ANNOTATION]) {
+      await deps.kube.patch('statefulsets', k.wl, {
+        spec: { template: { metadata: { annotations: { [SEED_ANNOTATION]: null } } } },
+      });
+    }
+    return true;
+  });
+  deps.bundles.drop(k.wl);
+  return patched ? 'settled' : 'skip';
 }
 
 /**

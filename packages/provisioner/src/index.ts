@@ -7,6 +7,7 @@ export {
   putBundle,
   putWorkload,
   remintExpiring,
+  reserveBundle,
   settleSeeds,
   type ProvisionerConfig,
   type ProvisionerDeps,
@@ -14,7 +15,7 @@ export {
   type SandboxStatus,
   type WorkloadRef,
 } from './provisioner.js';
-export { BundleStore, type HeldBundle } from './seed.js';
+export { BundleStore, DEFAULT_SEED_HOLD_S, type HeldBundle } from './seed.js';
 export {
   USER_TOKEN_HEADER,
   handle,

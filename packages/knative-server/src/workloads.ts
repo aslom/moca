@@ -321,6 +321,24 @@ function workloadClaim(workspace: Record<string, unknown>): WorkloadStorage | st
   );
 }
 
+/**
+ * What a mounted workload's PVC must hold for its seed (spec §5.1). The seed downloads the
+ * compressed bundle onto the claim and removes it only after extracting, so at its peak the claim
+ * holds the bundle and the revision, and for `writable` the revision's seeded copy as well. The
+ * revision is measured by the inflated tar stream, the only size the export carries. Then a margin
+ * for the filesystem (reserved blocks, metadata, 4 KiB blocks against tar's 512 B padding across up
+ * to MOCA_CONTEXT_BUNDLE_MAX_ENTRIES files): 10% of that, plus 16 MiB.
+ */
+export function seedBytesNeeded(
+  compressed: number,
+  inflated: number,
+  mount: WorkloadMount,
+): number {
+  const data = compressed + inflated * (mount === 'writable' ? 2 : 1);
+  return Math.ceil(data * 1.1) + SEED_MARGIN_BYTES;
+}
+const SEED_MARGIN_BYTES = 16 * 1024 * 1024;
+
 /** The storage Context Service is asked for, within this deployment's ceiling and allowlist. */
 function contextStorage(workspace: Record<string, unknown>): ContextStorage | string {
   const size = workspace.size ?? '1Gi';
@@ -358,9 +376,15 @@ function sendFailure(res: ServerResponse, operation: string, err: unknown): void
       .writeHead(429, { ...JSON_HEADERS, 'Retry-After': String(PROVISIONER_RETRY_AFTER_S) })
       .end(JSON.stringify({ error: err.code }));
   } else if (err instanceof ProvisionerError && err.code === 'seed_budget_full') {
-    // Every workload waiting to seed shares the provisioner's budget: retry later (spec §5.2).
-    res.setHeader('Retry-After', err.retryAfter ?? '15');
+    // Every workload waiting to seed shares the provisioner's budget: retry later (spec §5.2). Its
+    // Retry-After passes through only as a plain number of seconds.
+    const after = err.retryAfter && /^\d{1,4}$/.test(err.retryAfter) ? err.retryAfter : '15';
+    res.setHeader('Retry-After', after);
     send(res, 503, { error: err.code });
+  } else if (err instanceof ProvisionerError && err.status === 413) {
+    // The bundle passed the workers' MOCA_CONTEXT_BUNDLE_MAX_BYTES but not the provisioner's: an
+    // operator mismatch no repeat fixes.
+    send(res, 413, { error: 'bundle_too_large' });
   } else if (
     err instanceof ProvisionerError &&
     err.code &&
@@ -582,11 +606,11 @@ async function provision(
         record.revision!,
         record.owner,
       );
-      // The PVC holds the revision once, and a writable mount's seeded copy of it as well (spec
-      // §5.1), so refuse a size that cannot before any seed runs out of space. Measured by the
-      // inflated tar stream: the only size of the revision the export carries.
-      const needed = (await bundleInflatedBytes(bundle)) * (sandboxes.mount === 'writable' ? 2 : 1);
-      if (storageMiB(sandboxes.claim!.size)! * 1024 * 1024 < needed) {
+      // Refuse a size the seed cannot fit before it runs out of space (spec §5.1).
+      if (
+        storageMiB(sandboxes.claim!.size)! * 1024 * 1024 <
+        seedBytesNeeded(bundle.length, await bundleInflatedBytes(bundle), sandboxes.mount)
+      ) {
         throw new WorkspaceTooSmallError();
       }
       await handOverBundle(ref, bundle);
