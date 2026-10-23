@@ -471,7 +471,8 @@ persistence follows the existing `base/redis.yaml`.
   local-hook files** (`.mcp.json`, `.claude/`, `opencode.json(c)`, `.opencode/`, `.codex/`,
   `.vscode/tasks.json`, `.vscode/settings.json`, `.husky/`, `.envrc`, or `.vscode` itself), on either
   side of a rename or copy, at any depth and under case and Unicode folding. A change to
-  `CLAUDE.md` or `AGENTS.md` outside the `sbx up` block is applied with a warning.
+  `CLAUDE.md`, `AGENTS.md` or `AGENTS.override.md` (Codex reads it in preference to `AGENTS.md`)
+  outside the `sbx up` block is applied with a warning.
 - **"Changes not yet pulled"** means the tree differs from `refs/sbx/baseline` (a superset of a
   non-empty porcelain status that also counts the agent's own commits), or the workspace holds files
   with no baseline.

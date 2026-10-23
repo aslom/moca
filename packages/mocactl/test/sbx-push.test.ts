@@ -1001,6 +1001,7 @@ describe('pull --apply never writes local agent configuration or hooks (final re
     '.ＨUSKY/pre-push',
     '.EnvRC',
     '.CODEX/config.toml',
+    '.ＣODEX/config.toml',
     // Windows aliases (#554 review): trailing dots and spaces, a backslash separator, 8.3 names.
     '.claude./settings.json',
     '.envrc ',
@@ -1178,6 +1179,19 @@ describe('pull --apply never writes local agent configuration or hooks (final re
     expect(warns[0]).not.toMatch(/AGENTS\.md/);
     expect(warns[0]).toMatch(/outside the sbx block/);
     expect(warns[0]).toMatch(/git diff/);
+  });
+
+  it('warns for an AGENTS.override.md the patch creates: Codex reads it instead of AGENTS.md', async () => {
+    const r = repo();
+    writeFileSync(join(r, 'AGENTS.md'), 'agents\n');
+    const { ws, exec } = await pushed(r);
+    writeFileSync(join(ws, 'AGENTS.override.md'), 'read me instead\n');
+    const warns: string[] = [];
+    await applyPatch(r, await capturePatch(exec), { warn: (s) => warns.push(s) });
+    expect(warns.join('\n')).toMatch(/AGENTS\.override\.md/);
+    expect(warns.join('\n')).toMatch(/outside the sbx block/);
+    // Text, not an executable: applied, like the other prompt files.
+    expect(readFileSync(join(r, 'AGENTS.override.md'), 'utf8')).toBe('read me instead\n');
   });
 
   it('warns for a CLAUDE.md the patch creates or deletes, at any depth', async () => {
