@@ -51,6 +51,12 @@ func TestABudgetRefusalShedsAStandbyInsteadOfFailing(t *testing.T) {
 	}
 	// Exactly one standby, not the victim's whole ready list: shedding a coldest run's
 	// full standby depth to admit one VM is spec §6's reclaim storm.
+	//
+	// waitFor, not a bare read: evictForBudgetLocked hands the VM to p.reclaimQ and
+	// reclaimLoop calls Destroy off the hot path, so the destroy lands AFTER Exec
+	// returns. BudgetEvictions above is incremented under p.mu and is therefore safe to
+	// read synchronously; this counter is the launcher's, on the far side of the queue.
+	waitFor(t, func() bool { return lc.destroyedFor("run-a") == 2 })
 	if n := lc.destroyedFor("run-a"); n != 2 {
 		t.Fatalf("run-a destroys = %d, want 2 (its own exec VM, plus the ONE evicted standby)", n)
 	}
@@ -71,6 +77,12 @@ func TestEvictionTakesTheLeastRecentlyUsedRun(t *testing.T) {
 		t.Fatalf("Exec run-c: %v", err)
 	}
 
+	// The victim's destroy is asynchronous (see the note in the test above), so wait for
+	// it rather than reading straight after Exec. Waiting for the POSITIVE half first is
+	// also what makes the negative half below meaningful: once the evicted VM has been
+	// destroyed the reclaim queue has drained past this eviction, so a zero for run-new is
+	// "run-new was not the victim" rather than "the reclaim loop has not got there yet".
+	waitFor(t, func() bool { return lc.destroyedFor("run-old")-oldBefore == 1 })
 	if got := lc.destroyedFor("run-old") - oldBefore; got != 1 {
 		t.Fatalf("run-old lost %d standbys, want 1 — the coldest run is the victim", got)
 	}
@@ -106,6 +118,11 @@ func TestEvictionKeepsTheWorkspaceOnDisk(t *testing.T) {
 	if evicted, _ := evictions(p); evicted == 0 {
 		t.Fatal("nothing was evicted, so this test is not exercising what it claims")
 	}
+	// Wait for the reclaim to actually land before stat'ing. The counter above moves under
+	// p.mu, but the teardown that COULD have taken the workspace runs on the reclaim loop —
+	// so checking the marker while that is still queued would assert "not deleted yet"
+	// instead of "never deleted".
+	waitFor(t, func() bool { return lc.destroyedFor("run-a") == 2 })
 
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("stat %s after run-a was evicted: %v — eviction costs the victim a cold acquire, never its workspace", marker, err)
