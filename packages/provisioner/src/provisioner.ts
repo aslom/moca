@@ -418,6 +418,8 @@ async function converge(
   if (!sts) {
     await kube.create('statefulsets', statefulSet(template!, ref, k, spec, minted!.annotations));
     sts = await kube.get('statefulsets', k.wl);
+    // The re-read is held to the same ownership as the pre-read: never adopt another's object.
+    if (sts && !ours(sts, k)) conflict('StatefulSet', k.wl);
   } else if (minted || Number(sts.spec?.replicas) !== spec.count) {
     await kube.patch('statefulsets', k.wl, {
       metadata: { annotations: { [COUNT_ANNOTATION]: String(spec.count), ...minted?.annotations } },

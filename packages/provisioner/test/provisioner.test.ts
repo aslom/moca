@@ -228,6 +228,25 @@ describe('the owner boundary', () => {
       code: 'workload_object_conflict',
     });
   });
+
+  it('refuses to adopt a StatefulSet that appears between its pre-read and its create', async () => {
+    const r = ref('github:alice');
+    const wl = workloadKeyFor(r.owner, r.name, r.generation);
+    const create = kube.create.bind(kube);
+    kube.create = async (kind, obj) => {
+      if (kind === 'statefulsets') {
+        kube.objects.statefulsets.set(wl, {
+          metadata: { name: wl, labels: { 'moca.dev/workload': wl } },
+          spec: { replicas: 1 },
+        });
+      }
+      return create(kind, obj);
+    };
+    await expect(putWorkload(deps, r, { count: 1, tier: 'container' })).rejects.toMatchObject({
+      status: 409,
+      code: 'workload_object_conflict',
+    });
+  });
 });
 
 describe('caps (spec §6.3), enforced here too', () => {
