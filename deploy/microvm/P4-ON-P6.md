@@ -244,6 +244,41 @@ On a small budget it also warns that 16 slots at standby depth 2 could commit mo
 budget allows. Two or three sessions stay far below that. For more, raise the budget or set
 `WORKER_MAX_CONCURRENT` in `microvm-worker.env`.
 
+### Size the budget for DISTINCT SESSIONS, not for concurrency (#452)
+
+The warning above counts slots, which reads like a concurrency limit. The budget is not one.
+
+`MICROVM_MAX_COMMITTED_MB` bounds the memory of VMs _resident at once_, and what makes a VM resident
+is a **distinct `workspace_key`** — one per session — not a command in flight. A session that ran one
+tool call an hour ago still holds its VM, standby included, until `SH_WORKSPACE_IDLE` reclaims it.
+So the number to divide the budget by is how many sessions are _open_, which on a demo host is
+every session anyone started and did not finish:
+
+```
+distinct sessions ≈ MICROVM_MAX_COMMITTED_MB / (guest MiB × (1 + standby depth))
+```
+
+At the verified settings — `8192` MiB, `guest=256MiB`, `D=2` — that is roughly **10 sessions**, not
+10 simultaneous commands. Four people with three abandoned chat tabs each will reach it while the
+host looks idle.
+
+Past that point the worker refuses an exec rather than overcommitting, and since v0.9 it first sheds
+the least-recently-used **idle standby** VM and retries, so a refusal now means every resident VM
+belongs to a session with live work. The refusal reaches the caller as **HTTP 503 with
+`Retry-After`** and code `sandbox_unavailable`; the same prompt is retryable and the async queue
+drains on its own as sessions go idle.
+
+Two knobs, and they do different things:
+
+| Symptom                                 | Knob                                                          |
+| --------------------------------------- | ------------------------------------------------------------- |
+| 503s with few sessions open             | raise `MICROVM_MAX_COMMITTED_MB` (or lower standby depth `D`) |
+| 503s because old sessions never go away | lower `SH_WORKSPACE_IDLE` from the installer's `8h`           |
+
+Before #452, a refusal at this ceiling did not surface as a 503 at all: it was delivered to the
+model as its command's output, so a turn answered 200 with the host's memory arithmetic quoted back
+as prose. If you are reading an older worker's logs, that is what a budget ceiling looked like.
+
 ## Run a turn
 
 These are single-user, **unauthenticated** `/turn` calls, and they need `SH_REQUIRE_AUTH=false` in
@@ -509,6 +544,13 @@ Verified on 2026-09-30:
   accounts are #367's acceptance run.
 - **Cloud Hypervisor, density and throughput (#256, #261), a host reboot, and any host other than
   the one above.**
+- **The budget ceiling on this rig (#452).** Every run above stayed well inside `8192` MiB — the
+  largest used 4 Execs — so no run here ever reached the ceiling, shed a standby, or produced a 503.
+  The eviction and the 503 mapping are covered by unit tests (`remote-worker/internal/vmpool`,
+  `packages/k8s-sandbox`, `packages/knative-server`); what is **not** verified is the end-to-end
+  behaviour on a host with ~10 sessions open at once. Reaching it deliberately needs either more
+  distinct sessions than the arithmetic above allows or a temporarily small
+  `MICROVM_MAX_COMMITTED_MB`.
 
 ## Guest egress (P4.1, #277)
 
@@ -555,6 +597,9 @@ proxy's `DynamicUser` needs no group). While `moca-egress` is down, restores fai
   (MI1 S4).
 - **A fresh VM per tool call** (#274). Destroying the VM dominates Exec latency (#307).
 - **The silent workspace reset** (#338, above).
+- **About ten open sessions per host, at the verified settings** (#452, above). The ceiling counts
+  distinct sessions, not concurrent commands, and a session holds its VM until `SH_WORKSPACE_IDLE`
+  reclaims it. Past it, turns answer 503 + `Retry-After` rather than overcommitting the host.
 - **A workspace lives on one sandbox.** A session that moves (its sandbox gone past the grace) starts on an empty workspace; nothing copies it.
 - **A `setup-vm.sh` re-run forgets every session.** It recreates `sh-redis` (`--replace`, no volume;
   `deploy/vm/setup-vm.sh`, `start_redis`). The control plane's session and ownership index goes with
