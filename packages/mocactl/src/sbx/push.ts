@@ -158,6 +158,7 @@ export function isGitPath(p: string): boolean {
 const AGENT_DIRS: Record<string, string> = {
   '.claude': 'Claude Code settings, hooks and commands',
   '.opencode': 'OpenCode configuration and plugins',
+  '.codex': 'Codex CLI configuration, which can start MCP servers',
   '.husky': 'git hooks',
 };
 const AGENT_FILES: Record<string, string> = {

@@ -984,6 +984,8 @@ describe('pull --apply never writes local agent configuration or hooks (final re
     'opencode.json',
     'opencode.jsonc',
     '.opencode/plugin/x.ts',
+    '.codex/config.toml',
+    '.codex/AGENTS.md',
     '.vscode/tasks.json',
     '.vscode/settings.json',
     '.husky/pre-commit',
@@ -998,6 +1000,7 @@ describe('pull --apply never writes local agent configuration or hooks (final re
     '.VSCode/Tasks.json',
     '.ＨUSKY/pre-push',
     '.EnvRC',
+    '.CODEX/config.toml',
     // Windows aliases (#554 review): trailing dots and spaces, a backslash separator, 8.3 names.
     '.claude./settings.json',
     '.envrc ',
@@ -1037,12 +1040,15 @@ describe('pull --apply never writes local agent configuration or hooks (final re
     for (const p of [
       '.claude',
       '.opencode',
+      '.codex',
       '.husky',
       '.ſbx',
       'src/mcp.json',
       '.mcp.json.bak',
       'docs/claude/x.md',
       '.claudex/x',
+      '.codexrc',
+      'docs/codex/x.md',
       'opencode.json5',
       '.vscode',
       '.vscode/extensions.json',
@@ -1057,7 +1063,7 @@ describe('pull --apply never writes local agent configuration or hooks (final re
       'AGENTS.md',
     ]) {
       // A bare directory name is matched too (a file or link where the directory goes).
-      const want = ['.claude', '.opencode', '.husky', '.vscode'].includes(p);
+      const want = ['.claude', '.opencode', '.codex', '.husky', '.vscode'].includes(p);
       expect(isAgentConfigPath(p), p).toBe(want);
     }
   });
