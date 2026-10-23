@@ -3,7 +3,7 @@ import http from 'node:http';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { keyIdFor, makeSigner, workloadKeyFor } from '@moca/control-plane';
 import { startServer, type ServerDeps } from '../src/server.js';
-import { RestKube } from '../src/kube.js';
+import { KubeError, RestKube } from '../src/kube.js';
 import { FakeKube, workloadTemplate } from './fake-kube.js';
 
 // The internal API end to end over HTTP: both credentials, the owner from the forwarded token,
@@ -126,6 +126,30 @@ describe('the routes', () => {
     });
     expect((await call('POST', path(gen))).status).toBe(405);
     expect((await call('GET', '/internal/v1/other')).status).toBe(404);
+  });
+});
+
+describe('Kubernetes failures', () => {
+  it('maps an admission denial (403) or an invalid object (422) to 422 workload_refused, others to 502', async () => {
+    const create = kube.create.bind(kube);
+    let status = 403;
+    kube.create = async (kind, obj) => {
+      if (kind === 'statefulsets') {
+        throw new KubeError(status, 'Forbidden', `Kubernetes API POST ${kind} answered ${status}`);
+      }
+      return create(kind, obj);
+    };
+    for (status of [403, 422]) {
+      expect(await call('PUT', path(randomUUID()), { body: { count: 1 } })).toEqual({
+        status: 422,
+        body: { error: 'workload_refused' },
+      });
+    }
+    status = 500;
+    expect(await call('PUT', path(randomUUID()), { body: { count: 1 } })).toEqual({
+      status: 502,
+      body: { error: 'kubernetes_error' },
+    });
   });
 });
 

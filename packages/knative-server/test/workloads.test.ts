@@ -16,6 +16,9 @@ const { privateKey, publicKey } = generateKeyPairSync('ed25519');
 const signer = makeSigner(privateKey.export({ format: 'pem', type: 'pkcs8' }).toString());
 const apiToken = (sub: string) =>
   signer.mint({ sub, tenant: sub, roles: [], scope: ['api'], ttlSeconds: 300 });
+/** One token per caller, so a test can check the exact token the worker forwarded. */
+const tokens = new Map<string, string>();
+const tokenOf = (sub: string) => tokens.get(sub) ?? tokens.set(sub, apiToken(sub)).get(sub)!;
 
 interface FakeContext {
   contextId: string;
@@ -196,7 +199,7 @@ async function call(method: string, path: string, owner?: string | null, body?: 
     method,
     headers: {
       'content-type': 'application/json',
-      ...(owner ? { authorization: `Bearer ${apiToken(owner)}` } : {}),
+      ...(owner ? { authorization: `Bearer ${tokenOf(owner)}` } : {}),
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
@@ -585,11 +588,22 @@ class FakeProvisioner {
   podsLeft = 0;
   /** One-shot: the next PUT fails with this status and code. */
   failPut?: { status: number; error: string };
-  server = http.createServer((req, res) => void this.handle(req, res));
+  /** When set, a PUT holds until it resolves: a slow API server behind the provisioner. */
+  putGate?: Promise<void>;
+  /** Every request, in arrival order: the real provisioner runs one owner's requests one at a time. */
+  private queue: Promise<void> = Promise.resolve();
+  /** What happened, in order, as the provisioner finished it. */
+  done: string[] = [];
+  server = http.createServer((req, res) => {
+    const run = this.queue.then(() => this.handle(req, res));
+    this.queue = run.catch(() => undefined);
+  });
 
   private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(chunk as Buffer);
+    if (req.method === 'PUT' && this.putGate) await this.putGate;
+    this.done.push(req.method ?? '');
     this.calls.push({
       method: req.method ?? '',
       path: req.url ?? '',
@@ -683,7 +697,8 @@ describe('a workload with sandboxes of its own (phase 2)', () => {
       body: { count: 2, tier: 'container', revision: REVISION },
     });
     expect(put!.path).toMatch(/^\/internal\/v1\/workloads\/demo\/[0-9a-f-]{36}$/);
-    expect(put!.user).not.toBe('undefined');
+    // Alice's own API token, verbatim: the provisioner takes the owner from it.
+    expect(put!.user).toBe(tokenOf(alice));
     expect(JSON.stringify(put)).not.toContain(wlOf(alice));
 
     await attachRecord(alice, wlOf(alice), 0);
@@ -791,6 +806,61 @@ describe('a workload with sandboxes of its own (phase 2)', () => {
     const deletes = prov.calls.filter((c) => c.method === 'DELETE');
     expect(deletes.length).toBeGreaterThanOrEqual(2);
     expect(deletes.every((c) => c.auth === 'Bearer prov-service-token')).toBe(true);
+    expect(deletes.every((c) => c.user === tokenOf(alice))).toBe(true);
+  });
+
+  it('a DELETE after a PUT the worker gave up on waits for it, and only then deletes the Context', async () => {
+    await create(alice, 'demo', { sandboxes: { count: 1 } });
+    cs.upload(alice);
+    vi.stubEnv('MOCA_PROVISIONER_TIMEOUT_MS', '50');
+    let release!: () => void;
+    prov.putGate = new Promise<void>((resolve) => (release = resolve));
+    // The worker times out; the provisioner is still converging the PUT.
+    expect(await call('POST', '/workloads/demo/activate', alice, { revision: REVISION })).toEqual({
+      status: 502,
+      body: { error: 'provisioner_error' },
+    });
+    vi.stubEnv('MOCA_PROVISIONER_TIMEOUT_MS', '');
+    const deleting = call('DELETE', '/workloads/demo', alice);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Queued behind the PUT: the Context is untouched while it runs.
+    expect(cs.calls.some((c) => c.method === 'DELETE')).toBe(false);
+    release();
+    expect(await deleting).toEqual({ status: 204, body: null });
+    // The PUT finished before the DELETE that answered `remaining: 0`.
+    expect(prov.done).toEqual(['PUT', 'DELETE']);
+    expect(cs.contexts.size).toBe(0);
+    expect(await quotaOf(alice)).toBe(0);
+  });
+
+  it('passes a 429 through with Retry-After, and a permanent refusal leaves DELETE as the way out', async () => {
+    await create(alice, 'demo', { sandboxes: { count: 1 } });
+    cs.upload(alice);
+    prov.failPut = { status: 429, error: 'owner_sandbox_quota_exceeded' };
+    const response = await fetch(`${base}/workloads/demo/activate`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${tokenOf(alice)}` },
+      body: JSON.stringify({ revision: REVISION }),
+    });
+    expect(response.status).toBe(429);
+    expect(response.headers.get('retry-after')).toMatch(/^[1-9][0-9]*$/);
+    // The provisioner's own cap below the worker's, or the cluster refusing the objects.
+    for (const fail of [
+      { status: 400, error: 'sandboxes_count_exceeded' },
+      { status: 422, error: 'workload_refused' },
+    ]) {
+      prov.failPut = fail;
+      expect(await call('POST', '/workloads/demo/activate', alice, { revision: REVISION })).toEqual({
+        status: fail.status,
+        body: { error: fail.error },
+      });
+      expect((await call('GET', '/workloads/demo', alice)).body).toMatchObject({
+        status: 'provisioning',
+        error: fail.error,
+      });
+    }
+    expect((await call('DELETE', '/workloads/demo', alice)).status).toBe(204);
+    expect(await quotaOf(alice)).toBe(0);
   });
 
   it('a phase 1 workload never calls the provisioner, even with one configured', async () => {

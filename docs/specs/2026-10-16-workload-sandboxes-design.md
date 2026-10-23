@@ -239,11 +239,13 @@ mounts any Secret in the namespace, or runs as another ServiceAccount. A Validat
 ServiceAccount, refuses any StatefulSet, Service or Secret it writes or deletes in `moca-sandbox`
 unless: a StatefulSet or Service is named `^w-[0-9a-f]{32}$` and a Secret
 `^w-[0-9a-f]{32}-attach$` (Opaque); the StatefulSet and its pods are labelled
-`app: moca-workload-sandbox`; the pod runs as `moca-workload-sandbox` with
-`automountServiceAccountToken: false`; its only Secret reference, as a volume, projected source,
-`secretKeyRef` or `envFrom`, is its own `<name>-attach`; and it has no host path, host namespace,
-projected service-account token, privileged or escalating container, added capability, or claim
-template. The Role says which verbs; the policy says which objects.
+`app: moca-workload-sandbox`; a Service is headless (`ClusterIP`, `clusterIP: None`) with no
+ports, external IPs or load-balancer fields, and selects exactly `app: moca-workload-sandbox` and
+its own `moca.dev/workload`; the pod runs as `moca-workload-sandbox` with
+`automountServiceAccountToken: false`; its volumes are only `emptyDir`, `configMap`, `downwardAPI`
+and its own `<name>-attach` Secret (an allow-list), and its only Secret reference in `secretKeyRef`
+or `envFrom` is that one too; and it has no host namespace, privileged or escalating container,
+added capability, or claim template. The Role says which verbs; the policy says which objects.
 
 **Network.** Its egress is the Kubernetes API server only: `setup.sh` fills in the `kubernetes`
 Service's ClusterIP and its EndpointSlice addresses, and refuses to enable the feature when it

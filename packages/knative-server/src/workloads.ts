@@ -56,6 +56,8 @@ const CREATE_FIELDS = new Set(['name', 'contextType', 'workspace']);
 const SANDBOXES_FIELD = 'sandboxes';
 const SANDBOX_FIELDS = new Set(['count', 'tier']);
 const WORKSPACE_FIELDS = new Set(['size', 'storageClass']);
+/** Retry-After on a passed-through `429 owner_sandbox_quota_exceeded`. */
+const PROVISIONER_RETRY_AFTER_S = 30;
 
 type WorkloadStatus =
   'creating' | 'awaiting_upload' | 'provisioning' | 'ready' | 'deleting' | 'deleted';
@@ -303,12 +305,18 @@ function sendFailure(res: ServerResponse, operation: string, err: unknown): void
   console.error(`workload ${operation} failed:`, err);
   if (err instanceof WorkloadStateChangedError) {
     send(res, 409, { error: 'workload_state_changed' });
+  } else if (err instanceof ProvisionerError && err.code && err.status === 429) {
+    // The owner's cap across workloads (spec §6.3): it frees once the owner deletes a workload.
+    res
+      .writeHead(429, { ...JSON_HEADERS, 'Retry-After': String(PROVISIONER_RETRY_AFTER_S) })
+      .end(JSON.stringify({ error: err.code }));
   } else if (
     err instanceof ProvisionerError &&
     err.code &&
-    (err.status === 400 || err.status === 409 || err.status === 429)
+    (err.status === 400 || err.status === 409 || err.status === 422)
   ) {
-    // The provisioner's own caps (spec §6.3) and conflicts are the caller's to act on.
+    // The provisioner's own caps and conflicts, and the cluster refusing the objects (422
+    // workload_refused): the caller's or the operator's to act on, not an outage.
     send(res, err.status, { error: err.code });
   } else if (err instanceof ProvisionerError) {
     send(res, 502, { error: 'provisioner_error' });
@@ -472,7 +480,9 @@ async function activateWorkload(
 /**
  * Ask the provisioner for the workload's sandboxes, then answer `200 ready` once the relay has a
  * record for each of them, or `202 provisioning` until then (GET and a repeat activate check again).
- * A failure stays on the record as `error`, and the record stays `provisioning` for a retry.
+ * A failure stays on the record as `error`, and the record stays `provisioning` for a retry. A
+ * refusal no retry can fix (a 400 such as `sandboxes_count_exceeded`, or `422 workload_refused`)
+ * stays the same way: the revision is frozen, so DELETE is the way out (docs/context-service.md).
  */
 async function provision(
   record: WorkloadRecord,

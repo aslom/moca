@@ -487,7 +487,9 @@ async function runPromptLeaf(
       return { status: 'failed', reason: 'saturated', message: err.message };
     }
     // Its own reason, so the sync /runs path answers 503 workload_sandbox_unavailable rather than
-    // a terminal failure: the workload's sandboxes may be starting or restarting.
+    // a terminal failure: the workload's sandboxes may be starting or restarting. A deployment
+    // that can never serve a workload run (WorkloadSandboxMisconfiguredError) falls through to a
+    // terminal `error`, as SandboxRequiredError does.
     if (err instanceof WorkloadSandboxUnavailableError) {
       return { status: 'failed', reason: 'workload_sandbox_unavailable', message: err.message };
     }

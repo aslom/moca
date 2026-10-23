@@ -28,9 +28,11 @@ export {
 } from './sandbox-token.js';
 export {
   ATTACH_CLOCK_LEEWAY_S,
+  ATTACH_OWNER_RE,
   ATTACH_TOKEN_AUDIENCE,
   ATTACH_TOKEN_ISSUER,
   ATTACH_TOKEN_TYP,
+  ATTACH_WORKLOAD_RE,
   mintAttachToken,
   verifyAttachToken,
   type AttachMintInput,

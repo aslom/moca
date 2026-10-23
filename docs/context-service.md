@@ -185,17 +185,27 @@ outside the cluster.
 1. **Runs** execute only on the workload's own sandboxes, of the same owner. The context still
    arrives by copy, as above, now onto those sandboxes. When none is attached (a pod restarting),
    the run answers `503 workload_sandbox_unavailable` with `Retry-After`; it never falls back to the
-   shared pool.
+   shared pool. A worker that can never serve it (no relay sandbox pool) fails the run instead.
 1. **Delete** removes the sandboxes first and waits until no pod remains, then deletes the Context
    and the record. If pods are still terminating after `MOCA_PROVISIONER_DELETE_WAIT_MS` (default
    60 s), it answers `202` with `status: deleting`, and a repeated `DELETE` finishes it.
 
 A failed provisioning leaves the record in `provisioning` with an `error` field, since a frozen
 revision cannot be unfrozen; a repeat activate with the same revision retries. The `error` goes once
-the record is `ready`, so a request that timed out but did create the sandboxes leaves no trace. The provisioner's
-refusals pass through: `429 owner_sandbox_quota_exceeded` when the owner's sandboxes across all
-workloads would exceed `MOCA_OWNER_MAX_SANDBOXES` (default 4), and `502 provisioner_error` when it
-cannot be reached.
+the record is `ready`, so a request that timed out but did create the sandboxes leaves no trace. The
+provisioner's refusals pass through on activate:
+
+| Answer                             | Meaning                                                                                                                              | Way out                                                     |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------- |
+| `429 owner_sandbox_quota_exceeded` | The owner's sandboxes across all workloads would exceed `MOCA_OWNER_MAX_SANDBOXES` (default 4). Has `Retry-After`.                   | Delete another workload, then repeat the activate           |
+| `400 sandboxes_count_exceeded`     | `count` is above the provisioner's `MOCA_WORKLOAD_MAX_SANDBOXES`, which is lower than the workers'. An operator mismatch.            | `DELETE`, then re-create                                    |
+| `400` (other `sandbox*` codes)     | The provisioner refused the request itself (`sandbox_tier_unavailable`, `sandboxes_count_invalid`, ...).                             | `DELETE`, then re-create                                    |
+| `409 workload_object_conflict`     | An object under the workload's derived name in `moca-sandbox` is not this workload's.                                                | An operator removes it                                      |
+| `422 workload_refused`             | The cluster refused the workload's objects: the admission policy (an operator's PodTemplate outside its rules) or an invalid object. | An operator fixes the PodTemplate, then repeat, or `DELETE` |
+| `502 provisioner_error`            | The provisioner could not be reached, or Kubernetes failed behind it.                                                                | Repeat the activate                                         |
+
+A refusal no repeat can fix leaves the record `provisioning` with that `error`: the revision is
+frozen, so `DELETE` (which removes whatever was created) is the way out.
 
 The worker presents its service token (`MOCA_PROVISIONER_TOKEN`) and forwards the caller's API token.
 The provisioner verifies that token itself and derives the workload's names from its owner, so a
@@ -206,11 +216,15 @@ reconnects with the new one when no command is running.
 **What the provisioner can do.** Its Role covers StatefulSets, Services and Secrets in
 `moca-sandbox`, but it never reads a Secret: it writes each workload's token blind and keeps the
 token's expiry on the StatefulSet (`moca.dev/attach-exp`). A ValidatingAdmissionPolicy (Kubernetes
-1.30 or newer) holds what it writes to workload names (`w-<32 hex>`, `w-<32 hex>-attach`) and to a
-pod that mounts only its own token Secret, runs as `moca-workload-sandbox` with no service-account
-token, and uses no host path, host namespace or privileged container. Its egress is the Kubernetes API
+1.30 or newer) holds what it writes to workload names (`w-<32 hex>`, `w-<32 hex>-attach`), to a
+headless, port-less Service selecting only the workload's own pods, and to a pod whose volumes are
+only `emptyDir`, `configMap`, `downwardAPI` and its own token Secret, that runs as
+`moca-workload-sandbox` with no service-account token, and uses no host namespace or privileged
+container. Its egress is the Kubernetes API
 server's addresses only, which `setup.sh` reads from the `kubernetes` Service. It runs as exactly one
-replica: the per-owner cap is serialized inside the process.
+replica: the per-owner cap, and the order of one owner's activations, deletes and token re-mints, are
+serialized inside the process. Never scale it: a second replica makes the cap advisory. A request
+that only keeps or lowers a workload's `count` is never refused by the cap.
 
 **The pod template.** The PodTemplate `moca-workload-sandbox` in `moca-sandbox`
 (`deploy/k8s/base/workload-sandboxes/template.yaml`) is what every workload sandbox starts from: the
@@ -220,7 +234,8 @@ when a workload's StatefulSet is created, so a change reaches workloads created 
 
 **Turning it off.** `SH_WORKLOAD_SANDBOXES=` removes the provisioner and its objects, and is refused
 while any workload's sandboxes exist: delete those workloads first, or pass
-`--delete-workload-sandboxes` to delete their StatefulSets, Services and Secrets with it. The
+`--delete-workload-sandboxes` to delete their StatefulSets, Services and Secrets with it. It
+stops the provisioner before it checks, so no activate can add sandboxes in between. The
 workload records stay: their runs answer `503 workload_sandbox_unavailable`, and deleting them needs
 the feature on again, so prefer deleting the workloads first.
 

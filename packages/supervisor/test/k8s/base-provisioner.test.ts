@@ -179,6 +179,19 @@ describe.skipIf(NO_KUBECTL)('deploy/k8s workload-sandboxes component (setup.sh o
     expect(JSON.stringify(wl.spec.egress)).toContain('203.0.113.0/24');
     expect(wl.spec.ingress).toBeUndefined();
     find(objs, 'NetworkPolicy', 'allow-dns-workload-sandbox', 'moca-sandbox');
+    // OpenShift DNS answers on 5353: on ocp only, workload pods get the shared pool's rule too.
+    const ocpDns = find(
+      ocp,
+      'NetworkPolicy',
+      'allow-openshift-dns-workload-sandbox',
+      'moca-sandbox',
+    );
+    const sharedDns = find(ocp, 'NetworkPolicy', 'allow-openshift-dns', 'moca-sandbox');
+    expect(ocpDns.spec.podSelector).toEqual({ matchLabels: { app: 'moca-workload-sandbox' } });
+    expect(ocpDns.spec.egress).toEqual(sharedDns.spec.egress);
+    expect(objs.some((o) => o.metadata.name === 'allow-openshift-dns-workload-sandbox')).toBe(
+      false,
+    );
     const q = find(objs, 'ResourceQuota', 'moca-sandbox', 'moca-sandbox');
     expect(q.spec.hard).toEqual({ pods: '34' });
   });
@@ -238,17 +251,25 @@ describe.skipIf(NO_KUBECTL)('deploy/k8s workload-sandboxes component (setup.sh o
       "'Opaque'",
       'moca-workload-sandbox',
       'automountServiceAccountToken == false',
-      'hostPath',
       'hostNetwork',
       'hostPID',
       'privileged',
-      'serviceAccountToken',
       'secretKeyRef',
       'secretRef',
       'volumeClaimTemplates',
+      // Services: headless, port-less, own selector only.
+      "svc.?clusterIP.orValue('') == 'None'",
+      'externalIPs',
+      'loadBalancerIP',
+      "?selector['moca.dev/workload'].orValue('') == variables.wl",
+      // Volumes: an allow-list, not a deny-list.
+      'has(v.emptyDir) || has(v.configMap) || has(v.downwardAPI)',
     ]) {
       expect(cel, needle).toContain(needle);
     }
+    // No volume source outside the allow-list is ever named as allowed. The CEL itself is
+    // evaluated by the API server in deploy/k8s/tests/workload-admission.sh (k8s-e2e).
+    expect(cel).not.toMatch(/has\(v\.(hostPath|persistentVolumeClaim|projected|csi|ephemeral)\)/);
     const binding = find(objs, 'ValidatingAdmissionPolicyBinding', 'moca-provisioner');
     expect(binding.spec).toEqual({ policyName: 'moca-provisioner', validationActions: ['Deny'] });
   });

@@ -49,8 +49,12 @@ apiVersion: apps/v1
 kind: Deployment
 metadata: { name: moca-provisioner, namespace: moca }
 spec:
-  # Exactly one, always: the owner cap is serialized per owner in this process (spec §6.3), so two
-  # replicas -- or two pods during a rolling update, hence Recreate -- could both pass it.
+  # !!! EXACTLY ONE REPLICA, ALWAYS, AND Recreate. Do not scale this (kubectl scale, an HPA, an
+  # overlay). The owner cap (MOCA_OWNER_MAX_SANDBOXES) and the ordering of one owner's PUT, DELETE
+  # and re-mint are serialized per owner inside this one process (spec §6.3). Two replicas -- or two
+  # pods during a rolling update -- would each pass the cap on the same count, making it advisory,
+  # and could let a DELETE interleave with a PUT and leave a workload's sandboxes behind. Nothing
+  # enforces this at runtime.
   replicas: 1
   strategy: { type: Recreate }
   selector: { matchLabels: { app: moca-provisioner } }

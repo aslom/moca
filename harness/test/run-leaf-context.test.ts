@@ -193,6 +193,22 @@ describe('frozen context on a prompt leaf', () => {
     expect(r).toMatchObject({ status: 'failed', reason: 'workload_sandbox_unavailable' });
   });
 
+  it('reports a deployment that can never serve a workload run as a terminal error, not retryable', async () => {
+    const { WorkloadSandboxMisconfiguredError } = await import('../src/select-sandbox.js');
+    const WL = `w-${'a'.repeat(32)}`;
+    selectPoolSandboxMock
+      .mockReset()
+      .mockRejectedValue(
+        new WorkloadSandboxMisconfiguredError(WL, 'workload sandboxes need the relay sandbox pool'),
+      );
+    const e = env(vi.fn());
+    e.internalContext!.workload = WL;
+    e.internalContext!.ownerScope = 'b'.repeat(32);
+    const r = await runLeaf(e, undefined, { executeTurn: okTurn(), overlayContext: vi.fn() });
+    expect(r).toMatchObject({ status: 'failed', reason: 'error' });
+    expect((r as { message: string }).message).toContain('relay sandbox pool');
+  });
+
   it('refuses a malformed workload key or owner scope, or one without the other, before selecting', async () => {
     selectPoolSandboxMock.mockReset();
     const WL = `w-${'a'.repeat(32)}`;

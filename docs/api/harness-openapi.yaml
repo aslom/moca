@@ -476,7 +476,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '409':
-          description: workload_not_ready — the named workload has not been activated.
+          description: workload_not_ready — the named workload is not ready (not yet activated, or its own sandboxes are still provisioning).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -930,15 +930,7 @@ components:
             status: { type: string, enum: [failed] }
             reason:
               type: string
-              enum:
-                [
-                  no_verdict,
-                  invalid_verdict,
-                  bad_inputs,
-                  error,
-                  saturated,
-                  workload_sandbox_unavailable,
-                ]
+              enum: [no_verdict, invalid_verdict, bad_inputs, error, saturated]
             message: { type: string }
     AcceptedRun:
       type: object

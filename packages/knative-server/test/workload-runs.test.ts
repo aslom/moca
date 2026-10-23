@@ -348,7 +348,10 @@ describe('a run on a workload with sandboxes of its own (spec §3.3)', () => {
 
   it('names the workload key and owner scope, so selection keeps the run on its sandboxes', async () => {
     const contextName = await seed(alice, 'demo', 'ready', REVISION, sandboxes);
-    expect((await run(alice, prompt('demo'))).status).toBe(200);
+    const body = prompt('demo');
+    expect((await run(alice, body)).status).toBe(200);
+    // A terminal run is persisted: what the 503 case below must not do.
+    expect(await redis.keys(`leaf:result:*${String(body.sessionId)}*`)).toHaveLength(1);
     const env = runLeaf.mock.calls[0]![0];
     expect(env.internalContext).toMatchObject({ workload: contextName, ownerScope: scope(alice) });
   });
@@ -390,5 +393,6 @@ describe('a run on a workload with sandboxes of its own (spec §3.3)', () => {
     expect(response.headers.get('retry-after')).toMatch(/^[0-9]+$/);
     expect(await response.json()).toEqual({ error: 'workload_sandbox_unavailable' });
     expect(runLeaf).toHaveBeenCalledTimes(1);
+    expect(await redis.keys(`leaf:result:*${String(body.sessionId)}*`)).toEqual([]);
   });
 });

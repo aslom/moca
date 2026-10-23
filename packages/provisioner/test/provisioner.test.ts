@@ -1,5 +1,5 @@
 import { createPublicKey, generateKeyPairSync, randomUUID } from 'node:crypto';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   keyIdFor,
   makeSigner,
@@ -288,6 +288,26 @@ describe('caps (spec §6.3), enforced here too', () => {
     expect([a.count, b.count]).toEqual([2, 2]);
   });
 
+  it('never refuses a PUT that adds no replicas, even for an owner already over the cap', async () => {
+    const r = ref('github:alice', 'one');
+    await putWorkload(deps, r, { count: 2, tier: 'container' });
+    await putWorkload(deps, ref('github:alice', 'two'), { count: 2, tier: 'container' });
+    // The operator lowers MOCA_OWNER_MAX_SANDBOXES below what Alice already has.
+    const lowered = { ...deps, config: { ...config, maxPerOwner: 2 } };
+    expect(await putWorkload(lowered, r, { count: 2, tier: 'container' })).toMatchObject({
+      count: 2,
+    });
+    expect(await putWorkload(lowered, r, { count: 1, tier: 'container' })).toMatchObject({
+      count: 1,
+    });
+    expect(stsOf(workloadKeyFor(r.owner, r.name, r.generation)).spec.replicas).toBe(1);
+    // Growing again is held to the cap.
+    await expect(putWorkload(lowered, r, { count: 2, tier: 'container' })).rejects.toMatchObject({
+      status: 429,
+      code: 'owner_sandbox_quota_exceeded',
+    });
+  });
+
   it("a repeat PUT does not count the workload's own replicas twice", async () => {
     const r = ref('github:alice', 'one');
     await putWorkload(deps, ref('github:alice', 'two'), { count: 2, tier: 'container' });
@@ -308,6 +328,66 @@ describe('DELETE: sandboxes first, done once no pod remains', () => {
     expect(kube.objects.secrets.has(`${wl}-attach`)).toBe(false);
     kube.reapPods();
     expect(await deleteWorkload(deps, r)).toEqual({ remaining: 0 });
+  });
+
+  it('waits for a PUT still converging: a DELETE during it leaves nothing, and frees the cap', async () => {
+    const r = ref('github:alice');
+    const wl = workloadKeyFor(r.owner, r.name, r.generation);
+    // A slow API server: the PUT's StatefulSet create hangs until released, as when the worker's
+    // MOCA_PROVISIONER_TIMEOUT_MS gives up on it and the client then deletes the workload.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let reached = false;
+    const create = kube.create.bind(kube);
+    kube.create = async (kind, obj) => {
+      if (kind === 'statefulsets') {
+        reached = true;
+        await gate;
+      }
+      return create(kind, obj);
+    };
+    const put = putWorkload(deps, r, { count: 2, tier: 'container' });
+    await vi.waitFor(() => expect(reached).toBe(true));
+    let deleted = false;
+    const del = deleteWorkload(deps, r).then((v) => ((deleted = true), v));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // Queued behind the PUT, not run beside it.
+    expect(deleted).toBe(false);
+    release();
+    await put;
+    expect(await del).toEqual({ remaining: 0 });
+    expect(kube.objects.statefulsets.has(wl)).toBe(false);
+    expect(kube.objects.services.has(wl)).toBe(false);
+    expect(kube.objects.secrets.has(`${wl}-attach`)).toBe(false);
+    // Nothing left counts toward Alice's cap.
+    await putWorkload(deps, ref('github:alice', 'other'), { count: 2, tier: 'container' });
+    await putWorkload(deps, ref('github:alice', 'third'), { count: 2, tier: 'container' });
+  });
+
+  it("waits for a re-mint's Secret write: a DELETE during it leaves no Secret behind", async () => {
+    const r = ref('github:alice');
+    const wl = workloadKeyFor(r.owner, r.name, r.generation);
+    await putWorkload(deps, r, { count: 1, tier: 'container' });
+    now += 50_000;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let reached = false;
+    const replace = kube.replace.bind(kube);
+    kube.replace = async (kind, obj) => {
+      if (kind === 'secrets') {
+        reached = true;
+        await gate;
+      }
+      return replace(kind, obj);
+    };
+    const remint = remintExpiring(deps);
+    await vi.waitFor(() => expect(reached).toBe(true));
+    const del = deleteWorkload(deps, r);
+    release();
+    expect(await remint).toBe(1);
+    expect(await del).toEqual({ remaining: 0 });
+    expect(kube.objects.secrets.has(`${wl}-attach`)).toBe(false);
+    expect(kube.objects.statefulsets.has(wl)).toBe(false);
   });
 
   it('tolerates objects already gone, and never deletes the shared pool', async () => {
@@ -349,6 +429,53 @@ describe('re-minting before expiry (spec §3.1)', () => {
     expect(await remintExpiring(rotated)).toBe(1);
     const nextKeys = new Map([[keyIdFor(nextPub), nextPub]]);
     expect(() => verifyAttachToken(tokenIn(wl), nextKeys, { now })).not.toThrow();
+  });
+
+  it('skips a malformed or failing StatefulSet and still re-mints the ones after it', async () => {
+    const bad = ref('github:alice', 'bad');
+    const good = ref('github:alice', 'good');
+    const badWl = workloadKeyFor(bad.owner, bad.name, bad.generation);
+    const goodWl = workloadKeyFor(good.owner, good.name, good.generation);
+    await putWorkload(deps, bad, { count: 1, tier: 'container' });
+    await putWorkload(deps, good, { count: 1, tier: 'container' });
+    const broken = (patch: (a: Record<string, string>) => void, name: string) => {
+      const s = JSON.parse(JSON.stringify(stsOf(badWl)));
+      s.metadata.name = name;
+      patch(s.metadata.annotations);
+      return s;
+    };
+    // Listed first: annotations a PUT never writes, and a valid one whose Secret write fails.
+    const malformed = [
+      broken((a) => (a['moca.dev/generation'] = 'not-a-uuid'), badWl),
+      broken((a) => (a['moca.dev/record-key'] = 'sh:wl:x"}:y'), badWl),
+    ];
+    const list = kube.list.bind(kube);
+    kube.list = async (kind, sel) => {
+      const items = await list(kind, sel);
+      return kind === 'statefulsets' ? [...malformed, ...items] : items;
+    };
+    const replace = kube.replace.bind(kube);
+    kube.replace = async (kind, obj) => {
+      if (obj.metadata.name === `${badWl}-attach`) throw new Error('admission denied');
+      return replace(kind, obj);
+    };
+    const errors: string[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((m: string) => void errors.push(m));
+    try {
+      now += 50_000;
+      const before = tokenIn(goodWl);
+      expect(await remintExpiring(deps)).toBe(1);
+      expect(tokenIn(goodWl)).not.toBe(before);
+      expect(errors.some((m) => /skips .* no valid generation/.test(m))).toBe(true);
+      expect(errors.some((m) => /skips .* no valid record key/.test(m))).toBe(true);
+      expect(errors.some((m) => /re-mint of StatefulSet .* failed: admission denied/.test(m))).toBe(
+        true,
+      );
+      // No token in any log line.
+      expect(errors.join('\n')).not.toMatch(/eyJ/);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('touches nothing it did not create, whatever its labels claim', async () => {

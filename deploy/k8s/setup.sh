@@ -741,16 +741,31 @@ ensure_provisioner_secret() {
 
 # Turning SH_WORKLOAD_SANDBOXES off (load_setup_inputs, only when it was on). A workload's
 # StatefulSet left behind would keep its pods attached with nothing to delete them, so this refuses
-# while any exist, unless --delete-workload-sandboxes asked for them to go too. Then it removes the
-# component's own objects: `apply -k` without the component would leave them running. The Secret
-# moca-provisioner stays, unreferenced, as every generated Secret does.
+# while any exist, unless --delete-workload-sandboxes asked for them to go too. The provisioner is
+# stopped first, so no activate can create sandboxes between the check and the delete; a refusal
+# starts it again. The check and the delete use one selector. Then it removes the component's own
+# objects: `apply -k` without the component would leave them running. The Secret moca-provisioner
+# stays, unreferenced, as every generated Secret does.
 WORKLOAD_SELECTOR='app=moca-workload-sandbox,app.kubernetes.io/managed-by=moca-provisioner'
 disable_workload_sandboxes() {
-  local sets
-  sets="$(kc get statefulsets -n "$SBX_NS" -l app=moca-workload-sandbox -o name)"
+  local sets waited=0
+  if [[ -n "$(kc get deployment moca-provisioner -n "$NS" --ignore-not-found -o name)" ]]; then
+    log 'SH_WORKLOAD_SANDBOXES off: stopping moca-provisioner before checking for workload sandboxes'
+    kc scale deployment/moca-provisioner -n "$NS" --replicas=0 >/dev/null
+    while [[ -n "$(kc get pods -n "$NS" -l app=moca-provisioner -o name)" ]]; do
+      [[ "$waited" -lt "$SH_WAIT_SECONDS" ]] ||
+        die "moca-provisioner's pod is still running ${SH_WAIT_SECONDS}s after scaling it to 0: see 'kubectl -n $NS get pods -l app=moca-provisioner'"
+      sleep 1
+      waited=$((waited + 1))
+    done
+  fi
+  sets="$(kc get statefulsets -n "$SBX_NS" -l "$WORKLOAD_SELECTOR" -o name)"
   if [[ -n "$sets" ]]; then
-    [[ -n "$DELETE_WORKLOAD_SANDBOXES" ]] ||
-      die "SH_WORKLOAD_SANDBOXES is being turned off, but workload sandboxes still exist in $SBX_NS ($(grep -c . <<<"$sets") StatefulSet(s) labelled app=moca-workload-sandbox). Delete those workloads first (DELETE /workloads/{id}, or mocactl workloads delete ID), or re-run with --delete-workload-sandboxes to delete their StatefulSets, Services and Secrets"
+    if [[ -z "$DELETE_WORKLOAD_SANDBOXES" ]]; then
+      kc scale deployment/moca-provisioner -n "$NS" --replicas=1 >/dev/null ||
+        log 'WARNING: could not start moca-provisioner again; re-run with SH_WORKLOAD_SANDBOXES=1'
+      die "SH_WORKLOAD_SANDBOXES is being turned off, but workload sandboxes still exist in $SBX_NS ($(grep -c . <<<"$sets") StatefulSet(s) labelled $WORKLOAD_SELECTOR). Delete those workloads first (DELETE /workloads/{id}, or mocactl workloads delete ID), or re-run with --delete-workload-sandboxes to delete their StatefulSets, Services and Secrets"
+    fi
     log "--delete-workload-sandboxes: deleting every workload's sandboxes in $SBX_NS"
     kc delete statefulsets,services,secrets -n "$SBX_NS" -l "$WORKLOAD_SELECTOR" --ignore-not-found >/dev/null
   fi
@@ -760,6 +775,7 @@ disable_workload_sandboxes() {
   kc delete -n "$SBX_NS" role/moca-provisioner rolebinding/moca-provisioner \
     serviceaccount/moca-workload-sandbox podtemplate/moca-workload-sandbox \
     networkpolicy/moca-workload-sandbox networkpolicy/allow-dns-workload-sandbox \
+    networkpolicy/allow-openshift-dns-workload-sandbox \
     resourcequota/moca-sandbox --ignore-not-found >/dev/null
   kc delete validatingadmissionpolicybinding/moca-provisioner \
     validatingadmissionpolicy/moca-provisioner --ignore-not-found >/dev/null
@@ -772,9 +788,11 @@ disable_workload_sandboxes() {
 # Unreadable or empty is refused: falling back to 0.0.0.0/0 would undo the point. Also checks the
 # admission policy's API (Kubernetes 1.30 or newer), which apply_stack would otherwise fail on.
 kube_api_egress() {
-  local svc slices
-  kc get --raw /apis/admissionregistration.k8s.io/v1 2>/dev/null |
-    jq -e '[.resources[].name] | index("validatingadmissionpolicies")' >/dev/null ||
+  local svc slices apis
+  # A failed read (auth, an unreachable API server) is not a missing API: kubectl's error shows.
+  apis="$(kc get --raw /apis/admissionregistration.k8s.io/v1)" ||
+    die 'SH_WORKLOAD_SANDBOXES=1: could not ask the API server which admission APIs it serves (kubectl'"'"'s error is above)'
+  jq -e '[.resources[].name] | index("validatingadmissionpolicies")' <<<"$apis" >/dev/null ||
     die 'SH_WORKLOAD_SANDBOXES=1 needs ValidatingAdmissionPolicy (admissionregistration.k8s.io/v1: Kubernetes 1.30 or newer, OpenShift 4.17 or newer), which this cluster does not serve'
   svc="$(kc get service kubernetes -n default -o json)" ||
     die 'SH_WORKLOAD_SANDBOXES=1: could not read Service default/kubernetes, which the provisioner'"'"'s egress policy is built from'
@@ -1206,11 +1224,12 @@ write_overlay() {
     # The components: block, each entry only when its feature is on; with none, no block at all.
     # P6.2 (spec §4.6): the relay's external path, only with P4 hosts. ocp-single's Routes (README
     # §12.5), only when SH_ROUTE_DOMAIN opted in. Workload sandboxes (workload sandboxes spec §4),
-    # only with SH_WORKLOAD_SANDBOXES=1.
+    # only with SH_WORKLOAD_SANDBOXES=1, and on ocp their openshift-dns rule with them.
     local components=()
     [[ -z "$P4_IDS" ]] || components+=(../../overlays/ocp/p4-relay)
     [[ "$TARGET" != ocp-single || -z "$ROUTE_DOMAIN" ]] || components+=(../../overlays/ocp-single/routes)
     [[ "$WORKLOAD_SANDBOXES" != 1 ]] || components+=(../../base/workload-sandboxes)
+    [[ "$WORKLOAD_SANDBOXES" != 1 || "$TARGET" != ocp ]] || components+=(../../overlays/ocp/workload-sandboxes)
     if [[ ${#components[@]} -gt 0 ]]; then
       printf 'components:\n'
       printf '  - %s\n' "${components[@]}"

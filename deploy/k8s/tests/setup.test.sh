@@ -143,8 +143,16 @@ case "${1-} ${2-}" in
 "delete deployment/moca-provisioner" | "delete role/moca-provisioner" | "delete validatingadmissionpolicybinding/moca-provisioner") : ;;
 # Workload StatefulSets in moca-sandbox: one name per line in $MOCK_STATE/workload-sts.
 "get statefulsets") [[ ! -f "$MOCK_STATE/workload-sts" ]] || cat "$MOCK_STATE/workload-sts" ;;
-# kube_api_egress's reads. MOCK_NO_VAP=1: a cluster older than 1.30; MOCK_NO_API_ENDPOINTS=1: no addresses.
+# The provisioner, while the last apply listed the component; stopped (and started again) on disable.
+# MOCK_PROVISIONER_STUCK=1: its pod never goes away.
+"get deployment")
+  ! grep -q workload-sandboxes "$MOCK_STATE/applied-kustomization.yaml" 2>/dev/null || echo deployment.apps/moca-provisioner ;;
+"scale deployment/moca-provisioner") : ;;
+"get pods") [[ -z "${MOCK_PROVISIONER_STUCK-}" ]] || echo pod/moca-provisioner-0 ;;
+# kube_api_egress's reads. MOCK_NO_VAP=1: a cluster older than 1.30; MOCK_NO_API_ENDPOINTS=1: no
+# addresses; MOCK_RAW_FAIL=1: kubectl itself fails (auth, an unreachable API server).
 "get --raw")
+  if [[ -n "${MOCK_RAW_FAIL-}" ]]; then echo 'error: You must be logged in to the server (Unauthorized)' >&2; exit 1; fi
   if [[ -n "${MOCK_NO_VAP-}" ]]; then echo '{"resources":[{"name":"mutatingwebhookconfigurations"}]}'
   else echo '{"resources":[{"name":"validatingadmissionpolicies"},{"name":"validatingadmissionpolicybindings"}]}'; fi ;;
 "get service")
@@ -1433,16 +1441,30 @@ printf 'statefulset.apps/w-%s\n' "$(printf 'a%.0s' {1..32})" >"$MOCK_STATE/workl
 expect_out 'workload sandboxes still exist in moca-sandbox (1 StatefulSet(s)'
 expect_out 'DELETE /workloads/{id}'
 expect_out '--delete-workload-sandboxes'
+expect_out 'labelled app=moca-workload-sandbox,app.kubernetes.io/managed-by=moca-provisioner'
+# The provisioner is stopped BEFORE the check, so no activate can slip between it and the delete,
+# and the check uses the delete's selector; a refusal starts the provisioner again.
+scale0="$(grep -n 'scale deployment/moca-provisioner -n moca --replicas=0' "$MOCK_LOG" | head -1 | cut -d: -f1)"
+check="$(grep -nF 'get statefulsets -n moca-sandbox -l app=moca-workload-sandbox,app.kubernetes.io/managed-by=moca-provisioner -o name' "$MOCK_LOG" | head -1 | cut -d: -f1)"
+[[ -n "$scale0" && -n "$check" && "$scale0" -lt "$check" ]] ||
+  fail 'the provisioner was not scaled to 0 before the workload sandboxes check, with the delete selector'
+grep -q 'get pods -n moca -l app=moca-provisioner -o name' "$MOCK_LOG" || fail 'the provisioner pod was not waited out'
+grep -q 'scale deployment/moca-provisioner -n moca --replicas=1' "$MOCK_LOG" || fail 'a refused disable left the provisioner stopped'
 # The namespaces apply comes first on every run; neither the stack nor moca-setup is written.
 ! grep -qE '^kubectl .*apply (-k|--server-side)' "$MOCK_LOG" || fail 'a refused disable reached kubectl apply'
 ! grep -q '^kubectl .* delete ' "$MOCK_LOG" || fail 'a refused disable deleted something'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_WORKLOAD_SANDBOXES='' MOCK_PROVISIONER_STUCK=1; expect_fail --target kind --skip-build)
+expect_out "moca-provisioner's pod is still running"
+! grep -q '^kubectl .* delete ' "$MOCK_LOG" || fail 'a disable whose provisioner did not stop deleted something'
 : >"$MOCK_LOG"
 (export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
 grep -q '^  - ../../base/workload-sandboxes$' "$MOCK_STATE/applied-kustomization.yaml" || fail 'a refused disable was recorded'
+: >"$MOCK_LOG"
 (export SH_GITHUB_CLIENT_ID=Iv1.a SH_WORKLOAD_SANDBOXES=; expect_ok --target kind --skip-build --delete-workload-sandboxes)
 grep -qF 'delete statefulsets,services,secrets -n moca-sandbox -l app=moca-workload-sandbox,app.kubernetes.io/managed-by=moca-provisioner' "$MOCK_LOG" ||
   fail "--delete-workload-sandboxes did not delete the workloads' objects by label"
 [[ ! -f "$MOCK_STATE/workload-sts" ]] || fail 'the workload StatefulSets are still there'
+! grep -q 'scale deployment/moca-provisioner -n moca --replicas=1' "$MOCK_LOG" || fail 'a finished disable started the provisioner again'
 ! grep -q 'workload-sandboxes' "$MOCK_STATE/applied-kustomization.yaml" || fail '--delete-workload-sandboxes did not turn it off'
 pass 'turning SH_WORKLOAD_SANDBOXES off is refused while workload sandboxes exist, and stays on; --delete-workload-sandboxes deletes them and turns it off'
 
@@ -1451,6 +1473,11 @@ reset_state
 expect_out 'has no ClusterIP or no endpoint addresses'
 (export SH_GITHUB_CLIENT_ID=Iv1.a SH_WORKLOAD_SANDBOXES=1 MOCK_NO_VAP=1; expect_fail --target kind --skip-build)
 expect_out 'needs ValidatingAdmissionPolicy'
+# kubectl failing is not the API missing: its own error shows, and the message says it could not ask.
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_WORKLOAD_SANDBOXES=1 MOCK_RAW_FAIL=1; expect_fail --target kind --skip-build)
+expect_out 'could not ask the API server which admission APIs it serves'
+expect_out 'You must be logged in to the server (Unauthorized)'
+! grep -qF 'which this cluster does not serve' "$TMP/out" || fail 'a kubectl failure was reported as a missing API'
 ! grep -q '^kubectl .*apply -k' "$MOCK_LOG" || fail 'an undeterminable API server address reached kubectl apply -k'
 pass "SH_WORKLOAD_SANDBOXES=1 refuses a cluster whose API server address it cannot read, or without ValidatingAdmissionPolicy, rather than open the provisioner's egress"
 
@@ -1465,6 +1492,12 @@ reset_state
 [[ "$(grep -c '^oc adm policy add-scc-to-user nonroot-v2' "$MOCK_LOG")" == 7 ]] || fail 'the provisioner and workload sandboxes got no SCC grant on ocp'
 grep -q '^oc adm policy add-scc-to-user nonroot-v2 -z moca-workload-sandbox -n moca-sandbox$' "$MOCK_LOG" ||
   fail 'the workload sandbox ServiceAccount got no SCC grant on ocp'
-pass 'SH_WORKLOAD_SANDBOXES: a bad value and ocp-single are refused before any apply; ocp grants the provisioner and workload sandboxes their SCC'
+# openshift-dns:5353 for workload pods: the ocp component, listed after the feature's own.
+grep -A1 '^  - ../../base/workload-sandboxes$' "$MOCK_STATE/applied-kustomization.yaml" | grep -q '^  - ../../overlays/ocp/workload-sandboxes$' ||
+  fail "workload sandboxes on ocp get no openshift-dns rule"
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_WORKLOAD_SANDBOXES=1; expect_ok --target kind --skip-build)
+! grep -q 'overlays/ocp/workload-sandboxes' "$MOCK_STATE/applied-kustomization.yaml" || fail 'kind got the ocp DNS rule'
+pass 'SH_WORKLOAD_SANDBOXES: a bad value and ocp-single are refused before any apply; ocp grants the provisioner and workload sandboxes their SCC and adds their openshift-dns rule'
 
 echo "setup.test.sh: all passed"

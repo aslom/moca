@@ -1,4 +1,6 @@
 import {
+  ATTACH_OWNER_RE,
+  ATTACH_WORKLOAD_RE,
   mintAttachToken,
   ownerScopeFor,
   workloadKeyFor,
@@ -47,6 +49,8 @@ export const MAX_NAME_LENGTH = 50;
 /** A generation: workloads.ts mints a UUID; anything else is refused. */
 export const GENERATION_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const REVISION_RE = /^[a-f0-9]{64}$/;
+/** A record key, as workloadRecordKey makes it: `sh:wl:<owner scope>:<name>`. */
+const RECORD_KEY_RE = /^sh:wl:[0-9a-f]{32}:[a-z0-9](?:[-a-z0-9]{0,48}[a-z0-9])?$/;
 
 export interface ProvisionerConfig {
   /** MOCA_WORKLOAD_MAX_SANDBOXES: `count` per workload. */
@@ -227,8 +231,9 @@ function needsMint(deps: ProvisionerDeps, sts: KubeObject, spec: SandboxSpec): b
 }
 
 /**
- * One owner's PUTs, and re-mints, run one at a time, so two concurrent PUTs cannot both pass the
- * owner cap on the same count. In-process only: the provisioner runs as exactly one replica
+ * One owner's PUTs, DELETEs and re-mints run one at a time, so two concurrent PUTs cannot both pass
+ * the owner cap on the same count, and a DELETE cannot interleave with a PUT still converging (or a
+ * re-mint's Secret write) and leave objects behind it. In-process only: the provisioner runs as exactly one replica
  * (deploy/k8s/base/workload-sandboxes/provisioner.yaml).
  */
 const ownerQueues = new Map<string, Promise<unknown>>();
@@ -377,15 +382,19 @@ async function converge(
   spec: SandboxSpec,
 ): Promise<SandboxStatus> {
   const { kube, config } = deps;
-  const others = await kube.list('statefulsets', `${OWNER_LABEL}=${k.own}`);
-  const elsewhere = others
-    .filter((s) => s.metadata.name !== k.wl)
-    .reduce((n, s) => n + (Number(s.spec?.replicas) || 0), 0);
-  if (elsewhere + spec.count > config.maxPerOwner) {
-    throw new ProvisionError(429, 'owner_sandbox_quota_exceeded');
-  }
   let sts = await kube.get('statefulsets', k.wl);
   if (sts && !ours(sts, k)) conflict('StatefulSet', k.wl);
+  // A PUT that adds no replicas (a repeat, or a scale-down) is never refused by the cap, even when
+  // the owner is over it (MOCA_OWNER_MAX_SANDBOXES lowered).
+  if (!sts || spec.count > (Number(sts.spec?.replicas) || 0)) {
+    const others = await kube.list('statefulsets', `${OWNER_LABEL}=${k.own}`);
+    const elsewhere = others
+      .filter((s) => s.metadata.name !== k.wl)
+      .reduce((n, s) => n + (Number(s.spec?.replicas) || 0), 0);
+    if (elsewhere + spec.count > config.maxPerOwner) {
+      throw new ProvisionError(429, 'owner_sandbox_quota_exceeded');
+    }
+  }
   const template = sts ? null : await kube.get('podtemplates', TEMPLATE);
   if (!sts && !template) {
     throw new ProvisionError(500, 'workload_template_missing', `no PodTemplate ${TEMPLATE}`);
@@ -438,14 +447,20 @@ export async function getWorkload(deps: ProvisionerDeps, ref: WorkloadRef): Prom
 /**
  * Delete a workload's StatefulSet, Service and Secret, each tolerating "already gone", and report
  * the pods still terminating. The caller repeats until none remain, and only then deletes the
- * Context: Context Service refuses to delete a mounted claim (spec §6.1).
+ * Context: Context Service refuses to delete a mounted claim (spec §6.1). Queued behind the owner's
+ * PUTs and re-mints, so a PUT the worker gave up on (MOCA_PROVISIONER_TIMEOUT_MS) finishes first and
+ * its objects are deleted here, instead of being created after `remaining: 0`.
  */
-export async function deleteWorkload(
+export function deleteWorkload(
   deps: ProvisionerDeps,
   ref: WorkloadRef,
 ): Promise<{ remaining: number }> {
-  const { kube } = deps;
   const k = keysOf(ref);
+  return serialized(k.own, () => removeWorkload(deps, k));
+}
+
+async function removeWorkload(deps: ProvisionerDeps, k: Keys): Promise<{ remaining: number }> {
+  const { kube } = deps;
   for (const [kind, name] of [
     ['statefulsets', k.wl],
     ['services', k.wl],
@@ -471,30 +486,51 @@ export async function remintExpiring(deps: ProvisionerDeps): Promise<number> {
     `app=${APP_LABEL},${MANAGED_BY_LABEL}=${MANAGED_BY}`,
   );
   let reminted = 0;
+  // One item at a time, each on its own: one that is malformed or fails (deleted meanwhile, an
+  // admission denial) is logged and skipped, and never starves the ones listed after it.
   for (const s of sets) {
-    const l = s.metadata.labels ?? {};
-    const a = s.metadata.annotations ?? {};
-    const k = { wl: l[WORKLOAD_LABEL], own: l[OWNER_LABEL] };
-    const count = Number(a[COUNT_ANNOTATION]);
-    const gen = a[GENERATION_ANNOTATION];
-    const recordKey = a[RECORD_KEY_ANNOTATION];
-    if (!k.wl || !k.own || !gen || !recordKey || !Number.isSafeInteger(count) || count < 1)
-      continue;
-    if (s.metadata.name !== k.wl) continue;
-    if (a[TIER_ANNOTATION] !== 'container') continue;
-    const spec: SandboxSpec = { count, tier: 'container' };
-    const done = await serialized(k.own, async () => {
-      // Read again under the owner's queue: a PUT may have just re-minted or deleted it.
-      const cur = await deps.kube.get('statefulsets', k.wl);
-      if (!cur || !ours(cur, k) || !needsMint(deps, cur, spec)) return false;
-      const minted = mint(deps, k, gen, spec.tier, count);
-      await writeSecret(deps, k, recordKey, gen, minted.token);
-      await deps.kube.patch('statefulsets', k.wl, {
-        metadata: { annotations: minted.annotations },
-      });
-      return true;
-    });
-    if (done) reminted++;
+    try {
+      if (await remintOne(deps, s)) reminted++;
+    } catch (err) {
+      // The object's name and the failure only: never a token.
+      const why = err instanceof Error ? err.message : String(err);
+      console.error(`provisioner: re-mint of StatefulSet ${s.metadata.name} failed: ${why}`);
+    }
   }
   return reminted;
+}
+
+/** Re-mint one StatefulSet's token if it is due. False when skipped or not due. */
+async function remintOne(deps: ProvisionerDeps, s: KubeObject): Promise<boolean> {
+  const l = s.metadata.labels ?? {};
+  const a = s.metadata.annotations ?? {};
+  const k = { wl: l[WORKLOAD_LABEL], own: l[OWNER_LABEL] };
+  const count = Number(a[COUNT_ANNOTATION]);
+  const gen = a[GENERATION_ANNOTATION];
+  const recordKey = a[RECORD_KEY_ANNOTATION];
+  const skip = (why: string) => {
+    console.error(`provisioner: re-mint skips StatefulSet ${s.metadata.name}: ${why}`);
+    return false;
+  };
+  // Every value that goes into a token or a Secret is checked first, as a PUT would make it.
+  if (typeof k.wl !== 'string' || !ATTACH_WORKLOAD_RE.test(k.wl)) return skip('no valid workload label');
+  if (typeof k.own !== 'string' || !ATTACH_OWNER_RE.test(k.own)) return skip('no valid owner label');
+  if (s.metadata.name !== k.wl) return skip('named off its workload label');
+  if (typeof gen !== 'string' || !GENERATION_RE.test(gen)) return skip('no valid generation');
+  const keyOk = typeof recordKey === 'string' && RECORD_KEY_RE.test(recordKey);
+  if (!keyOk || !recordKey.startsWith(`sh:wl:${k.own}:`)) return skip('no valid record key');
+  if (!Number.isSafeInteger(count) || count < 1) return skip('no valid sandbox count');
+  if (a[TIER_ANNOTATION] !== 'container') return skip('not the container tier');
+  const spec: SandboxSpec = { count, tier: 'container' };
+  return serialized(k.own, async () => {
+    // Read again under the owner's queue: a PUT may have just re-minted it, or a DELETE removed it.
+    const cur = await deps.kube.get('statefulsets', k.wl);
+    if (!cur || !ours(cur, k) || !needsMint(deps, cur, spec)) return false;
+    const minted = mint(deps, k, gen, spec.tier, count);
+    await writeSecret(deps, k, recordKey, gen, minted.token);
+    await deps.kube.patch('statefulsets', k.wl, {
+      metadata: { annotations: minted.annotations },
+    });
+    return true;
+  });
 }

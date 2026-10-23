@@ -129,8 +129,13 @@ export async function handle(
       return send(res, err.status, { error: err.code });
     }
     console.error('provisioner: request failed:', err instanceof KubeError ? err.message : err);
-    // A Kubernetes API failure is the provisioner's dependency failing: 502, as the worker's
-    // Context Service failures are.
+    // The API server refusing the objects themselves -- the admission policy (403) or an invalid
+    // object (422) -- is a permanent misconfiguration, not an outage: retrying will not help.
+    if (err instanceof KubeError && (err.status === 403 || err.status === 422)) {
+      return send(res, 422, { error: 'workload_refused' });
+    }
+    // Any other Kubernetes API failure is the provisioner's dependency failing: 502, as the
+    // worker's Context Service failures are.
     return send(res, err instanceof KubeError ? 502 : 500, {
       error: err instanceof KubeError ? 'kubernetes_error' : 'internal_error',
     });
