@@ -9,6 +9,7 @@ import { k8sSandboxExtension, KubectlTransport } from '@moca/k8s-sandbox';
 import {
   selectPoolSandbox,
   SandboxPoolSaturatedError,
+  WorkloadSandboxUnavailableError,
   assertServerSandbox,
   type SelectedSandbox,
 } from './select-sandbox.js';
@@ -124,7 +125,8 @@ export interface LeafEnvelope {
     /**
      * The workload key (`w-<32 hex>`) when the workload has sandboxes of its own (workload
      * sandboxes spec §3.3): the run then selects only those, never the shared pool. Absent for a
-     * phase 1 workload, which runs on the shared pool as before. The server sets it from PR 2 on.
+     * phase 1 workload, which runs on the shared pool as before. The server sets it for a workload
+     * created with `sandboxes` (knative-server workloads.ts).
      */
     workload?: string;
     /**
@@ -191,7 +193,14 @@ export type LeafResult =
       // `owner_lost` is written only by the run-lease reaper (#558): the worker holding the run
       // died without finalizing, and a survivor reconciled it. The others are run-leaf's own.
       reason:
-        'no_verdict' | 'invalid_verdict' | 'bad_inputs' | 'error' | 'saturated' | 'owner_lost';
+        | 'no_verdict'
+        | 'invalid_verdict'
+        | 'bad_inputs'
+        | 'error'
+        | 'saturated'
+        | 'owner_lost'
+        /** A workload run found none of its workload's sandboxes (spec §3.3); never a fallback. */
+        | 'workload_sandbox_unavailable';
       message?: string;
     };
 
@@ -476,6 +485,13 @@ async function runPromptLeaf(
     // bounded-waits then 503s on it, and classifyOutcome keeps it retryable for the async queue.
     if (err instanceof SandboxPoolSaturatedError) {
       return { status: 'failed', reason: 'saturated', message: err.message };
+    }
+    // Its own reason, so the sync /runs path answers 503 workload_sandbox_unavailable rather than
+    // a terminal failure: the workload's sandboxes may be starting or restarting. A deployment
+    // that can never serve a workload run (WorkloadSandboxMisconfiguredError) falls through to a
+    // terminal `error`, as SandboxRequiredError does.
+    if (err instanceof WorkloadSandboxUnavailableError) {
+      return { status: 'failed', reason: 'workload_sandbox_unavailable', message: err.message };
     }
     return {
       status: 'failed',
