@@ -47,25 +47,20 @@ forth with the user), secrets, or durable writes to your working tree.
 Run each command on its own and copy the ids it prints into the next one. Shell variables do not
 survive between an agent's tool calls, and a single command matches the permission rules below.
 
-1. Make a temporary directory outside the working tree and keep the path it prints. The packed file
-   is a full copy of the directory, so it must not land in the repository, where it could be
-   committed or packed again.
+1. Pack the directory into a `.moca-delegate/` subdirectory of the working tree. The packed file is
+   a full copy of the directory, so keep it out of commits and out of future packs: add
+   `.moca-delegate/` to `.gitignore`, and `ctx pack` honours `.gitignore` so it will not pack
+   itself. `.git` is skipped unless you add `--include-git`; symbolic links are refused.
 
    ```bash
-   mktemp -d
-   ```
-
-   Pack the directory into it. `.git` is skipped unless you add `--include-git`; symbolic links are
-   refused.
-
-   ```bash
-   contextctl ctx pack ./repo -o TMP_DIR/repo.context
+   mkdir -p .moca-delegate
+   contextctl ctx pack ./repo -o .moca-delegate/repo.context
    ```
 
 2. Create the workload. Keep the id it prints: there is no command that lists workloads.
 
    ```bash
-   mocactl workloads create --context TMP_DIR/repo.context
+   mocactl workloads create --context .moca-delegate/repo.context
    ```
 
    `--json` prints `{"workloadId","status","contextType","revision","files","bytes"}`.
@@ -99,7 +94,7 @@ survive between an agent's tool calls, and a single command matches the permissi
 
    ```bash
    mocactl workloads delete WORKLOAD_ID
-   rm -r TMP_DIR
+   rm -r .moca-delegate
    ```
 
 ## Writing prompts
@@ -129,14 +124,14 @@ survive between an agent's tool calls, and a single command matches the permissi
 
 ## Cleanup
 
-Always run `mocactl workloads delete ID` for every workload you created, and remove the temporary
-directory holding the packed file. Tell the user about any delete that failed so they can retry it.
+Always run `mocactl workloads delete ID` for every workload you created, and remove the
+`.moca-delegate/` directory holding the packed file. Tell the user about any delete that failed so
+they can retry it.
 
 ## Claude Code permissions
 
-Delegation needs only these commands, plus the cleanup `rm -r TMP_DIR`. Allowing them keeps the
-skill working when Claude Code's
-auto-mode classifier is unavailable
+Delegation needs only these commands, plus the cleanup `rm -r .moca-delegate`. Allowing them keeps
+the skill working when Claude Code's auto-mode classifier is unavailable
 ([#530](https://github.com/rossoctl/moca/issues/530), Claude Code's classifier vs MOCA's local and
 remote split); the remote commands run in MOCA sandboxes, not under Claude Code's classifier.
 
@@ -146,13 +141,11 @@ the user's go-ahead" step becomes the only check before them. That step is an in
 agent, not a control. Choose one of two sets and add it to `.claude/settings.json` or
 `~/.claude/settings.json`:
 
-- [`settings.example.json`](settings.example.json): every delegation command, including the upload.
-  Only the cleanup `rm -r TMP_DIR` still asks: a wildcard `rm -r` rule would be far broader than this
-  skill needs.
+- [`settings.example.json`](settings.example.json): every delegation command, including the upload
+  and the scoped cleanup.
 - [`settings.restricted.example.json`](settings.restricted.example.json): only the commands that
   run, watch and clean up tasks. Claude Code still asks before `ctx pack` and `workloads create`,
-  and those two steps then also need the classifier, or a person, to approve them. The cleanup
-  `rm -r TMP_DIR` asks too.
+  and those two steps then also need the classifier, or a person, to approve them.
 
 The full set:
 
@@ -160,12 +153,13 @@ The full set:
 {
   "permissions": {
     "allow": [
-      "Bash(mktemp -d)",
+      "Bash(mkdir -p .moca-delegate)",
       "Bash(contextctl ctx pack *)",
       "Bash(mocactl workloads *)",
       "Bash(mocactl spawn *)",
       "Bash(mocactl subagents *)",
-      "Bash(mocactl get *)"
+      "Bash(mocactl get *)",
+      "Bash(rm -r .moca-delegate)"
     ]
   }
 }
