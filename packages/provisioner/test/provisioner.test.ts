@@ -229,6 +229,25 @@ describe('the owner boundary', () => {
     });
   });
 
+  it('refuses to adopt a Service that appears between its pre-read and its create', async () => {
+    const r = ref('github:alice');
+    const wl = workloadKeyFor(r.owner, r.name, r.generation);
+    const create = kube.create.bind(kube);
+    kube.create = async (kind, obj) => {
+      if (kind === 'services') {
+        kube.objects.services.set(wl, {
+          metadata: { name: wl, labels: { 'moca.dev/workload': wl } },
+        });
+      }
+      return create(kind, obj);
+    };
+    await expect(putWorkload(deps, r, { count: 1, tier: 'container' })).rejects.toMatchObject({
+      status: 409,
+      code: 'workload_object_conflict',
+    });
+    expect(kube.objects.statefulsets.has(wl)).toBe(false);
+  });
+
   it('refuses to adopt a StatefulSet that appears between its pre-read and its create', async () => {
     const r = ref('github:alice');
     const wl = workloadKeyFor(r.owner, r.name, r.generation);

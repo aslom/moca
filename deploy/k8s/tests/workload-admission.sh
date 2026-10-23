@@ -88,6 +88,7 @@ try deny 'an added capability' "$(sts_with '.spec.template.spec.containers[0].se
 try deny 'the host network' "$(sts_with '.spec.template.spec.hostNetwork = true')"
 try deny "another Secret in env" "$(sts_with '.spec.template.spec.containers[0].env += [{name: "X", valueFrom: {secretKeyRef: {name: "moca-relay-attach", key: "SH_RELAY_TOKEN"}}}]')"
 try deny 'a volumeClaimTemplate' "$(sts_with '.spec.volumeClaimTemplates = [{metadata: {name: "v"}, spec: {accessModes: ["ReadWriteOnce"], resources: {requests: {storage: "1Gi"}}}}]')"
+try deny 'a serviceName of another Service' "$(sts_with '.spec.serviceName = "sandbox-relay"')"
 try deny 'a name that is not a workload key (the shared pool)' "$(sts_with '.metadata.name = "moca-sandbox"')"
 try deny 'pods not labelled app=moca-workload-sandbox' "$(sts_with '.spec.template.metadata.labels.app = "moca-sandbox" | .spec.selector.matchLabels.app = "moca-sandbox"')"
 

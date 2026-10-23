@@ -97,6 +97,9 @@ spec:
     # A claim template would let the StatefulSet controller adopt an existing PVC by name.
     - expression: "variables.kind != 'statefulsets' || !has(variables.obj.spec.volumeClaimTemplates)"
       message: workload StatefulSets may not carry volumeClaimTemplates
+    # Its governing Service is its own headless one, never another Service's DNS name.
+    - expression: "variables.kind != 'statefulsets' || request.operation == 'DELETE' || variables.obj.spec.serviceName == variables.obj.metadata.name"
+      message: a workload StatefulSet's serviceName must be its own name
     # An allow-list: the API server already holds each volume to exactly one source, so a volume
     # passes only as one of these. No hostPath, PVC, ephemeral, csi or projected volume, and no
     # Secret but the workload's own.

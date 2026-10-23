@@ -413,7 +413,11 @@ async function converge(
 
   const svc = await kube.get('services', k.wl);
   if (svc && !ours(svc, k)) conflict('Service', k.wl);
-  if (!svc) await kube.create('services', headlessService(ref, k, spec));
+  if (!svc && !(await kube.create('services', headlessService(ref, k, spec)))) {
+    // Lost a create race: hold whatever is there now to the same ownership as the pre-read.
+    const raced = await kube.get('services', k.wl);
+    if (raced && !ours(raced, k)) conflict('Service', k.wl);
+  }
 
   if (!sts) {
     await kube.create('statefulsets', statefulSet(template!, ref, k, spec, minted!.annotations));
