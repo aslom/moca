@@ -986,6 +986,19 @@ export const realProduceVerdict: ProduceVerdict = async (item, env, config, capt
       extensionFactories: [
         ...(allowVerdict ? [submitVerdictExtension(capture, sessionManager)] : []),
         requestApprovalExtension(capture, sessionManager, gateState.nextGateId),
+        // THE BOTH-TIERS SHORTHAND, DELIBERATELY (#245). This is the call site the issue
+        // names, and the one where the fast tier silently did not exist — but splitting the
+        // tiers here would be worse, not better: naming only `streamTransport` would let the
+        // fast tier fall through to its default, `persistentExecInPod`, which spawns a LOCAL
+        // `kubectl exec`. `selected` is a leased pool sandbox reached over the relay (ADR-0024
+        // has it dialling out over one :443 connection, possibly from another cloud), so there
+        // is no kubectl path to it and no pod this process could exec into.
+        //
+        // So the shorthand stays until a transport that can amortize over the relay exists —
+        // which needs a long-lived shell on the wire (`sandbox.proto`'s `rpc Exec` is one
+        // command per RPC), not a flag here. What changed is that the fact is now readable:
+        // `selected.transport.fastTier` says `'per-call-exec'`, and the extension's two knobs
+        // are where that transport goes once there is a better one to put beside it.
         k8sSandboxExtension({
           config: selected?.config ?? null,
           transport: selected?.transport,
