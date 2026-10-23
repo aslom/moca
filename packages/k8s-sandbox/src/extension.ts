@@ -24,6 +24,25 @@ import {
 import { createPodGrepTool } from './grep-tool.js';
 
 /**
+ * The tools this extension overrides, and so the only ones a host capacity refusal says
+ * anything about (#452).
+ *
+ * The latch's `tool_call` block is scoped to these BY NAME because an extension's
+ * `tool_call` handler sees every tool in the session, not just the ones it registered.
+ * A harness turn also carries tools that never cross the sandbox seam —
+ * `submit_verdict` and `request_approval` on a verdict leaf — and blocking those is
+ * actively harmful: a verdict the model can still reach IS the leaf's result
+ * (`run-leaf.ts`, where `throwIfRefused()` deliberately fires only when nothing was
+ * captured), so blocking the submit would discard finished reasoning and make the run
+ * retry work it had already completed.
+ *
+ * Kept in sync with the `registerTool` calls below by
+ * `test/extension.test.ts`, which asserts the set matches what the extension registers
+ * rather than trusting this list.
+ */
+const SANDBOX_TOOLS = new Set(['read', 'write', 'edit', 'ls', 'find', 'bash', 'grep']);
+
+/**
  * Pi extension that overrides the seven built-in tools so file/search/exec run
  * in a remote Kubernetes pod. Inert (local tools stand) unless a sandbox is
  * configured.
@@ -99,7 +118,8 @@ export function k8sSandboxExtension(opts?: {
     // read as a hang rather than an error.
     if (opts?.capacity) {
       const latch = opts.capacity;
-      pi.on('tool_call', () => {
+      pi.on('tool_call', (event) => {
+        if (!SANDBOX_TOOLS.has(event.toolName)) return {};
         const refusal = latch.refusal();
         if (!refusal) return {};
         // The reason goes to the MODEL, so it says what to do, not what the arithmetic

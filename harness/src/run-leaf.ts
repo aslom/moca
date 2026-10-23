@@ -785,6 +785,12 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture, deps)
 
     // This leaf builds its own Pi stack rather than going through executeTurn, so it needs
     // its own latch — executeTurn's is unreachable from here (#452).
+    //
+    // INERT TODAY, and wired anyway. No `transport` is passed below, so the extension
+    // builds a KubectlTransport — and only GrpcRelayTransport raises
+    // SandboxCapacityRefusedError. The converge/diff path around it is kubectl-only too,
+    // so nothing on this leaf can latch until it starts using the leased transport. The
+    // wiring is what keeps that change from silently reintroducing #452 here.
     const capacity = createCapacityLatch();
     const { settingsManager, loaderOptions } = turnLoaderInputs({
       config,

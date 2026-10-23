@@ -4,13 +4,25 @@ package vmpool
 // USER-VISIBLE: acquire's warming charge and runLocked's new key. Caller holds p.mu.
 //
 // #452: a memory refusal reaching one of these is a failed exec in somebody's
-// transcript, so try to make room before returning it. A session's idle-but-resident
-// standbys hold memory for WorkspaceIdle (8h on the shipped P4-on-P6 unit) while
-// occupying no lease slot one tier up, so committed memory grows with the number of
-// DISTINCT RECENT sessions rather than with concurrency: a host walks into a state
-// where it keeps advertising slots it can no longer admit, and then stays there for
-// hours. Evicting is what gets it back out, and it is close to free — see
-// evictForBudgetLocked for the cost argument.
+// transcript, so try to make room before returning it.
+//
+// WHAT THIS ACTUALLY RELIEVES. One command leaves 1+StandbyDepth VMs resident, and the
+// sweep only takes them back once the key has been idle for StandbyIdle (90s) — after
+// which the run is parked holding zero VMs (see admitLocked's "PARKED RUNS DO NOT
+// COUNT"). So committed memory tracks the sessions active in roughly the last
+// StandbyIdle + ReclaimScanInterval, and it grows with the number of DISTINCT such
+// sessions rather than with concurrency: on the shipped P4-on-P6 unit a handful of
+// sessions each taking one turn inside that window can hold the whole budget in
+// standbys while nothing is running. Without eviction those turns fail; the host then
+// recovers by itself on the next sweep, so what is lost is a turn rather than the host.
+//
+// That bound is also why this is a burst fix and not a leak fix. It buys back the
+// standbys of the coldest session inside the idle window — it does not and need not
+// address anything beyond it, since past StandbyIdle there is nothing left to take. If a
+// host is ever seen holding VMs for keys idle longer than that, this eviction would MASK
+// it rather than fix it: that is a sweep bug and belongs in its own issue.
+//
+// Evicting is close to free — see evictForBudgetLocked for the cost argument.
 //
 // replenishOne deliberately does NOT come through here. Its refusal is already benign
 // ("a refused refill is nobody's error"), and evicting a standby to manufacture

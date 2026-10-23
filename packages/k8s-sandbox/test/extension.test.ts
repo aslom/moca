@@ -104,6 +104,12 @@ describe('k8sSandboxExtension capacity latch', () => {
     await bash.execute('call-1', { command: 'pytest -x' }).catch(() => {});
   };
 
+  // A `tool_call` event for one of the extension's OWN tools. The handler is scoped by
+  // `toolName` (see SANDBOX_TOOLS), so every assertion about blocking has to name a tool
+  // or it passes for the wrong reason.
+  const callOf = (toolName: string) => ({ type: 'tool_call', toolCallId: 'c1', toolName });
+  const sandboxCall = () => callOf('bash');
+
   it('registers no tool_call handler when no latch is supplied', () => {
     // Keeps every existing caller's handler set exactly as it was. The hook is a hard stop
     // on a turn and must not appear on a path with nothing to read the latch afterwards.
@@ -118,16 +124,16 @@ describe('k8sSandboxExtension capacity latch', () => {
     k8sSandboxExtension({ config: cfg, transport: refusing(), capacity })(pi);
 
     // Transparent until a refusal is seen, or it would end every turn it is attached to.
-    expect(handlers.tool_call({}, {})).toEqual({});
+    expect(handlers.tool_call(sandboxCall(), {})).toEqual({});
     expect(capacity.refusal()).toBeUndefined();
 
     await runBash(tools);
 
     expect(capacity.refusal()).toBeInstanceOf(SandboxCapacityRefusedError);
-    expect(handlers.tool_call({}, {})).toMatchObject({ block: true });
+    expect(handlers.tool_call(sandboxCall(), {})).toMatchObject({ block: true });
     // The reason reaches the MODEL, so it must not quote the host's byte arithmetic — that
     // is for the operator, and it travels in the rethrown error.
-    const reason = (handlers.tool_call({}, {}) as { reason: string }).reason;
+    const reason = (handlers.tool_call(sandboxCall(), {}) as { reason: string }).reason;
     expect(reason).not.toMatch(/\d{6,}/);
     expect(() => capacity.throwIfRefused()).toThrow(SandboxCapacityRefusedError);
   });
@@ -146,8 +152,48 @@ describe('k8sSandboxExtension capacity latch', () => {
     k8sSandboxExtension({ config: cfg, transport: failing, capacity })(pi);
     await runBash(tools);
     expect(capacity.refusal()).toBeUndefined();
-    expect(handlers.tool_call({}, {})).toEqual({});
+    expect(handlers.tool_call(sandboxCall(), {})).toEqual({});
     expect(() => capacity.throwIfRefused()).not.toThrow();
+  });
+
+  it('blocks only the tools it registered, so a verdict can still be submitted', async () => {
+    // An extension's `tool_call` handler sees EVERY tool in the session, not only its own.
+    // A verdict leaf also carries submit_verdict and request_approval, which never cross
+    // the sandbox seam — and run-leaf.ts only calls throwIfRefused() when nothing was
+    // captured, precisely so a verdict the model can still reach becomes the leaf's
+    // result. Blocking the submit would discard finished reasoning and send the run back
+    // to redo it.
+    const capacity = createCapacityLatch();
+    const { pi, tools, handlers } = fakePi();
+    k8sSandboxExtension({ config: cfg, transport: refusing(), capacity })(pi);
+    await runBash(tools);
+    expect(capacity.refusal()).toBeInstanceOf(SandboxCapacityRefusedError);
+
+    // Latched, so every sandbox tool is blocked...
+    for (const name of ['read', 'write', 'edit', 'ls', 'find', 'bash', 'grep']) {
+      expect(handlers.tool_call(callOf(name), {})).toMatchObject({ block: true });
+    }
+    // ...and nothing else is.
+    for (const name of ['submit_verdict', 'request_approval']) {
+      expect(handlers.tool_call(callOf(name), {})).toEqual({});
+    }
+  });
+
+  it('scopes the block to exactly the tools the extension registers', async () => {
+    // Pins the SANDBOX_TOOLS set against the REGISTRATIONS rather than trusting the list.
+    // An eighth pod tool added without updating the set would ship a tool whose refusals
+    // the model keeps retrying through a doomed turn; this fails instead.
+    const capacity = createCapacityLatch();
+    const { pi, tools, handlers } = fakePi();
+    k8sSandboxExtension({ config: cfg, transport: refusing(), capacity })(pi);
+    const registered = (tools as Array<{ name: string }>).map((t) => t.name).sort();
+
+    await runBash(tools);
+
+    const blocked = registered
+      .filter((name) => (handlers.tool_call(callOf(name), {}) as { block?: boolean }).block)
+      .sort();
+    expect(blocked).toEqual(registered);
   });
 
   it('keeps the FIRST refusal, which is the one that describes the host', async () => {
