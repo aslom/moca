@@ -11,18 +11,29 @@ import {
   deleteWorkload,
   getWorkload,
   parseSandboxSpec,
+  putBundle,
   putWorkload,
   remintExpiring,
+  settleSeeds,
+  type ProvisionerConfig,
   type ProvisionerDeps,
   type WorkloadRef,
 } from '../src/provisioner.js';
+import { BundleStore } from '../src/seed.js';
 import { FakeKube, workloadTemplate } from './fake-kube.js';
 
 const { privateKey } = generateKeyPairSync('ed25519');
 const signer = makeSigner(privateKey.export({ format: 'pem', type: 'pkcs8' }).toString());
 const publicKey = createPublicKey(privateKey);
 const publicKeys = new Map([[keyIdFor(publicKey), publicKey]]);
-const config = { maxPerWorkload: 2, maxPerOwner: 4, attachTtlS: 86400 };
+const config: ProvisionerConfig = {
+  maxPerWorkload: 2,
+  maxPerOwner: 4,
+  attachTtlS: 86400,
+  storage: { maxMiB: 10 * 1024, classes: new Map() },
+  seedUrl: 'http://moca-provisioner.moca.svc:8081/seed/v1/bundle',
+  maxEntries: 10_000,
+};
 const stsOf = (wl: string) => kube.objects.statefulsets.get(wl)!;
 
 let kube: FakeKube;
@@ -40,7 +51,7 @@ beforeEach(() => {
   kube = new FakeKube();
   kube.objects.podtemplates.set('moca-workload-sandbox', workloadTemplate());
   now = 1_800_000_000;
-  deps = { kube, signer, config, now: () => now };
+  deps = { kube, signer, config, bundles: new BundleStore(1024 * 1024), now: () => now };
 });
 
 describe('PUT: what a workload gets', () => {
@@ -542,5 +553,265 @@ describe('re-minting before expiry (spec §3.1)', () => {
     expect(await remintExpiring(deps)).toBe(0);
     expect(kube.calls.filter((c) => /^(create|replace|patch)/.test(c))).toEqual([]);
     expect(kube.objects.secrets.get('moca-relay-attach')!.data).toEqual({ SH_RELAY_TOKEN: 'eA==' });
+  });
+});
+
+describe("a mounted workload's PVC and seed (spec §5)", () => {
+  const REV = 'c'.repeat(64);
+  const mounted = (mount: 'read-only' | 'writable', count = 1) =>
+    parseSandboxSpec(
+      { count, revision: REV, mount, storage: { size: '2Gi' } },
+      { ...config, storage: { maxMiB: 10 * 1024, classes: new Map() } },
+    );
+  const keysFor = (r: WorkloadRef) => workloadKeyFor(r.owner, r.name, r.generation);
+  const ctxMounts = (c: { volumeMounts?: { name: string }[] }) =>
+    (c.volumeMounts ?? []).filter((m) => m.name === 'context');
+
+  it('checks mount, revision and the storage caps, as the worker does', () => {
+    const caps = {
+      ...config,
+      storage: {
+        maxMiB: 4096,
+        classes: new Map([
+          ['fast', 'rwo' as const],
+          ['nfs', 'rwx' as const],
+        ]),
+      },
+    };
+    const base = { count: 1, revision: REV, mount: 'writable' };
+    expect(parseSandboxSpec({ ...base, storage: { size: '1Gi' } }, caps).storage).toEqual({
+      size: '1Gi',
+      storageClass: 'fast',
+      access: 'rwo',
+    });
+    expect(
+      parseSandboxSpec({ ...base, storage: { size: '1Gi', storageClass: 'nfs' } }, caps).storage,
+    ).toEqual({ size: '1Gi', storageClass: 'nfs', access: 'rwx' });
+    for (const [body, code] of [
+      [{ ...base, storage: { size: '5Gi' } }, 'workspace_size_invalid'],
+      [
+        { ...base, storage: { size: '1Gi', storageClass: 'standard' } },
+        'storage_class_not_allowed',
+      ],
+      [{ ...base, mount: 'rw', storage: { size: '1Gi' } }, 'workspace_mount_invalid'],
+      [{ count: 1, mount: 'writable', storage: { size: '1Gi' } }, 'workspace_mount_invalid'],
+      [{ count: 1, revision: REV, storage: { size: '1Gi' } }, 'workspace_mount_invalid'],
+      [
+        { ...base, storage: { size: '1Gi', accessMode: 'ReadWriteOncePod' } },
+        'workspace_field_not_allowed',
+      ],
+    ] as const) {
+      expect(() => parseSandboxSpec(body, caps), code).toThrow(
+        expect.objectContaining({ status: 400, code }),
+      );
+    }
+  });
+
+  it('creates PVC <wl> beside the StatefulSet, ReadWriteOnce, sized and labelled as it is', async () => {
+    const r = ref('github:alice');
+    const wl = keysFor(r);
+    await putWorkload(deps, r, mounted('read-only'));
+    const pvc = kube.objects.persistentvolumeclaims.get(wl)!;
+    expect(pvc.spec).toEqual({
+      accessModes: ['ReadWriteOnce'],
+      resources: { requests: { storage: '2Gi' } },
+    });
+    expect(pvc.metadata.labels).toEqual(stsOf(wl).metadata.labels);
+    expect(pvc.metadata.annotations).toMatchObject({ 'moca.dev/generation': r.generation });
+    // A plain claim volume, never a claim template.
+    expect(stsOf(wl).spec.volumeClaimTemplates).toBeUndefined();
+    expect(stsOf(wl).spec.template.spec.volumes).toContainEqual({
+      name: 'context',
+      persistentVolumeClaim: { claimName: wl },
+    });
+  });
+
+  it('mounts read-only at revision/<rev>, seeded by one init container, with OnDelete and the seed annotation', async () => {
+    const r = ref('github:alice');
+    const wl = keysFor(r);
+    await putWorkload(deps, r, mounted('read-only', 2));
+    const sts = stsOf(wl);
+    expect(sts.spec.updateStrategy).toEqual({ type: 'OnDelete' });
+    expect(sts.spec.template.metadata.annotations['moca.dev/seed-revision']).toBe(REV);
+    const pod = sts.spec.template.spec;
+    expect(ctxMounts(pod.containers[0])).toEqual([
+      {
+        name: 'context',
+        mountPath: '/workspace/context',
+        subPath: `revision/${REV}`,
+        readOnly: true,
+      },
+    ]);
+    expect(pod.initContainers.map((c: { name: string }) => c.name)).toEqual(['seed-revision']);
+    const [seed] = pod.initContainers;
+    expect(ctxMounts(seed)).toEqual([
+      { name: 'context', mountPath: '/seed/revision', subPath: 'revision' },
+    ]);
+    // MOCA's image and the template's hardening; the ordinal and annotation from the downward API.
+    expect(seed.image).toBe(pod.containers[0].image);
+    expect(seed.securityContext).toEqual(pod.containers[0].securityContext);
+    const env = Object.fromEntries(seed.env.map((e: { name: string }) => [e.name, e]));
+    expect(env.SEED_REVISION.valueFrom.fieldRef.fieldPath).toBe(
+      "metadata.annotations['moca.dev/seed-revision']",
+    );
+    expect(env.POD_NAME.valueFrom.fieldRef.fieldPath).toBe('metadata.name');
+    expect(env.SEED_URL.value).toBe(config.seedUrl);
+    // ReadWriteOnce: every pod of the workload on one node.
+    expect(pod.affinity.podAffinity.requiredDuringSchedulingIgnoredDuringExecution).toEqual([
+      {
+        labelSelector: { matchLabels: { 'moca.dev/workload': wl } },
+        topologyKey: 'kubernetes.io/hostname',
+      },
+    ]);
+  });
+
+  it('a writable mount shows only moca-workspace; no container mounts the claim root or revision/ writable beside it', async () => {
+    const r = ref('github:alice');
+    const wl = keysFor(r);
+    await putWorkload(deps, r, mounted('writable'));
+    const pod = stsOf(wl).spec.template.spec;
+    expect(ctxMounts(pod.containers[0])).toEqual([
+      { name: 'context', mountPath: '/workspace/context', subPath: 'moca-workspace' },
+    ]);
+    const [rev, ws] = pod.initContainers;
+    expect(ctxMounts(ws)).toEqual([
+      { name: 'context', mountPath: '/seed/revision', subPath: `revision/${REV}`, readOnly: true },
+      { name: 'context', mountPath: '/seed/workspace', subPath: 'moca-workspace' },
+    ]);
+    for (const c of [...pod.containers, rev, ws]) {
+      const mounts = ctxMounts(c) as { subPath?: string; readOnly?: boolean }[];
+      expect(mounts.every((m) => m.subPath)).toBe(true);
+      const writable = mounts.filter((m) => !m.readOnly).map((m) => m.subPath);
+      expect(writable.length).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it('an rwx class gets ReadWriteMany and no node affinity', async () => {
+    const r = ref('github:alice');
+    const wl = keysFor(r);
+    const spec = parseSandboxSpec(
+      { count: 2, revision: REV, mount: 'read-only', storage: { size: '1Gi' } },
+      { ...config, storage: { maxMiB: 2048, classes: new Map([['nfs', 'rwx' as const]]) } },
+    );
+    await putWorkload(deps, r, spec);
+    expect(kube.objects.persistentvolumeclaims.get(wl)!.spec).toMatchObject({
+      accessModes: ['ReadWriteMany'],
+      storageClassName: 'nfs',
+    });
+    expect(stsOf(wl).spec.template.spec.affinity).toBeUndefined();
+  });
+
+  it('a workload without a mount gets no PVC, no init container and no seed annotation', async () => {
+    const r = ref('github:alice');
+    const wl = keysFor(r);
+    await putWorkload(deps, r, { count: 1, tier: 'container', revision: REV });
+    expect(kube.objects.persistentvolumeclaims.size).toBe(0);
+    const tpl = stsOf(wl).spec.template;
+    expect(tpl.spec.initContainers).toBeUndefined();
+    expect(tpl.metadata.annotations['moca.dev/seed-revision']).toBeUndefined();
+    expect(stsOf(wl).spec.updateStrategy).toBeUndefined();
+  });
+
+  it('refuses to adopt a PVC under the derived name that is not this workload', async () => {
+    const r = ref('github:alice');
+    const wl = keysFor(r);
+    kube.objects.persistentvolumeclaims.set(wl, { metadata: { name: wl, labels: {} } });
+    await expect(putWorkload(deps, r, mounted('read-only'))).rejects.toMatchObject({
+      status: 409,
+      code: 'workload_object_conflict',
+    });
+    expect(kube.objects.statefulsets.size).toBe(0);
+  });
+
+  it('refuses to adopt a PVC that appears between its pre-read and its create', async () => {
+    const r = ref('github:alice');
+    const wl = keysFor(r);
+    const create = kube.create.bind(kube);
+    kube.create = async (kind, obj) => {
+      if (kind === 'persistentvolumeclaims') {
+        kube.objects.persistentvolumeclaims.set(wl, {
+          metadata: { name: wl, labels: { 'moca.dev/workload': wl } },
+        });
+      }
+      return create(kind, obj);
+    };
+    await expect(putWorkload(deps, r, mounted('read-only'))).rejects.toMatchObject({
+      status: 409,
+      code: 'workload_object_conflict',
+    });
+    expect(kube.objects.statefulsets.size).toBe(0);
+  });
+
+  it('holds the bundle within the seed budget across workloads: 503 seed_budget_full past it', async () => {
+    deps = { ...deps, bundles: new BundleStore(100) };
+    await putBundle(deps, ref('github:alice', 'one'), Buffer.alloc(60));
+    await expect(putBundle(deps, ref('github:bob', 'two'), Buffer.alloc(60))).rejects.toMatchObject(
+      {
+        status: 503,
+        code: 'seed_budget_full',
+      },
+    );
+    expect(deps.bundles.heldBytes).toBe(60);
+  });
+
+  it("removes the seed annotation and drops the bundle once pod 0's init containers completed, and only then", async () => {
+    const r = ref('github:alice');
+    const wl = keysFor(r);
+    await putBundle(deps, r, Buffer.from('bundle'));
+    await putWorkload(deps, r, mounted('read-only', 2));
+    expect(await getWorkload(deps, r)).toMatchObject({ seed: 'pending' });
+    kube.runPods(wl);
+    const initialized = { conditions: [{ type: 'Initialized', status: 'True' }] };
+    // Pod 1 is not the writer: its init containers finishing says nothing about the seed.
+    kube.objects.pods.get(`${wl}-1`)!.status = initialized;
+    expect(await settleSeeds(deps)).toBe(0);
+    expect(deps.bundles.get(wl)).toBeDefined();
+    kube.objects.pods.get(`${wl}-0`)!.status = initialized;
+    expect(await settleSeeds(deps)).toBe(1);
+    expect(stsOf(wl).spec.template.metadata.annotations['moca.dev/seed-revision']).toBeNull();
+    expect(deps.bundles.get(wl)).toBeUndefined();
+    expect(await getWorkload(deps, r)).toMatchObject({ seed: 'done' });
+    // A repeat activate after the seed holds nothing: it would never be fetched.
+    expect(await putBundle(deps, r, Buffer.from('bundle'))).toEqual({ held: false });
+    expect(await settleSeeds(deps)).toBe(0);
+  });
+
+  it('reports bundle_missing when the claim is unseeded and nothing is held (a provisioner restart)', async () => {
+    const r = ref('github:alice');
+    await putWorkload(deps, r, mounted('writable'));
+    expect(await getWorkload(deps, r)).toMatchObject({ seed: 'bundle_missing' });
+    await putBundle(deps, r, Buffer.from('again'));
+    expect(await getWorkload(deps, r)).toMatchObject({ seed: 'pending' });
+    // An unmounted workload has no seed to report.
+    const plain = ref('github:alice', 'plain');
+    await putWorkload(deps, plain, { count: 1, tier: 'container' });
+    expect(await getWorkload(deps, plain)).not.toHaveProperty('seed');
+  });
+
+  it('DELETE removes the PVC too, counts it until it is gone, and drops a held bundle', async () => {
+    const r = ref('github:alice');
+    const wl = keysFor(r);
+    await putBundle(deps, r, Buffer.from('bundle'));
+    await putWorkload(deps, r, mounted('read-only'));
+    expect(await deleteWorkload(deps, r)).toEqual({ remaining: 1 });
+    expect(kube.objects.persistentvolumeclaims.has(wl)).toBe(false);
+    expect(deps.bundles.get(wl)).toBeUndefined();
+    expect(await deleteWorkload(deps, r)).toEqual({ remaining: 0 });
+    // A claim still held by its protection finalizer: counted, and not deleted twice.
+    kube.objects.persistentvolumeclaims.set(wl, {
+      metadata: {
+        name: wl,
+        labels: stsOf(wl)?.metadata.labels ?? {
+          app: 'moca-workload-sandbox',
+          'moca.dev/workload': wl,
+          'moca.dev/owner': ownerScopeFor(r.owner),
+          'app.kubernetes.io/managed-by': 'moca-provisioner',
+        },
+        deletionTimestamp: '2026-10-22T00:00:00Z',
+      },
+    });
+    kube.calls = [];
+    expect(await deleteWorkload(deps, r)).toEqual({ remaining: 1 });
+    expect(kube.calls).not.toContain(`delete persistentvolumeclaims ${wl}`);
   });
 });

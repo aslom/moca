@@ -14,3 +14,7 @@ spec:
               valueFrom: { secretKeyRef: { name: moca-provisioner, key: MOCA_PROVISIONER_TOKEN } }
             # Spec §6.3: the workers' half of the per-workload cap; the provisioner enforces it too.
             - { name: MOCA_WORKLOAD_MAX_SANDBOXES, value: '2' }
+            # A mounted workload's PVC (spec §6.3): the provisioner checks both again. setup.sh sets
+            # the StorageClasses, on both, from SH_WORKLOAD_STORAGE_CLASSES.
+            - { name: MOCA_WORKLOAD_MAX_STORAGE, value: 10Gi }
+            - { name: MOCA_WORKLOAD_STORAGE_CLASSES, value: '' }

@@ -226,7 +226,7 @@ grants (MI1 §4.2 I2). Until then the worker remains the trust root for routing,
 | `secrets`                | create, update, delete           | the workload's attach token, re-minted       |
 | `services`               | create, get, delete              | the StatefulSet's headless governing Service |
 | `pods`                   | get, list                        | readiness, and the reconciler's view         |
-| `persistentvolumeclaims` | get                              | until PR 3; see §5.1 for its additions       |
+| `persistentvolumeclaims` | create, get, delete              | the mounted workload's own PVC (§5)          |
 | `podtemplates`           | get, on `moca-workload-sandbox`  | the operator's pod template (§4.2)           |
 
 No create on bare pods, and no read on Secrets: the provisioner writes its workloads' tokens blind
@@ -256,8 +256,8 @@ concurrent PUTs could both pass it. The provisioner serializes PUTs per owner in
 as exactly one replica with the `Recreate` strategy; scaling it out needs a lock in the API.
 
 The governing Service is headless with no ports, as the shared pool's is: a workload sandbox
-accepts no connections. The provisioner has no rights outside `moca-sandbox`, and in PR 2 none on
-PVCs beyond `get`. PR 3 adds create and delete, since the provisioner owns the workload's PVC (§5.1,
+accepts no connections. The provisioner has no rights outside `moca-sandbox`, and on PVCs only the
+workload's own: PR 3 added create and delete, since the provisioner owns the workload's PVC (§5.1,
 2026-10-22). The control plane, supervisor and relay stay without a Kubernetes token.
 
 Its internal API is reached only by the supervisor's workers (NetworkPolicy):

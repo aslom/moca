@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
+  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -16,6 +17,8 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { MAX_EXEC_MESSAGE_BYTES } from '@moca/k8s-sandbox';
 import {
+  buildMountedCleanupScript,
+  buildMountedContextScript,
   buildContextAcquireScript,
   buildContextCleanupScript,
   buildContextPopulateScript,
@@ -476,5 +479,34 @@ describe('P6 context overlay', () => {
     const script = buildContextAcquireScript(revision, 'run-1');
     expect(script).toContain('for STALE in "/workspace/.moca-context"/runs/*');
     expect(script).toContain('[ -d "$STALE" ] && [ ! -L "$STALE" ]');
+  });
+});
+
+describe('a mounted context (workload sandboxes spec §5.3), run for real', () => {
+  const sh = (script: string, mount: string, base: string) =>
+    execFileSync('bash', [
+      '-c',
+      script.replaceAll('/workspace/context', mount).replaceAll('/workspace/.moca-context', base),
+    ]).toString();
+
+  it('roots the view at workspace/ under the copy rule, and a per-run copy is writable and removed', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'moca-mount-'));
+    const mount = join(dir, 'context');
+    const base = join(dir, 'base');
+    mkdirSync(join(mount, 'workspace'), { recursive: true });
+    writeFileSync(join(mount, 'workspace', 'a.txt'), 'a');
+    expect(sh(buildMountedContextScript('run-1', false), mount, base)).toBe(
+      join(mount, 'workspace'),
+    );
+    const copy = sh(buildMountedContextScript('run-1', true), mount, base);
+    expect(copy).toBe(join(base, 'runs', 'run-1'));
+    writeFileSync(join(copy, 'a.txt'), 'changed');
+    expect(readFileSync(join(mount, 'workspace', 'a.txt'), 'utf8')).toBe('a');
+    sh(buildMountedCleanupScript('run-1'), mount, base);
+    expect(existsSync(copy)).toBe(false);
+    // Another content root besides workspace/: the whole mount is the view.
+    mkdirSync(join(mount, 'memory'));
+    expect(sh(buildMountedContextScript('run-2', false), mount, base)).toBe(mount);
+    rmSync(dir, { recursive: true, force: true });
   });
 });
