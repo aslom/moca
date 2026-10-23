@@ -986,6 +986,9 @@ describe('pull --apply never writes local agent configuration or hooks (final re
     '.opencode/plugin/x.ts',
     '.codex/config.toml',
     '.codex/AGENTS.md',
+    '.codex/skills/x/SKILL.md',
+    '.agents/skills/x/SKILL.md',
+    '.agents/skills/x/run.sh',
     '.vscode/tasks.json',
     '.vscode/settings.json',
     '.husky/pre-commit',
@@ -1042,6 +1045,7 @@ describe('pull --apply never writes local agent configuration or hooks (final re
       '.claude',
       '.opencode',
       '.codex',
+      '.agents',
       '.husky',
       '.ſbx',
       'src/mcp.json',
@@ -1050,6 +1054,9 @@ describe('pull --apply never writes local agent configuration or hooks (final re
       '.claudex/x',
       '.codexrc',
       'docs/codex/x.md',
+      'agents/skills/x/SKILL.md',
+      '.agentsrc',
+      'docs/agents/x.md',
       'opencode.json5',
       '.vscode',
       '.vscode/extensions.json',
@@ -1064,7 +1071,7 @@ describe('pull --apply never writes local agent configuration or hooks (final re
       'AGENTS.md',
     ]) {
       // A bare directory name is matched too (a file or link where the directory goes).
-      const want = ['.claude', '.opencode', '.codex', '.husky', '.vscode'].includes(p);
+      const want = ['.claude', '.opencode', '.codex', '.agents', '.husky', '.vscode'].includes(p);
       expect(isAgentConfigPath(p), p).toBe(want);
     }
   });

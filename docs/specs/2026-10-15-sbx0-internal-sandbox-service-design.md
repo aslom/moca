@@ -469,6 +469,7 @@ persistence follows the existing `base/redis.yaml`.
   tree, so the next pull contains only newer changes.
 - **`pull --apply` refuses a patch that writes `.git`, `.sbx/` or the agent-configuration and
   local-hook files** (`.mcp.json`, `.claude/`, `opencode.json(c)`, `.opencode/`, `.codex/`,
+  `.agents/` (Codex CLI's repo skills),
   `.vscode/tasks.json`, `.vscode/settings.json`, `.husky/`, `.envrc`, or `.vscode` itself), on either
   side of a rename or copy, at any depth and under case and Unicode folding. A change to
   `CLAUDE.md`, `AGENTS.md` or `AGENTS.override.md` (Codex reads it in preference to `AGENTS.md`)

@@ -159,6 +159,7 @@ const AGENT_DIRS: Record<string, string> = {
   '.claude': 'Claude Code settings, hooks and commands',
   '.opencode': 'OpenCode configuration and plugins',
   '.codex': 'Codex CLI configuration, which can start MCP servers',
+  '.agents': "Codex CLI's repo skills, whose scripts it runs on this machine",
   '.husky': 'git hooks',
 };
 const AGENT_FILES: Record<string, string> = {
