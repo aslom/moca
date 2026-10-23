@@ -1,5 +1,113 @@
 package vmpool
 
+// admitOrEvictLocked is admitLocked for the two call sites whose refusal is
+// USER-VISIBLE: acquire's warming charge and runLocked's new key. Caller holds p.mu.
+//
+// #452: a memory refusal reaching one of these is a failed exec in somebody's
+// transcript, so try to make room before returning it. A session's idle-but-resident
+// standbys hold memory for WorkspaceIdle (8h on the shipped P4-on-P6 unit) while
+// occupying no lease slot one tier up, so committed memory grows with the number of
+// DISTINCT RECENT sessions rather than with concurrency: a host walks into a state
+// where it keeps advertising slots it can no longer admit, and then stays there for
+// hours. Evicting is what gets it back out, and it is close to free — see
+// evictForBudgetLocked for the cost argument.
+//
+// replenishOne deliberately does NOT come through here. Its refusal is already benign
+// ("a refused refill is nobody's error"), and evicting a standby to manufacture
+// another standby is pure churn: it moves RAM between runs without admitting any work
+// that was not already admitted.
+//
+// ONLY THE MEMORY GATE EVICTS. Parking a run drops it out of unparkedRunsLocked, so
+// this could be made to relieve the MaxRuns branch too — deliberately not done.
+// MaxRuns bounds concurrent workspace KEYS and shedding a key's standbys does not
+// shed the key, so using one mechanism to escape the other ceiling would re-conflate
+// the two things spec §6 requires recorded distinctly. MaxRuns is also evaluated
+// first inside admitLocked and a MaxRuns refusal returns here untouched, so a victim
+// parked on the memory path can never retroactively widen the MaxRuns ceiling for the
+// caller that caused the eviction.
+func (p *pool) admitOrEvictLocked(newRun bool) error {
+	err := p.admitLocked(newRun)
+	if ReasonOf(err) != RefuseMemoryBudget {
+		return err
+	}
+	p.evictForBudgetLocked()
+	// Re-admitted, not assumed: eviction is best-effort (nothing idle to take, or the
+	// reclaim queue already saturated), and a refusal must describe the host as it is
+	// AFTER the attempt or its numbers send an operator to the wrong knob.
+	return p.admitLocked(newRun)
+}
+
+// evictForBudgetLocked frees one VM's worth of memory by reclaiming a standby from the
+// least-recently-used IDLE run. Caller holds p.mu. Best-effort and silent:
+// admitOrEvictLocked re-measures rather than trusting a result.
+//
+// This is sweepOnce's RunActive -> RunParked transition fired by memory pressure
+// instead of by the clock: drop a standby, STOP the replenish timers that would refill
+// it, KEEP the workspace. Not firing the WorkspaceIdle half matters — a memory signal
+// is about RAM, and deleting a live session's tree to make room for a different
+// session would turn a recoverable cold start into #338's silent reset.
+//
+// WHY THIS IS CHEAP AND A REFUSAL IS NOT. An eviction costs the victim one cold
+// acquire — the exact outcome StandbyIdle (90s) already produces for any run that goes
+// quiet, with the workspace still on disk, so spec §4.4's "RAM is urgent and disk is
+// not" is honoured rather than bypassed. A refusal costs the requesting session its
+// turn.
+//
+// LRU BY lastExec, the same clock sweepOnce's idleFor reads, so eviction order and
+// sweep order cannot disagree about which run is coldest.
+//
+// A BUSY RUN IS NEVER A CANDIDATE, for sweepOnce's reason: rp.busy() staying true is
+// what stops a reclaim landing under a running command. That also makes self-eviction
+// impossible at both call sites without a special case — runLocked's key has no
+// runPool yet, and acquire only reaches the memory gate on a run whose ready list it
+// has already found empty.
+func (p *pool) evictForBudgetLocked() {
+	// The send below happens UNDER p.mu and must not block, which this check is what
+	// guarantees. Every sender (here and sweep) holds p.mu, so they are totally ordered
+	// against each other, and reclaimLoop only ever drains — so capacity observed here
+	// cannot be taken by anyone else before the send. A full queue means reclamation is
+	// already behind, which is precisely the state where detaching more VMs would not
+	// free memory any sooner: refuse instead. Checked BEFORE anything leaves rp.ready,
+	// so a full queue costs nothing rather than losing a batch.
+	if p.closed || len(p.reclaimQ) >= cap(p.reclaimQ) {
+		return
+	}
+
+	var victim *runPool
+	for _, rp := range p.runs {
+		if rp.busy() || len(rp.ready) == 0 {
+			continue
+		}
+		if victim == nil || rp.lastExec.Before(victim.lastExec) {
+			victim = rp
+		}
+	}
+	if victim == nil {
+		return
+	}
+
+	// ONE VM, because one VM is what admission is short at both call sites. Taking the
+	// whole ready list would shed a coldest run's entire standby depth to admit a single
+	// warming, which is the reclaim storm spec §6 names. MaxReclaimsPerScan deliberately
+	// does not appear here: it rate-limits the background sweep's bulk munmap against
+	// the hot path, and this is already one VM on the hot path.
+	n := len(victim.ready) - 1
+	b := reclaimBatch{vms: []VM{victim.ready[n]}}
+	victim.ready = victim.ready[:n]
+	if len(victim.ready) == 0 {
+		// Stopping these is load-bearing, not tidiness: a pending replenishment would
+		// restore exactly the standby just evicted and re-consume the budget this call
+		// exists to free, turning one admission into a refill race.
+		for _, tm := range victim.pending {
+			tm.Stop()
+		}
+		victim.pending = nil
+		victim.parked = true
+	}
+	p.counters.evicted()
+	p.reclaimQ <- b
+}
+
 // admitLocked decides whether one more VM may be committed. Caller holds p.mu.
 //
 // TWO CEILINGS, RECORDED DISTINCTLY. Spec §6: "A memory-driven refusal is recorded
