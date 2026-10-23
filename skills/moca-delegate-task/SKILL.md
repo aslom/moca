@@ -44,23 +44,23 @@ forth with the user), secrets, or durable writes to your working tree.
 
 ## Flow
 
-Run each command on its own and copy the ids it prints into the next one. Shell variables do not
-survive between an agent's tool calls, and a single command matches the permission rules below.
+Run every command below from the project root — `rm -r .moca-delegate` and the relative
+`.moca-delegate/repo.context` only resolve correctly from there. Run each command on its own and
+copy the ids it prints into the next one: shell variables do not survive between an agent's tool
+calls, and a single command matches the permission rules below.
 
-1. Pack the directory into a `.moca-delegate/` subdirectory of the working tree. The packed file is
-   a full copy of the directory, so when packing the working tree itself (`ctx pack .`), `ctx pack`
-   would otherwise pack `.moca-delegate/repo.context` into the next `.moca-delegate/repo.context`.
-   Make sure `.moca-delegate/` is in a `.gitignore` the pack honours before step 1: `ctx pack`
-   skips files `.gitignore` lists, so with that entry it will not pack itself. `.git` is skipped
-   unless you add `--include-git`; symbolic links are refused.
+1. Clear and recreate the pack directory, then pack into it. The directory starts empty so a
+   leftover pack from an interrupted run cannot land inside the next one (`ctx pack`'s
+   `.gitignore` honour only applies inside a git work tree, and even there only when the entry is
+   in place). `.git` is skipped unless you add `--include-git`; symbolic links are refused.
 
    ```bash
-   mkdir -p .moca-delegate
+   rm -rf .moca-delegate && mkdir .moca-delegate
    contextctl ctx pack ./repo -o .moca-delegate/repo.context
    ```
 
-   When packing a subdirectory of the working tree (`ctx pack ./subpkg`), the `.moca-delegate/` dir
-   is outside the packed tree, so no gitignore entry is needed.
+   When packing a subdirectory of the working tree (`ctx pack ./subpkg`), `.moca-delegate/` is
+   outside the packed tree, so leftover packs cannot leak into the next bundle regardless.
 
 2. Create the workload. Keep the id it prints: there is no command that lists workloads.
 
@@ -159,7 +159,7 @@ The full set:
 {
   "permissions": {
     "allow": [
-      "Bash(mkdir -p .moca-delegate)",
+      "Bash(rm -rf .moca-delegate && mkdir .moca-delegate)",
       "Bash(contextctl ctx pack *)",
       "Bash(mocactl workloads *)",
       "Bash(mocactl spawn *)",
