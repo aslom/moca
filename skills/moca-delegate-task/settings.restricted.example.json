@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(rm -rf .moca-delegate && mkdir .moca-delegate)",
+      "Bash(rm -rf .moca-delegate)",
+      "Bash(mkdir .moca-delegate)",
       "Bash(mocactl spawn *)",
       "Bash(mocactl subagents *)",
       "Bash(mocactl get *)",
