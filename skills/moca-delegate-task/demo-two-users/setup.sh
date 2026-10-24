@@ -90,6 +90,12 @@ case "${1:-}" in
 *) die "unknown argument: $1 (see --help)" ;;
 esac
 [ "$#" -le 1 ] || die 'usage: setup.sh [--build|--skip-build|--delete]'
+# Before any work, so a mis-set path fails at once rather than after the cluster is built.
+# Mark only a directory this run creates, or one that is empty or already ours: --delete trusts
+# the marker, so a mis-set MOCA_DEMO_STATE (say $HOME) must never be marked.
+if [ -e "$STATE_DIR" ] && [ ! -f "$STATE_DIR/$STATE_MARKER" ] && [ -n "$(ls -A "$STATE_DIR")" ]; then
+  die "refusing to use $STATE_DIR: it exists, is not empty and has no $STATE_MARKER marker; set MOCA_DEMO_STATE to a new or empty directory"
+fi
 
 for c in kind docker kubectl jq git curl openssl node; do need "$c"; done
 # This checkout's mocactl: the demo needs `workloads create --sandboxes/--mount`.
@@ -153,11 +159,6 @@ if [ "$BUILD_ARG" != --skip-build ]; then
   kind load docker-image "$CS_IMAGE" --name "$CLUSTER"
 elif ! docker exec "$CLUSTER-control-plane" crictl inspecti "$CS_IMAGE" >/dev/null 2>&1; then
   die "--skip-build: $CS_IMAGE is not on the cluster yet; run setup.sh once without --skip-build"
-fi
-# Mark only a directory this run creates, or one that is empty or already ours: --delete trusts
-# the marker, so a mis-set MOCA_DEMO_STATE (say $HOME) must never be marked.
-if [ -e "$STATE_DIR" ] && [ ! -f "$STATE_DIR/$STATE_MARKER" ] && [ -n "$(ls -A "$STATE_DIR")" ]; then
-  die "refusing to use $STATE_DIR: it exists, is not empty and has no $STATE_MARKER marker; set MOCA_DEMO_STATE to a new or empty directory"
 fi
 mkdir -p "$STATE_DIR/bin"
 : >"$STATE_DIR/$STATE_MARKER"
