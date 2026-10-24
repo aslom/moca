@@ -215,8 +215,10 @@ context, mounted into those sandboxes, so runs use it with no per-run copy; with
 one run writes the next sees. The deployment must run `moca-provisioner`, or the harness refuses
 `sandboxes` (`400 workload_field_not_allowed`). Activation answers `provisioning` while the
 sandboxes start: `create` then polls `GET /workloads/ID` every 2 seconds, for up to 5 minutes,
-until the workload is `ready`, and treats an `error` the harness records, or the timeout, as a
-failure (it deletes the workload, as for any other failure). `--sandboxes` is a whole number of at
+until the workload is `ready`. On `seed_bundle_missing` (the provisioner lost the bundle, for
+example after a restart) it activates once more. Any other `error` the harness records, the same
+error twice, or the timeout is a failure (it deletes the workload, as for any other failure).
+`--sandboxes` is a whole number of at
 least 1 (the harness caps it, 2 by default); either flag outside `workloads create` exits `2`.
 
 `spawn --workload ID` adds `workloadId` to the run and records it in the ledger row

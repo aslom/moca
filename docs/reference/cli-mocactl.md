@@ -139,10 +139,12 @@ token. There is no list command: the harness has no list route.
 - `create` exit 2: no `--context`, a missing, empty or non-regular file, an invalid `--name`, a
   `--sandboxes` that is not a whole number of at least 1, a `--mount` other than `read-only` or
   `writable`, or `--mount` without `--sandboxes`; all before any request.
+- `create` exit 1 for a refusal, including a file larger than the grant's `maxBytes` or an upload
+  URL that is neither HTTPS nor loopback HTTP; a workload created before the failure is deleted.
 - `create --sandboxes`: activation answers `provisioning` while the workload's own sandboxes start;
-  `create` polls `GET /workloads/{id}` every 2 s for up to 5 minutes and exits 1 (deleting the
-  workload) on a recorded `error` or the timeout. Exit 1 for a refusal, including a file larger than the grant's `maxBytes` or an
-  upload URL that is neither HTTPS nor loopback HTTP; a workload created before the failure is deleted.
+  `create` polls `GET /workloads/{id}` every 2 s for up to 5 minutes. On `seed_bundle_missing` (the
+  provisioner lost the bundle) it activates once more. Any other recorded `error`, the same error
+  again, or the timeout exits 1 and deletes the workload.
 - `get`/`delete` exit 2 for an invalid id, exit 1 for `404 workload_not_found` or another refusal.
 - `--json`:
   - `create` → `{"workloadId","status","contextType","revision","files","bytes"}`, plus

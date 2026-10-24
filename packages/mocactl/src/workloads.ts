@@ -236,8 +236,17 @@ export async function cmdWorkloadCreate(rt: Runtime, io: Io, opts: CreateOptions
   if (active.status === 'provisioning') {
     io.err(`workload ${sanitizeRemote(id)} is provisioning its sandboxes`);
     const deadline = rt.now() + (opts.readyTimeoutMs ?? READY_TIMEOUT_MS);
+    let reactivated = false;
     try {
       while (active.status === 'provisioning') {
+        // The harness lost the held bundle (a provisioner restart, or a seed hold that lapsed while
+        // a claim sat Pending): the documented remedy is to repeat the activate, once.
+        if (active.error === 'seed_bundle_missing' && !reactivated) {
+          reactivated = true;
+          io.err(`workload ${sanitizeRemote(id)} lost its seed bundle; activating again`);
+          active = await client.activate(id, uploaded.revision, signal);
+          continue;
+        }
         if (active.error) {
           return await fail(
             `workload ${sanitizeRemote(id)} failed to provision: ${sanitizeRemote(active.error)}`,

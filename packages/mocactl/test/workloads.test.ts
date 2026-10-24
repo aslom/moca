@@ -232,6 +232,56 @@ describe('workloads create', () => {
     expect(slow.calls.at(-1)!.method).toBe('DELETE');
   });
 
+  it('activates once more when the seed bundle was lost, then deletes if it is lost again', async () => {
+    const own = { count: 1, tier: 'container', ready: 0 };
+    const lost = { revision: REV, sandboxes: own, error: 'seed_bundle_missing' };
+    const recovered = scriptedFetch(
+      json({ ...workload('awaiting_upload'), upload: grant() }, 201),
+      json({ revision: REV }, 201),
+      json(workload('provisioning', { revision: REV, sandboxes: own }), 202),
+      json(workload('provisioning', lost)),
+      json(workload('provisioning', { revision: REV, sandboxes: own }), 202),
+      json(workload('ready', { revision: REV, sandboxes: { ...own, ready: 1 } })),
+    );
+    const o = io();
+    expect(
+      await cmdWorkloadCreate(testRuntime({ fetchImpl: recovered.fetch }), o, {
+        contextPath: contextFile(),
+        name: 'demo',
+        sandboxes: 1,
+        json: false,
+      }),
+    ).toBe(0);
+    expect(recovered.calls.slice(2).map((c) => `${c.method} ${c.url}`)).toEqual([
+      'POST http://h/workloads/demo/activate',
+      'GET http://h/workloads/demo',
+      'POST http://h/workloads/demo/activate',
+      'GET http://h/workloads/demo',
+    ]);
+    expect(recovered.calls[4]!.body).toEqual({ revision: REV });
+    expect(o.stderr.join('\n')).toContain('lost its seed bundle; activating again');
+
+    const twice = scriptedFetch(
+      json({ ...workload('awaiting_upload'), upload: grant() }, 201),
+      json({ revision: REV }, 201),
+      json(workload('provisioning', { revision: REV, sandboxes: own }), 202),
+      json(workload('provisioning', lost)),
+      json(workload('provisioning', lost), 202),
+      new Response(null, { status: 204 }),
+    );
+    const t = io();
+    expect(
+      await cmdWorkloadCreate(testRuntime({ fetchImpl: twice.fetch }), t, {
+        contextPath: contextFile(),
+        name: 'demo',
+        sandboxes: 1,
+        json: false,
+      }),
+    ).toBe(1);
+    expect(t.stderr.join('\n')).toContain('failed to provision: seed_bundle_missing');
+    expect(twice.calls.at(-1)!.method).toBe('DELETE');
+  });
+
   it('replaces an already-expired grant before uploading', async () => {
     const { fetch, calls } = scriptedFetch(
       json({ ...workload('awaiting_upload'), upload: grant({ expiresAt: PAST }) }, 201),

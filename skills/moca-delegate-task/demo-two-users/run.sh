@@ -181,7 +181,7 @@ contexts() {
 CONTEXTS="$(contexts)"
 echo "Contexts:          $CONTEXTS"
 set -- $CONTEXTS
-check 1 "Context Service holds the three workloads' Contexts, Alice's and Bob's among them" \
+check 1 "Context Service holds exactly this run's three Contexts (fresh cluster), Alice's and Bob's among them" \
   "$(ok sh -c '[ "$1" = 3 ] && case " $2 " in *" $3 "*) case " $2 " in *" $4 "*) exit 0 ;; esac ;; esac; exit 1' _ "$#" "$CONTEXTS" "$ALICE_KEY" "$BOB_KEY")"
 set --
 echo "Alice's sandboxes: $ALICE_PODS(workload $ALICE_KEY)"
