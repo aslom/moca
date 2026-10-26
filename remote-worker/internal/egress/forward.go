@@ -9,6 +9,7 @@ import (
 	"net/textproto"
 	"strings"
 	"sync/atomic"
+	"time"
 )
 
 // hopHeaders are removed in both directions (RFC 9110 §7.6.1), together with
@@ -76,7 +77,20 @@ func (b trailerScrubBody) Read(p []byte) (int, error) {
 // keptBody is the guest's request body as handed to the Transport. Close is
 // a no-op: the Transport closes the body it sent, and the guest conn still
 // needs the remainder drained, boundedly, before its next request.
-type keptBody struct{ countingBody }
+//
+// The guest conn's idle bound is applied here rather than on the embedded
+// countingBody, which the response body shares: a read of the response comes
+// off the upstream conn, and must not refresh the deadline guarding the guest's.
+type keptBody struct {
+	countingBody
+	c    net.Conn
+	idle time.Duration
+}
+
+func (b keptBody) Read(p []byte) (int, error) {
+	extendRead(b.c, b.idle)
+	return b.countingBody.Read(p)
+}
 
 func (keptBody) Close() error { return nil }
 
@@ -89,6 +103,7 @@ func (keptBody) Close() error { return nil }
 // off. So no upstream conn is ever pooled, let alone shared between callers,
 // and the Transport adds no Accept-Encoding of its own.
 func (pc *proxyConn) forward(r *http.Request, up net.Conn, ev Event) bool {
+	idle := pc.p.cfg.IdleTimeout
 	var handed atomic.Bool
 	tr := &http.Transport{
 		Proxy: nil,
@@ -96,11 +111,19 @@ func (pc *proxyConn) forward(r *http.Request, up net.Conn, ev Event) bool {
 			if handed.Swap(true) {
 				return nil, errors.New("egress: checked upstream already used")
 			}
-			return up, nil
+			// Wrapped, not raw: the Transport writes the request, reads the
+			// headers and streams the body on its own schedule, with the proxy
+			// out of the loop for all three. Bounding the response body alone
+			// would leave the request write unbounded, and
+			// ResponseHeaderTimeout covers only the gap before the headers --
+			// an upstream that sends them and then stalls mid-body is bounded
+			// here and nowhere else.
+			return idleConn{Conn: up, idle: idle}, nil
 		},
 		DisableKeepAlives:      true,
 		DisableCompression:     true,
 		MaxResponseHeaderBytes: maxHeaderBytes,
+		ResponseHeaderTimeout:  pc.p.cfg.ResponseHeaderTimeout,
 	}
 	defer tr.CloseIdleConnections()
 
@@ -118,7 +141,7 @@ func (pc *proxyConn) forward(r *http.Request, up net.Conn, ev Event) bool {
 	}
 	var bytesUp atomic.Int64
 	if r.Body != nil && r.Body != http.NoBody {
-		out.Body = keptBody{countingBody{ReadCloser: r.Body, n: &bytesUp}}
+		out.Body = keptBody{countingBody: countingBody{ReadCloser: r.Body, n: &bytesUp}, c: pc.c, idle: idle}
 	}
 
 	resp, err := tr.RoundTrip(out)
@@ -152,7 +175,10 @@ func (pc *proxyConn) forward(r *http.Request, up net.Conn, ev Event) bool {
 	resp.Close = !keep
 	var bytesDown atomic.Int64
 	resp.Body = trailerScrubBody{countingBody{ReadCloser: resp.Body, n: &bytesDown}, resp}
-	werr := resp.Write(pc.c)
+	// Written through the wrapper so a guest that stops reading a large
+	// response cannot park its slot either: a peer that has stopped reading
+	// holds a connection just as effectively as one that has stopped sending.
+	werr := resp.Write(idleWriter{c: pc.c, idle: idle})
 
 	ev.Status, ev.Decision = resp.StatusCode, DecisionForward
 	ev.BytesUp, ev.BytesDown = bytesUp.Load(), bytesDown.Load()
@@ -161,12 +187,19 @@ func (pc *proxyConn) forward(r *http.Request, up net.Conn, ev Event) bool {
 		return false
 	}
 	// Any request body the upstream left unread would be parsed as the next
-	// request: drain a bounded amount, else end the conn.
+	// request: drain a bounded amount, else end the conn. It reads pc.c, so it
+	// sits inside the idle bound rather than after it.
 	if r.Body != nil {
-		if n, err := io.Copy(io.Discard, io.LimitReader(r.Body, drainLimit+1)); err != nil || n > drainLimit {
+		if n, err := io.Copy(io.Discard, io.LimitReader(keptBody{
+			countingBody: countingBody{ReadCloser: r.Body, n: new(atomic.Int64)}, c: pc.c, idle: idle,
+		}, drainLimit+1)); err != nil || n > drainLimit {
 			return false
 		}
 	}
+	// The next request's own read deadline is armed at the top of serve's
+	// loop, but a write deadline left over from this response would misfire on
+	// it. Clear both and let serve set what it needs.
+	_ = pc.c.SetDeadline(time.Time{})
 	return true
 }
 

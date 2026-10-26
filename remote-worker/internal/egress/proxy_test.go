@@ -807,6 +807,246 @@ func TestTunnelPropagatesHalfClose(t *testing.T) {
 	}
 }
 
+// #585: an established connection used to have no time bound at all. The read
+// deadline guarding the request headers is cleared once they are read
+// (handler.go), and before this change nothing replaced it on either path, so
+// a guest could pin every one of its connection slots -- and an upstream
+// socket each, in a process shared by every VM -- for the VM's lifetime.
+//
+// idleHarness is a harness whose bounds are short enough to wait on. Both
+// knobs are set: a test that bounds one must not pass because the other fired.
+func idleHarness(t *testing.T, allowList string, idle, respHeader time.Duration) *harness {
+	t.Helper()
+	return newHarness(t, allowList, func(c *Config) {
+		c.IdleTimeout = idle
+		c.ResponseHeaderTimeout = respHeader
+	})
+}
+
+// connsInFlight counts vm's live connection slots under the proxy lock. The
+// cap is applied to this map, so it is what "the slot came back" means.
+func (h *harness) connsInFlight(vmID string) int {
+	h.p.mu.Lock()
+	defer h.p.mu.Unlock()
+	b := h.p.vms[vmID]
+	if b == nil {
+		return 0
+	}
+	return len(b.conns)
+}
+
+func (h *harness) waitConnsInFlight(t *testing.T, vmID string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if h.connsInFlight(vmID) == want {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("%s has %d conns in flight, want %d", vmID, h.connsInFlight(vmID), want)
+}
+
+// TestIdleTunnelIsClosedAndItsSlotFreed is the defect itself: a tunnel where
+// neither side says anything must not be held forever, and the slot it held
+// must return to the per-VM cap.
+func TestIdleTunnelIsClosedAndItsSlotFreed(t *testing.T) {
+	// The upstream accepts and then says nothing, which is the whole point:
+	// without a deadline both copy goroutines block in Read indefinitely.
+	up := newTCPUpstream(t, func(c net.Conn) { defer c.Close(); io.ReadAll(c) })
+	h := idleHarness(t, fmt.Sprintf("up.test:%d", up.port), 150*time.Millisecond, 2*time.Second)
+	h.res.set("up.test", "127.0.0.1")
+	c := dial(t, h.register("vm-1", "run-a"))
+	connect(t, c, fmt.Sprintf("up.test:%d", up.port))
+
+	// The tunnel event is emitted when the splice returns, so its arrival is
+	// the proof the copy loops unblocked rather than the guest giving up.
+	h.sink.waitEvent(t, DecisionTunnel)
+	h.waitConnsInFlight(t, "vm-1", 0)
+	if n, err := c.Read(make([]byte, 1)); err == nil {
+		t.Fatalf("guest conn still readable after the idle bound: %d bytes", n)
+	}
+}
+
+// TestActiveTunnelSurvivesManyIdlePeriods is the regression the per-read reset
+// exists to prevent. An absolute deadline, or one armed once before the copy
+// loop, would kill a slow but healthy transfer -- a large repo being cloned.
+// Only a deadline refreshed on every read lets this pass.
+func TestActiveTunnelSurvivesManyIdlePeriods(t *testing.T) {
+	up := newTCPUpstream(t, echo)
+	const idle = 150 * time.Millisecond
+	h := idleHarness(t, fmt.Sprintf("up.test:%d", up.port), idle, 2*time.Second)
+	h.res.set("up.test", "127.0.0.1")
+	c := dial(t, h.register("vm-1", "run-a"))
+	c.SetDeadline(time.Now().Add(10 * time.Second))
+	connect(t, c, fmt.Sprintf("up.test:%d", up.port))
+
+	// Six exchanges at half the bound: over 3x the idle timeout in total, with
+	// no gap long enough to expire it.
+	buf := make([]byte, 4)
+	for i := 0; i < 6; i++ {
+		time.Sleep(idle / 2)
+		if _, err := c.Write([]byte("ping")); err != nil {
+			t.Fatalf("write %d after %v: %v", i, time.Duration(i)*idle/2, err)
+		}
+		if _, err := io.ReadFull(c, buf); err != nil {
+			t.Fatalf("read %d after %v: %v", i, time.Duration(i)*idle/2, err)
+		}
+	}
+	if h.connsInFlight("vm-1") != 1 {
+		t.Fatalf("active tunnel lost its slot: %d conns in flight", h.connsInFlight("vm-1"))
+	}
+}
+
+// TestHalfClosedIdleTunnelExpires covers the case the issue calls out: after a
+// half-close exactly one leg is still running, so bounding only the guest's
+// reads would leave a client that sent CloseWrite and then waits on a silent
+// upstream holding its slot indefinitely.
+func TestHalfClosedIdleTunnelExpires(t *testing.T) {
+	// Reads to EOF, then holds the conn open saying nothing.
+	done := make(chan struct{})
+	up := newTCPUpstream(t, func(c net.Conn) {
+		defer c.Close()
+		io.ReadAll(c)
+		<-done
+	})
+	t.Cleanup(func() { close(done) })
+	h := idleHarness(t, fmt.Sprintf("up.test:%d", up.port), 150*time.Millisecond, 2*time.Second)
+	h.res.set("up.test", "127.0.0.1")
+	c := dial(t, h.register("vm-1", "run-a"))
+	connect(t, c, fmt.Sprintf("up.test:%d", up.port))
+	if err := c.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	h.sink.waitEvent(t, DecisionTunnel)
+	h.waitConnsInFlight(t, "vm-1", 0)
+}
+
+// TestForwardResponseHeaderTimeout: an upstream that accepts the connection
+// and never answers used to hang RoundTrip forever. It must become the 502 the
+// unreachable-upstream arm already emits.
+func TestForwardResponseHeaderTimeout(t *testing.T) {
+	hold := make(chan struct{})
+	up := newTCPUpstream(t, func(c net.Conn) {
+		defer c.Close()
+		http.ReadRequest(bufio.NewReader(c))
+		<-hold // read the request, answer nothing
+	})
+	t.Cleanup(func() { close(hold) })
+	h := idleHarness(t, fmt.Sprintf("up.test:%d", up.port), 5*time.Second, 150*time.Millisecond)
+	h.res.set("up.test", "127.0.0.1")
+	c := dial(t, h.register("vm-1", "run-a"))
+	resp, body := roundTrip(t, c, fmt.Sprintf("GET http://up.test:%d/x HTTP/1.1\r\nHost: up.test\r\n\r\n", up.port))
+	assertRefusal(t, resp, body, 502, DecisionUpstreamUnreachable, "up.test")
+	h.waitConnsInFlight(t, "vm-1", 0)
+}
+
+// TestForwardStalledResponseBodyExpires is the gap ResponseHeaderTimeout does
+// not cover: headers arrive promptly and then the body stops. The bound has to
+// be on the upstream conn itself, which is why the Transport is handed a
+// wrapped conn rather than the raw one.
+func TestForwardStalledResponseBodyExpires(t *testing.T) {
+	hold := make(chan struct{})
+	up := newTCPUpstream(t, func(c net.Conn) {
+		defer c.Close()
+		http.ReadRequest(bufio.NewReader(c))
+		// Promises 64 bytes, sends 4, then stalls.
+		io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Length: 64\r\n\r\nabcd")
+		<-hold
+	})
+	t.Cleanup(func() { close(hold) })
+	h := idleHarness(t, fmt.Sprintf("up.test:%d", up.port), 150*time.Millisecond, 5*time.Second)
+	h.res.set("up.test", "127.0.0.1")
+	c := dial(t, h.register("vm-1", "run-a"))
+	if _, err := fmt.Fprintf(c, "GET http://up.test:%d/x HTTP/1.1\r\nHost: up.test\r\n\r\n", up.port); err != nil {
+		t.Fatal(err)
+	}
+	// The forward event is emitted once resp.Write returns, which only happens
+	// when the stalled body read fails. Without the bound it never returns.
+	if e := h.sink.waitEvent(t, DecisionForward); e.BytesDown != 4 {
+		t.Fatalf("event %+v, want the 4 bytes that did arrive", e)
+	}
+	h.waitConnsInFlight(t, "vm-1", 0)
+}
+
+// TestForwardSlowGuestReaderExpires bounds the other half of a stall: a guest
+// that asks for a large response and then stops reading holds its slot just as
+// effectively as one that stops sending, so the response write is bounded too.
+func TestForwardSlowGuestReaderExpires(t *testing.T) {
+	// Big enough that the write cannot complete into socket buffers alone.
+	const size = 8 << 20
+	up := newTCPUpstream(t, func(c net.Conn) {
+		defer c.Close()
+		http.ReadRequest(bufio.NewReader(c))
+		fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n", size)
+		io.Copy(c, io.LimitReader(zeros{}, size))
+	})
+	h := idleHarness(t, fmt.Sprintf("up.test:%d", up.port), 150*time.Millisecond, 5*time.Second)
+	h.res.set("up.test", "127.0.0.1")
+	c := dial(t, h.register("vm-1", "run-a"))
+	c.SetDeadline(time.Now().Add(10 * time.Second))
+	if _, err := fmt.Fprintf(c, "GET http://up.test:%d/big HTTP/1.1\r\nHost: up.test\r\n\r\n", up.port); err != nil {
+		t.Fatal(err)
+	}
+	// Never read the body: the response write stalls once the buffers fill.
+	h.sink.waitEvent(t, DecisionForward)
+	h.waitConnsInFlight(t, "vm-1", 0)
+}
+
+// TestForwardStalledGuestBodyExpiresWhileUpstreamTalks is why the guest conn's
+// bound lives on keptBody and not on the countingBody it embeds: that struct is
+// shared with the response body, whose reads come off the *upstream* conn. Put
+// the deadline there and an upstream that keeps talking would refresh the
+// deadline guarding the guest's conn, so a guest that promised a body and never
+// sent it would hold its slot for as long as the upstream cared to trickle.
+//
+// A serialized request/response cannot see this -- the two bodies never
+// overlap. A duplex exchange can, so this is the only test that pins the
+// placement.
+func TestForwardStalledGuestBodyExpiresWhileUpstreamTalks(t *testing.T) {
+	const idle = 150 * time.Millisecond
+	const chunks = 8
+	up := newTCPUpstream(t, func(c net.Conn) {
+		defer c.Close()
+		http.ReadRequest(bufio.NewReader(c))
+		fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n", chunks)
+		// A byte every half-interval: never idle from the upstream's side, and
+		// 4x the bound in total, so a deadline wrongly refreshed by these reads
+		// would carry the whole exchange through.
+		for i := 0; i < chunks; i++ {
+			time.Sleep(idle / 2)
+			if _, err := io.WriteString(c, "x"); err != nil {
+				return
+			}
+		}
+	})
+	h := idleHarness(t, fmt.Sprintf("up.test:%d", up.port), idle, 5*time.Second)
+	h.res.set("up.test", "127.0.0.1")
+	c := dial(t, h.register("vm-1", "run-a"))
+	c.SetDeadline(time.Now().Add(10 * time.Second))
+	// Promises a body and sends none. The Transport reads it through keptBody,
+	// which is the read that has to expire.
+	if _, err := fmt.Fprintf(c, "POST http://up.test:%d/x HTTP/1.1\r\nHost: up.test\r\nContent-Length: 1000\r\n\r\n", up.port); err != nil {
+		t.Fatal(err)
+	}
+	// The exchange is torn down mid-response rather than running to completion,
+	// so fewer bytes come down than the upstream meant to send.
+	if e := h.sink.waitEvent(t, DecisionForward); e.BytesDown >= chunks {
+		t.Fatalf("event %+v: whole response relayed, so the stalled guest body never expired", e)
+	}
+	h.waitConnsInFlight(t, "vm-1", 0)
+}
+
+// zeros is an endless source of zero bytes.
+type zeros struct{}
+
+func (zeros) Read(b []byte) (int, error) {
+	for i := range b {
+		b[i] = 0
+	}
+	return len(b), nil
+}
+
 func TestRegisterRefusesAGrant(t *testing.T) {
 	h := newHarness(t, "up.test", nil)
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(h.dir, "g.sock"), Net: "unix"})
@@ -847,6 +1087,8 @@ func TestNewProxyValidatesConfig(t *testing.T) {
 		"allow": func(c *Config) { c.Allow = nil }, "resolver": func(c *Config) { c.Resolver = nil },
 		"audit": func(c *Config) { c.Audit = nil }, "creds": func(c *Config) { c.Credentials = nil },
 		"conns": func(c *Config) { c.MaxConnsPerVM = 0 }, "reqs": func(c *Config) { c.MaxRequestsPerSession = -1 },
+		"idle": func(c *Config) { c.IdleTimeout = -1 },
+		"resp": func(c *Config) { c.ResponseHeaderTimeout = -time.Second },
 	} {
 		c := good
 		mod(&c)
@@ -857,6 +1099,11 @@ func TestNewProxyValidatesConfig(t *testing.T) {
 	p, err := NewProxy(good)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Zero means the default, never "no bound": a caller who left the field
+	// alone must still get a connection bounded in time (#585).
+	if p.cfg.IdleTimeout != defaultIdleTimeout || p.cfg.ResponseHeaderTimeout != defaultResponseHeaderTimeout {
+		t.Fatalf("defaults = %v, %v", p.cfg.IdleTimeout, p.cfg.ResponseHeaderTimeout)
 	}
 	p.Close()
 }

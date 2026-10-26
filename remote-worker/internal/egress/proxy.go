@@ -34,10 +34,28 @@ type Config struct {
 	Audit       AuditSink
 
 	DialTimeout time.Duration // default 10s
+	// IdleTimeout bounds how long an established connection may go with no
+	// bytes moving, in either direction and on either path. It is refreshed on
+	// every read and every write, so a transfer of any duration survives; only
+	// a silent one expires. Default 300s. Zero selects the default: a slot
+	// unbounded in time is not an option a caller may choose.
+	IdleTimeout time.Duration
+	// ResponseHeaderTimeout bounds how long a forwarded request may wait for
+	// its response headers after the request is sent. Separate from
+	// IdleTimeout: a silent gap mid-transfer is ordinary, a silent upstream
+	// that has been asked a question is not. Default 30s.
+	ResponseHeaderTimeout time.Duration
 }
 
 const (
 	defaultDialTimeout = 10 * time.Second
+	// defaultIdleTimeout matches squid's request_timeout. It has to outlast
+	// the quiet stretch of a real upstream doing work — a large repo being
+	// packed server-side before the first byte of the pack arrives, an
+	// inference endpoint thinking — because it is refreshed per read, not per
+	// request.
+	defaultIdleTimeout           = 300 * time.Second
+	defaultResponseHeaderTimeout = 30 * time.Second
 	// sessionIdle is how long a session counter survives without a request.
 	sessionIdle = time.Hour
 	// sweepEvery bounds how often the lazy session sweep runs.
@@ -100,9 +118,19 @@ func NewProxy(cfg Config) (*Proxy, error) {
 		return nil, fmt.Errorf("egress: MaxRequestsPerSession %d must be positive", cfg.MaxRequestsPerSession)
 	case cfg.DialTimeout < 0:
 		return nil, fmt.Errorf("egress: negative DialTimeout %v", cfg.DialTimeout)
+	case cfg.IdleTimeout < 0:
+		return nil, fmt.Errorf("egress: negative IdleTimeout %v", cfg.IdleTimeout)
+	case cfg.ResponseHeaderTimeout < 0:
+		return nil, fmt.Errorf("egress: negative ResponseHeaderTimeout %v", cfg.ResponseHeaderTimeout)
 	}
 	if cfg.DialTimeout == 0 {
 		cfg.DialTimeout = defaultDialTimeout
+	}
+	if cfg.IdleTimeout == 0 {
+		cfg.IdleTimeout = defaultIdleTimeout
+	}
+	if cfg.ResponseHeaderTimeout == 0 {
+		cfg.ResponseHeaderTimeout = defaultResponseHeaderTimeout
 	}
 	cfg.Allow = append([]AllowEntry(nil), cfg.Allow...)
 	cfg.PermitCIDRs = append([]netip.Prefix(nil), cfg.PermitCIDRs...)

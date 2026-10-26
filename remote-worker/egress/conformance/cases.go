@@ -920,6 +920,111 @@ func grantRefusedUnderSingle(ctx context.Context, t Target) error {
 	return nil
 }
 
+// connectTunnelIdleDeadline: with MOCA_EGRESS_IDLE_TIMEOUT_S=1 and
+// MOCA_EGRESS_MAX_CONNS_PER_VM=1, a tunnel to an upstream that says nothing is
+// closed, its tunnel event is emitted, and the slot it held comes back -- a
+// second CONNECT on the same VM succeeds where it would otherwise be refused
+// conn_cap. An active tunnel is unaffected, which the in-process suite pins
+// separately: the bound is refreshed per read, not absolute.
+//
+// pinned against: clearing the header read deadline (handler.go) without
+// replacing it, so splice/copyCounted blocks in Read for the VM's lifetime.
+func connectTunnelIdleDeadline(ctx context.Context, t Target) error {
+	var silent *silentUpstream
+	return run(ctx, t, func(h *harness) (err error) {
+		if silent, err = h.silent(); err != nil {
+			return err
+		}
+		h.env[EnvIdleTimeout] = "1"
+		h.env[EnvMaxConns] = "1"
+		return h.loopbackUpstreams(silent.port())
+	}, func(h *harness) error {
+		v, err := h.register("vm-i", "sid-i")
+		if err != nil {
+			return err
+		}
+		hp := net.JoinHostPort(upName, strconv.Itoa(silent.port()))
+		g, err := h.dial(v)
+		if err != nil {
+			return err
+		}
+		defer g.close()
+		r, err := g.connect(hp)
+		if err != nil {
+			return err
+		}
+		if r.status != 200 {
+			return fmt.Errorf("CONNECT: status %d %q, want 200", r.status, r.body)
+		}
+		// Neither side sends anything. The tunnel event is emitted when the
+		// splice returns, so its arrival is the proof the copy loops
+		// unblocked; without the bound it never arrives.
+		if _, err := h.wait(event{"decision": "tunnel", "vm_id": "vm-i", "sid": "sid-i", "status": 200}); err != nil {
+			return fmt.Errorf("idle tunnel was not closed: %w", err)
+		}
+		if err := g.closedWithin(eventWait); err != nil {
+			return fmt.Errorf("guest conn after the idle bound: %w", err)
+		}
+		// The slot is only free if the cap admits another conn: with
+		// MaxConns=1 this would be conn_cap if the expired tunnel still held
+		// its slot.
+		g2, err := h.dial(v)
+		if err != nil {
+			return err
+		}
+		defer g2.close()
+		r2, err := g2.connect(hp)
+		if err != nil {
+			return err
+		}
+		if r2.status != 200 {
+			return fmt.Errorf("second CONNECT: status %d %q, want 200 (the expired tunnel kept its slot)", r2.status, r2.body)
+		}
+		return nil
+	})
+}
+
+// forwardResponseHeaderTimeout: with
+// MOCA_EGRESS_RESPONSE_HEADER_TIMEOUT_S=1, a forwarded request to an upstream
+// that accepts the connection and never answers is refused 502
+// upstream_unreachable rather than held open. The refusal is the same named
+// one an unreachable upstream already gets: a timeout adds no new decision
+// value, so the audit shape is unchanged.
+//
+// pinned against: an http.Transport built per request (forward.go) with no
+// ResponseHeaderTimeout, so RoundTrip waits on a silent upstream forever.
+func forwardResponseHeaderTimeout(ctx context.Context, t Target) error {
+	var silent *silentUpstream
+	return run(ctx, t, func(h *harness) (err error) {
+		if silent, err = h.silent(); err != nil {
+			return err
+		}
+		h.env[EnvRespHeaderTime] = "1"
+		// Long, so what fires is the header bound and not the idle one.
+		h.env[EnvIdleTimeout] = "60"
+		return h.loopbackUpstreams(silent.port())
+	}, func(h *harness) error {
+		v, err := h.register("vm-r", "sid-r")
+		if err != nil {
+			return err
+		}
+		g, err := h.dial(v)
+		if err != nil {
+			return err
+		}
+		defer g.close()
+		r, err := g.get(upURL(silent.port(), "/never"))
+		if err != nil {
+			return err
+		}
+		if err := wantRefusal(r, 502, "upstream_unreachable", upName); err != nil {
+			return err
+		}
+		_, err = h.wait(event{"decision": "upstream_unreachable", "vm_id": "vm-r", "sid": "sid-r", "status": 502})
+		return err
+	})
+}
+
 // noSubject reports whether an event carries no subject: sub absent or "".
 func noSubject(m map[string]any) bool {
 	v, ok := m["sub"]

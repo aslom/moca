@@ -3,6 +3,7 @@ package egress
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func envMap(m map[string]string) func(string) string {
@@ -38,6 +39,9 @@ func TestConfigDefaults(t *testing.T) {
 	if cfg.MaxConnsPerVM != 32 || cfg.MaxRequestsPerSession != 10000 {
 		t.Fatalf("caps = %d, %d", cfg.MaxConnsPerVM, cfg.MaxRequestsPerSession)
 	}
+	if cfg.IdleTimeout != 300*time.Second || cfg.ResponseHeaderTimeout != 30*time.Second {
+		t.Fatalf("timeouts = %v, %v", cfg.IdleTimeout, cfg.ResponseHeaderTimeout)
+	}
 	if cc.Socket != "/run/moca-egress/control.sock" {
 		t.Fatalf("socket = %q", cc.Socket)
 	}
@@ -58,12 +62,18 @@ func TestConfigParsesOverrides(t *testing.T) {
 		"MOCA_EGRESS_MAX_REQUESTS_PER_SESSION": "7",
 		"MOCA_EGRESS_CONTROL_SOCK":             "/tmp/x.sock",
 		"MOCA_EGRESS_CONTROL_UIDS":             "0, 1000",
+		"MOCA_EGRESS_IDLE_TIMEOUT_S":           "45",
+		// Whitespace is trimmed, as for every other knob here.
+		"MOCA_EGRESS_RESPONSE_HEADER_TIMEOUT_S": " 5 ",
 	}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(cfg.PermitCIDRs) != 2 || cfg.MaxConnsPerVM != 4 || cfg.MaxRequestsPerSession != 7 {
 		t.Fatalf("cfg = %+v", cfg)
+	}
+	if cfg.IdleTimeout != 45*time.Second || cfg.ResponseHeaderTimeout != 5*time.Second {
+		t.Fatalf("timeouts = %v, %v", cfg.IdleTimeout, cfg.ResponseHeaderTimeout)
 	}
 	if cc.Socket != "/tmp/x.sock" || len(cc.AllowedUIDs) != 2 || cc.AllowedUIDs[1] != 1000 {
 		t.Fatalf("cc = %+v", cc)
@@ -78,6 +88,10 @@ func TestConfigRejectsBadCIDRAndBadUID(t *testing.T) {
 		"MOCA_EGRESS_MAX_CONNS_PER_VM":         "0",
 		"MOCA_EGRESS_MAX_REQUESTS_PER_SESSION": "abc",
 		"MOCA_EGRESS_RESOLVER":                 "nohostport",
+		// A zero is rejected, not read as "no bound": a connection unbounded
+		// in time is the #585 defect, not a configuration an operator may pick.
+		"MOCA_EGRESS_IDLE_TIMEOUT_S":            "0",
+		"MOCA_EGRESS_RESPONSE_HEADER_TIMEOUT_S": "-1",
 	}
 	for k, v := range cases {
 		m := base()

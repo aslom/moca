@@ -6,7 +6,7 @@
 **Extends:** [P4 — MicroVM sandbox tier](2026-09-09-p4-microvm-sandbox-design.md)
 **Touches:** Z1 (identity spine) — partially, and behind an interface · MU2 (`sandbox-egress` credential delivery)
 
-> **Amendment, 2026-10-21 — the transport-first slice.** Eight decisions, none replacing a Z5 decision.
+> **Amendment, 2026-10-21 — the transport-first slice.** Nine decisions, none replacing a Z5 decision.
 >
 > 1. §12.2 is decided: the proxy is `moca-egress` ([MI1](2026-09-28-moca-multi-user-isolation-design.md)
 >    D4, §2.4, §14). rossoctl/moca#277 is implemented as MI1 S4's transport and core, without S2.
@@ -34,6 +34,26 @@
 >    (upstream to guest), and adds `dial_addr`, the address actually dialled, which is the evidence for
 >    resolve-once. The conformance suite (`remote-worker/egress/conformance`) pins both, so MI1 §8.5 owes
 >    a matching amendment.
+> 9. _Added 2026-10-26 (#585, the second #583 review follow-up)._ An established connection is bounded
+>    in time: `MOCA_EGRESS_IDLE_TIMEOUT_S` (default `300`) closes a connection on which no byte has
+>    moved, on the tunnel and the forward path alike and in either direction, and
+>    `MOCA_EGRESS_RESPONSE_HEADER_TIMEOUT_S` (default `30`) bounds the wait for a forwarded request's
+>    response headers. The idle bound is refreshed per byte, not armed once, so a transfer of any
+>    duration survives — a `git clone` of a large repo must not die because it was slow. The default
+>    matches squid's `request_timeout` and is a judgement about real upstreams, not a measured result;
+>    the knob exists so an operator who disagrees can move it. Zero is rejected rather than read as "no
+>    bound".
+>
+>    **This is a transport-layer time bound, not a Z5 policy change,** which §3 reserves "budget and
+>    cap" to. It adds no quota, meters nothing and denies nothing a policy would have allowed: a
+>    connection that keeps moving bytes is never affected, and the per-VM and per-session caps keep the
+>    values Z5 gave them. It closes a hole in those caps rather than changing them — a count-only cap is
+>    unbounded in time, so one guest could hold all 32 of its slots, plus an upstream socket each in a
+>    host process every VM shares, for the VM's lifetime. An expiry ends a connection exactly as any
+>    other copy error does, so there is **no new audit decision value and no new `Event` field**, and
+>    MI1 §8.5's audit shape is untouched — unlike item 8, this amendment owes no audit-shape change.
+>    MI1 §8.5 item 2 and its config table record the two knobs. Two conformance cases
+>    (`connect_tunnel_idle_deadline`, `forward_response_header_timeout`) pin the behaviour.
 
 ## 1. What this is, and what it is not
 

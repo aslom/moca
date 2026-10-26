@@ -32,6 +32,10 @@ const (
 	EnvMaxRequests = "MOCA_EGRESS_MAX_REQUESTS_PER_SESSION"
 	EnvControlSock = "MOCA_EGRESS_CONTROL_SOCK"
 	EnvControlUIDs = "MOCA_EGRESS_CONTROL_UIDS"
+	// Whole seconds. Both bound an established connection, which until #585
+	// had no time bound at all once its request headers were read.
+	EnvIdleTimeout    = "MOCA_EGRESS_IDLE_TIMEOUT_S"
+	EnvRespHeaderTime = "MOCA_EGRESS_RESPONSE_HEADER_TIMEOUT_S"
 )
 
 // Instance is one running implementation.
@@ -77,6 +81,8 @@ func Cases() []Case {
 		{"plain_http_strips_proxy_and_moca_headers", plainHTTPStripsProxyAndMocaHeaders},
 		{"audit_query_removed", auditQueryRemoved},
 		{"grant_refused_under_single", grantRefusedUnderSingle},
+		{"connect_tunnel_idle_deadline", connectTunnelIdleDeadline},
+		{"forward_response_header_timeout", forwardResponseHeaderTimeout},
 	}
 }
 
@@ -539,6 +545,49 @@ func (e *echoUpstream) acceptCount() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.accepts
+}
+
+// silentUpstream accepts TCP on 127.0.0.1, reads whatever arrives and never
+// answers, holding every conn open until it is closed. It is the upstream a
+// time bound is about: one that is reachable and responsive at the TCP layer
+// and says nothing at the HTTP layer, so nothing short of a deadline ends the
+// connection.
+type silentUpstream struct {
+	ln   net.Listener
+	done chan struct{}
+	once sync.Once
+}
+
+func (h *harness) silent() (*silentUpstream, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	s := &silentUpstream{ln: ln, done: make(chan struct{})}
+	h.ups = append(h.ups, s)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				// Drain so the kernel buffers never push back and make the
+				// proxy's write, rather than its read, the thing that blocks.
+				go func() { _, _ = io.Copy(io.Discard, c) }()
+				<-s.done
+			}()
+		}
+	}()
+	return s, nil
+}
+
+func (s *silentUpstream) port() int { return s.ln.Addr().(*net.TCPAddr).Port }
+
+func (s *silentUpstream) Close() error {
+	s.once.Do(func() { close(s.done) })
+	return s.ln.Close()
 }
 
 // seenRequest is what the fake HTTP upstream received.
