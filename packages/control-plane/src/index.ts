@@ -174,6 +174,7 @@ export {
   credentialStoreFromEnv,
   depsFromEnv,
   portFromEnv,
+  redisClientOptions,
   verifyKeysFromEnv,
   type CredentialStoreKind,
 } from './main.js';

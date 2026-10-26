@@ -97,8 +97,18 @@ export interface ProvisionerDeps {
   config: ProvisionerConfig;
   /** Bundles handed over for seeding, until the seed has run (spec §5.2). */
   bundles: BundleStore;
+  /**
+   * The workload records in Redis, read-only, for the orphan sweep (spec §6.2). Unset, there is no
+   * sweep: nothing can tell an orphan from a live workload.
+   */
+  records?: RecordStore;
   /** Epoch seconds. */
   now?: () => number;
+}
+
+/** The one Redis read the orphan sweep makes: a workload record by its key, null when absent. */
+export interface RecordStore {
+  get(key: string): Promise<string | null>;
 }
 
 export interface WorkloadRef {
@@ -678,23 +688,33 @@ export function deleteWorkload(
   return serialized(k.own, () => removeWorkload(deps, k));
 }
 
-async function removeWorkload(deps: ProvisionerDeps, k: Keys): Promise<{ remaining: number }> {
+/**
+ * The StatefulSet first (its pods go, and the owner cap, counted from StatefulSets, is freed), then
+ * the Secret, then the Service, the claim last. The Secret goes while the Service (and claim) still
+ * exist: it is the one kind the provisioner cannot list, so a failed Secret delete leaves an object
+ * the orphan sweep can see, and the next DELETE or sweep retries it. Nothing here waits, so a claim
+ * its protection finalizer holds is only reported (`remaining`), and the next call retries.
+ * `onDelete` hears each object a delete was issued for (the orphan sweep logs them).
+ */
+async function removeWorkload(
+  deps: ProvisionerDeps,
+  k: Keys,
+  onDelete?: (kind: string, name: string) => void,
+): Promise<{ remaining: number }> {
   const { kube } = deps;
   // Retired, not only dropped: a late hand-off for it is refused, never held again.
   deps.bundles.retire(k.wl, nowOf(deps));
-  let claimLeft = 0;
-  for (const [kind, name] of [
-    ['statefulsets', k.wl],
-    ['services', k.wl],
-    ['persistentvolumeclaims', k.wl],
-  ] as const) {
-    const obj = await kube.get(kind, name);
-    if (!obj || !ours(obj, k)) continue;
-    if (kind === 'persistentvolumeclaims') claimLeft = 1;
-    if (!obj.metadata.deletionTimestamp) await kube.delete(kind, name);
-  }
+  const drop = async (kind: 'statefulsets' | 'services' | 'persistentvolumeclaims') => {
+    const obj = await kube.get(kind, k.wl);
+    if (!obj || !ours(obj, k)) return false;
+    if (!obj.metadata.deletionTimestamp && (await kube.delete(kind, k.wl))) onDelete?.(kind, k.wl);
+    return true;
+  };
+  await drop('statefulsets');
   // Unread, as every Secret: its name is derived from the verified owner, so it is this workload's.
-  await kube.delete('secrets', secretName(k.wl));
+  if (await kube.delete('secrets', secretName(k.wl))) onDelete?.('secrets', secretName(k.wl));
+  await drop('services');
+  const claimLeft = (await drop('persistentvolumeclaims')) ? 1 : 0;
   const pods = await kube.list('pods', `${WORKLOAD_LABEL}=${k.wl},${OWNER_LABEL}=${k.own}`);
   return { remaining: pods.length + claimLeft };
 }
@@ -812,7 +832,7 @@ async function settleOne(
  * Re-mint every attach token this provisioner manages that is nearing expiry (spec §3.1). It acts
  * without a user token, from the labels and annotations of the StatefulSets it created; it creates
  * nothing and widens no binding: wl, own, gen, tier and n are the StatefulSet's own. Orphans are the
- * reconciler's (spec §6.2, a later PR), so this keeps an orphan's token fresh until then.
+ * sweep's (sweepOrphans, spec §6.2), so this keeps an orphan's token fresh until its grace is over.
  */
 export async function remintExpiring(deps: ProvisionerDeps): Promise<number> {
   const sets = await deps.kube.list(
@@ -868,5 +888,205 @@ async function remintOne(deps: ProvisionerDeps, s: KubeObject): Promise<boolean>
       metadata: { annotations: minted.annotations },
     });
     return true;
+  });
+}
+
+/** MOCA_PROVISIONER_ORPHAN_GRACE_S's default: an object younger than this is never swept. */
+export const DEFAULT_ORPHAN_GRACE_S = 600;
+
+/** The kinds the sweep lists. Not Secrets: the Role has no read on them (spec §4.1). */
+const SWEPT_KINDS = ['statefulsets', 'services', 'persistentvolumeclaims'] as const;
+const KIND_NAME: Record<string, string> = {
+  statefulsets: 'StatefulSet',
+  services: 'Service',
+  persistentvolumeclaims: 'PersistentVolumeClaim',
+  secrets: 'Secret',
+};
+
+/** One workload key's objects, as listed. */
+interface SweepGroup {
+  wl: string;
+  objects: { kind: (typeof SWEPT_KINDS)[number]; obj: KubeObject }[];
+}
+
+export interface SweepResult {
+  /** Workloads whose objects were deleted (or are still going: a held claim). */
+  swept: number;
+  /** Workloads left alone because something about them is not as the provisioner writes it. */
+  skipped: number;
+  /** Workloads whose check or delete failed; the next pass retries. */
+  failed: number;
+}
+
+/**
+ * The orphan sweep (spec §6.2): delete a workload's StatefulSet, Service, Secret and PVC when its
+ * Redis record is missing, `deleted`, `deleting`, or of another generation, and every one of its
+ * objects is older than `graceS`. A `deleting` record is one whose owner asked for the delete and
+ * whose worker gave up waiting (its DELETE answered 202 and was not repeated); the sweep finishes
+ * the provisioner's half, and the owner's next DELETE the rest (Context, record). A live record
+ * (`creating`, `awaiting_upload`, `provisioning`, `ready`) of the same generation is never touched.
+ *
+ * Delete-only: it creates and mints nothing, so a forged record (workers can write Redis, spec §9)
+ * can at worst delete a workload's objects. It is conservative about everything else: an object
+ * whose labels, name, record-key or generation annotation are not as the provisioner writes them, a
+ * group whose objects disagree, a record that does not parse or that this workload key does not
+ * derive from, or an object with no readable creation time, is logged and skipped, never deleted.
+ *
+ * Each workload is handled on its own (one that fails never stops the others), on its owner's
+ * queue, so a delete here cannot interleave with that owner's PUT, DELETE or re-mint, and is
+ * re-checked there against fresh reads. Secrets are not listed (no read): a workload's Secret is
+ * deleted blind with its other objects, by its derived name.
+ */
+export async function sweepOrphans(
+  deps: ProvisionerDeps & { records: RecordStore },
+  graceS: number,
+): Promise<SweepResult> {
+  const selector = `app=${APP_LABEL},${MANAGED_BY_LABEL}=${MANAGED_BY}`;
+  const groups = new Map<string, SweepGroup>();
+  const result: SweepResult = { swept: 0, skipped: 0, failed: 0 };
+  for (const kind of SWEPT_KINDS) {
+    // A failed list fails the pass: deciding on a partial view could miss a group's live member.
+    for (const obj of await deps.kube.list(kind, selector)) {
+      const key = obj.metadata.labels?.[WORKLOAD_LABEL];
+      const id = typeof key === 'string' ? key : `?${obj.metadata.name}`;
+      const g = groups.get(id) ?? { wl: id, objects: [] };
+      g.objects.push({ kind, obj });
+      groups.set(id, g);
+    }
+  }
+  for (const g of groups.values()) {
+    try {
+      const r = await sweepOne(deps, g, graceS);
+      if (r === 'swept') result.swept++;
+      if (r === 'skipped') result.skipped++;
+    } catch (err) {
+      result.failed++;
+      const why = err instanceof Error ? err.message : String(err);
+      console.error(`provisioner: orphan check of workload ${g.wl} failed: ${why}`);
+    }
+  }
+  return result;
+}
+
+type Verdict = { keep: true; why?: string } | { keep: false; why: string };
+
+/** Whether one workload's record leaves its objects alone, and why not. */
+async function judge(
+  deps: { records: RecordStore },
+  k: Keys,
+  recordKey: string,
+  gen: string,
+): Promise<Verdict> {
+  const raw = await deps.records.get(recordKey);
+  if (raw === null) return { keep: false, why: 'record missing' };
+  let rec: unknown;
+  try {
+    rec = JSON.parse(raw);
+  } catch {
+    return { keep: true, why: 'record does not parse' };
+  }
+  if (!isObject(rec) || typeof rec.generation !== 'string' || typeof rec.status !== 'string') {
+    return { keep: true, why: 'record has no generation or status' };
+  }
+  if (rec.generation !== gen) return { keep: false, why: 'record of another generation' };
+  // The same generation: the objects must derive from this record's owner and name, as a PUT made
+  // them. Anything else is not the provisioner's doing, and is left for an operator.
+  if (
+    typeof rec.owner !== 'string' ||
+    typeof rec.name !== 'string' ||
+    workloadKeyFor(rec.owner, rec.name, gen) !== k.wl ||
+    workloadRecordKey(rec.owner, rec.name) !== recordKey
+  ) {
+    return { keep: true, why: 'workload key does not derive from its record' };
+  }
+  if (rec.status === 'deleted') return { keep: false, why: 'record deleted' };
+  if (rec.status === 'deleting') return { keep: false, why: 'record deleting' };
+  return { keep: true };
+}
+
+/** The group's keys, record key and generation, or why it is not one the sweep may act on. */
+function groupKeys(g: SweepGroup): { k: Keys; recordKey: string; gen: string } | { bad: string } {
+  let found: { k: Keys; recordKey: string; gen: string } | null = null;
+  for (const { kind, obj } of g.objects) {
+    const l = obj.metadata.labels ?? {};
+    const a = obj.metadata.annotations ?? {};
+    const what = `${KIND_NAME[kind]} ${obj.metadata.name}`;
+    const k = { wl: l[WORKLOAD_LABEL], own: l[OWNER_LABEL] };
+    if (typeof k.wl !== 'string' || !ATTACH_WORKLOAD_RE.test(k.wl))
+      return { bad: `${what}: no valid workload label` };
+    if (typeof k.own !== 'string' || !ATTACH_OWNER_RE.test(k.own))
+      return { bad: `${what}: no valid owner label` };
+    if (obj.metadata.name !== k.wl) return { bad: `${what}: named off its workload label` };
+    const recordKey = a[RECORD_KEY_ANNOTATION];
+    const gen = a[GENERATION_ANNOTATION];
+    if (
+      typeof recordKey !== 'string' ||
+      !RECORD_KEY_RE.test(recordKey) ||
+      !recordKey.startsWith(`sh:wl:${k.own}:`)
+    ) {
+      return { bad: `${what}: no valid record key` };
+    }
+    if (typeof gen !== 'string' || !GENERATION_RE.test(gen))
+      return { bad: `${what}: no valid generation` };
+    if (found && (found.k.own !== k.own || found.recordKey !== recordKey || found.gen !== gen)) {
+      return { bad: `${what}: disagrees with the workload's other objects` };
+    }
+    found = { k, recordKey, gen };
+  }
+  return found ?? { bad: 'no objects' };
+}
+
+/** Seconds since the object was created, or null when its creationTimestamp does not parse. */
+function ageS(obj: KubeObject, now: number): number | null {
+  const at = Date.parse(String(obj.metadata.creationTimestamp ?? ''));
+  return Number.isFinite(at) ? now - Math.floor(at / 1000) : null;
+}
+
+async function sweepOne(
+  deps: ProvisionerDeps & { records: RecordStore },
+  g: SweepGroup,
+  graceS: number,
+): Promise<'swept' | 'skipped' | 'kept'> {
+  const skip = (why: string) => {
+    console.error(`provisioner: orphan sweep skips workload ${g.wl}: ${why}`);
+    return 'skipped' as const;
+  };
+  const keys = groupKeys(g);
+  if ('bad' in keys) return skip(keys.bad);
+  const { k, recordKey, gen } = keys;
+  // Already going (a claim its finalizer holds until the pod is gone): nothing left to delete. The
+  // Secret went before the Service and claim (removeWorkload), so none is left behind unseen.
+  if (g.objects.every(({ obj }) => obj.metadata.deletionTimestamp)) return 'kept';
+  // Cheap checks first, off the owner's queue: most workloads are live, or too young.
+  const now = nowOf(deps);
+  for (const { obj } of g.objects) {
+    const age = ageS(obj, now);
+    if (age === null) return skip(`${obj.metadata.name} has no creation time`);
+    if (age < graceS) return 'kept';
+  }
+  const first = await judge(deps, k, recordKey, gen);
+  if (first.keep) return first.why ? skip(first.why) : 'kept';
+  return serialized(k.own, async () => {
+    // Again under the owner's queue, against fresh reads: a PUT or DELETE may have run since.
+    const fresh: SweepGroup = { wl: k.wl, objects: [] };
+    for (const kind of SWEPT_KINDS) {
+      const obj = await deps.kube.get(kind, k.wl);
+      if (obj && ours(obj, k)) fresh.objects.push({ kind, obj });
+    }
+    if (fresh.objects.length === 0) return 'kept';
+    const again = groupKeys(fresh);
+    if ('bad' in again) return skip(again.bad);
+    if (again.recordKey !== recordKey || again.gen !== gen) return 'kept';
+    for (const { obj } of fresh.objects) {
+      const age = ageS(obj, nowOf(deps));
+      if (age === null || age < graceS) return 'kept';
+    }
+    const verdict = await judge(deps, k, recordKey, gen);
+    if (verdict.keep) return verdict.why ? skip(verdict.why) : 'kept';
+    await removeWorkload(deps, k, (kind, name) =>
+      // Kind, name and reason only: never a token, a record or its owner.
+      console.log(`provisioner: orphan sweep deleted ${KIND_NAME[kind]} ${name} (${verdict.why})`),
+    );
+    return 'swept';
   });
 }

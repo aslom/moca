@@ -224,9 +224,9 @@ grants (MI1 §4.2 I2). Until then the worker remains the trust root for routing,
 | ------------------------ | -------------------------------- | -------------------------------------------- |
 | `apps/statefulsets`      | create, get, list, patch, delete | one per workload                             |
 | `secrets`                | create, update, delete           | the workload's attach token, re-minted       |
-| `services`               | create, get, delete              | the StatefulSet's headless governing Service |
+| `services`               | create, get, list, delete        | the StatefulSet's headless governing Service |
 | `pods`                   | get, list                        | readiness, and the reconciler's view         |
-| `persistentvolumeclaims` | create, get, delete              | the mounted workload's own PVC (§5)          |
+| `persistentvolumeclaims` | create, get, list, delete        | the mounted workload's own PVC (§5)          |
 | `podtemplates`           | get, on `moca-workload-sandbox`  | the operator's pod template (§4.2)           |
 
 No create on bare pods, and no read on Secrets: the provisioner writes its workloads' tokens blind
@@ -247,9 +247,9 @@ and its own `<name>-attach` Secret (an allow-list), and its only Secret referenc
 or `envFrom` is that one too; and it has no host namespace, privileged or escalating container,
 added capability, or claim template. The Role says which verbs; the policy says which objects.
 
-**Network.** Its egress is the Kubernetes API server only: `setup.sh` fills in the `kubernetes`
+**Network.** Its egress is the Kubernetes API server: `setup.sh` fills in the `kubernetes`
 Service's ClusterIP and its EndpointSlice addresses, and refuses to enable the feature when it
-cannot read them.
+cannot read them. The reconciler (§6.2) adds Redis's port and DNS, in a policy of their own.
 
 **One replica.** The owner cap (§6.3) counts the owner's StatefulSets and then creates one, so two
 concurrent PUTs could both pass it. The provisioner serializes PUTs per owner in process, and runs
@@ -505,12 +505,30 @@ Each step tolerates "already gone", so a retried delete finishes what a failed o
 ### 6.2 The reconciler
 
 A loop in the provisioner, every `MOCA_PROVISIONER_RECONCILE_S` (default 300). It lists the
-workload StatefulSets, Services, Secrets and PVCs in `moca-sandbox` and reads each one's record key
+workload StatefulSets, Services and PVCs in `moca-sandbox` and reads each one's record key
 from its annotation, reading Redis with the deployment's one credential (there are no ACL users,
-§3.1). It deletes the objects when the record is missing, `deleted`, or of another generation, and
-the objects are older than a 10-minute grace. The same loop re-mints attach tokens nearing expiry
-(§3.1) and removes `moca.dev/seed-revision` once seeding is done (§5.3).
+§3.1). It deletes the objects when the record is missing, `deleted`, `deleting`, or of another
+generation, and every object of the workload is older than a grace
+(`MOCA_PROVISIONER_ORPHAN_GRACE_S`, default 600, 10 minutes). The same loop re-mints attach tokens
+nearing expiry (§3.1) and removes `moca.dev/seed-revision` once seeding is done (§5.3).
 Contexts left by a failed rollback are out of its reach: Context Service owns them.
+
+Details, as built (2026-10-25):
+
+- **Secrets are not listed** (the Role has no read on them, §4.1). A workload's Secret is deleted
+  blind with its other objects, by its derived name, and every delete removes it before the
+  Service and PVC, so a failed Secret delete leaves an object the next pass still sees.
+- **`deleting` counts as gone.** It is a delete the owner asked for whose worker gave up waiting
+  (its `DELETE` answered `202` and was not repeated). The reconciler finishes the provisioner's
+  half; the owner's next `DELETE` still finishes the Context and the record.
+- **Conservative.** A workload whose objects carry no valid labels, name, record key or
+  generation, whose objects disagree, whose record does not parse or does not derive the workload
+  key, or whose objects have no creation time, is logged and skipped, never deleted. No pass runs
+  while Redis is unreachable.
+- **Ordered.** Each workload's delete runs on its owner's queue, as a `PUT` or `DELETE` does, after
+  re-reading the objects and the record there, in `DELETE`'s order (StatefulSet, Secret, Service,
+  PVC). Deleting the StatefulSet frees the owner's cap (§6.3). A claim held by its finalizer stays
+  until its pod is gone; nothing waits for it. One workload's failure never stops the others.
 
 ### 6.3 Caps and ceilings
 
