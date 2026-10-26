@@ -76,7 +76,9 @@ export SH_CONTROL_PLANE_URL=http://127.0.0.1:8090
 mocactl login
 ```
 
-`mocactl login` prints a code and the GitHub device URL, then `logged in as <name>`. Login failures that are fixed on
+`mocactl login` prints a code and the GitHub device URL, then `logged in as <name>`. In a terminal on your own machine
+(not over SSH) it also copies the code to the clipboard and opens the URL in your browser; `--no-browser` turns that
+off. Login failures that are fixed on
 the VM or GitHub rather than by the user: `device_flow_disabled` (the Device Flow box is unticked) and `GitHub knows no
 OAuth app with client id ...` (a mistyped `SH_GITHUB_CLIENT_ID`).
 

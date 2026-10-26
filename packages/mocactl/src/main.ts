@@ -1,4 +1,5 @@
 import { main } from './cli.js';
+import { loginHelpers } from './os.js';
 
 const ac = new AbortController();
 
@@ -29,6 +30,10 @@ const code = await main(
     stdinIsTTY: process.stdin.isTTY === true,
     readStdin: async () => (await readStdinBytes()).toString('utf8'),
     readStdinBytes,
+    loginHelpers: loginHelpers(process.env, {
+      stdin: process.stdin.isTTY === true,
+      stderr: process.stderr.isTTY === true,
+    }),
     // Loaded lazily so the headless commands never load Ink or React.
     startInteractive: async (rt, opts) => (await import('./start.js')).startInteractive(rt, opts),
   },

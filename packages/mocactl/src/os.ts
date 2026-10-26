@@ -141,6 +141,21 @@ export function realOs(
   };
 }
 
+/**
+ * The clipboard and browser for a device login, or undefined when nobody is at this machine's own
+ * screen: stdin or stderr is not a terminal (a script, CI), or the shell came in over SSH, where
+ * `open` would start a browser on the far machine and the clipboard is not the user's.
+ */
+export function loginHelpers(
+  env: NodeJS.ProcessEnv,
+  tty: { stdin: boolean; stderr: boolean },
+  os: Pick<OsDeps, 'copy' | 'openUrl'> = realOs(env),
+): Pick<OsDeps, 'copy' | 'openUrl'> | undefined {
+  if (!tty.stdin || !tty.stderr) return undefined;
+  if (env.SSH_CONNECTION || env.SSH_TTY || env.SSH_CLIENT) return undefined;
+  return { copy: os.copy, openUrl: os.openUrl };
+}
+
 const SAFE_ID = /^[A-Za-z0-9._-]+$/;
 
 export function writeExport(paths: Paths, sessionId: string, markdown: string): string {

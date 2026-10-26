@@ -399,6 +399,57 @@ describe('cmdLogin', () => {
     expect(o.stderr[0]).toContain('ABCD-1234');
   });
 
+  it('with login helpers, copies the code and then opens the raw verification URL', async () => {
+    const o = io();
+    const steps: string[] = [];
+    const rt = runtime({
+      auth: null,
+      cp: fakeControlPlane({
+        pollDeviceAuth: async () => ({
+          token: 'new-api',
+          subject: 'github:9',
+          roles: [],
+          expiresAt: 4_000_000_000,
+        }),
+      }),
+    });
+    const helpers = {
+      copy: async (t: string) => void steps.push(`copy ${t}`),
+      openUrl: (u: string) => void steps.push(`open ${u}`),
+    };
+    expect(await cmdLogin(rt, o, undefined, helpers)).toBe(0);
+    await new Promise((r) => setImmediate(r));
+    expect(steps).toEqual(['copy ABCD-1234', 'open https://github.com/login/device']);
+    expect(o.stderr.join('\n')).toContain('copied to the clipboard');
+  });
+
+  it('still opens the browser when the clipboard fails, and says nothing was copied', async () => {
+    const o = io();
+    const opened: string[] = [];
+    const rt = runtime({
+      auth: null,
+      cp: fakeControlPlane({
+        pollDeviceAuth: async () => ({
+          token: 'new-api',
+          subject: 'github:9',
+          roles: [],
+          expiresAt: 4_000_000_000,
+        }),
+      }),
+    });
+    const helpers = {
+      copy: async () => {
+        throw new Error('no clipboard');
+      },
+      openUrl: (u: string) => void opened.push(u),
+    };
+    expect(await cmdLogin(rt, o, undefined, helpers)).toBe(0);
+    await new Promise((r) => setImmediate(r));
+    expect(opened).toEqual(['https://github.com/login/device']);
+    expect(o.stderr.join('\n')).not.toContain('clipboard');
+    expect(o.stderr.join('\n')).toContain('Opening the browser');
+  });
+
   it('exits 130 quietly when cancelled during the device-flow poll', async () => {
     const ac = new AbortController();
     const o = io();

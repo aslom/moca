@@ -180,6 +180,7 @@ describe('main', () => {
     [['credentials', 'show', 'x'], 'unknown credentials command "show"'],
     [['run', 'hi', '--kind', 'bearer'], '--kind only applies to `mocactl credentials add`'],
     [['sessions', '--host', 'x'], '--host only applies to `mocactl credentials add`'],
+    [['sessions', '--no-browser'], '--no-browser only applies to `mocactl login`'],
   ])('rejects %j with exit 2', async (argv, message) => {
     const o = io();
     expect(await main(argv, {}, o, { buildRuntime: fakeBuild })).toBe(2);

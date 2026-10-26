@@ -73,7 +73,7 @@ keys in `config.json` under `keybinds`, e.g. `{ "session.new": "ctrl+x s" }`.
 ## Headless
 
 ```bash
-mocactl login                               # device-flow login, prints the code
+mocactl login                               # device-flow login: prints the code; in a local terminal also copies it and opens the browser (--no-browser: don't)
 mocactl logout [--all]                      # end this login on the server (--all: all of yours)
 mocactl auth token [--json]                 # a valid API token for scripts and the Claude Code hook
 mocactl doctor [--json]                     # seven checks, one fix per failure; exit 1 on failure

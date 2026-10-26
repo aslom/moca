@@ -15,6 +15,7 @@ import {
   cmdSessionDelete,
   cmdSessions,
   type Io,
+  type LoginHelpers,
 } from './headless.js';
 import { buildRuntime, ensureRuntimeAuth, type Runtime } from './runtime.js';
 import { sbxMain } from './sbx/cli.js';
@@ -26,7 +27,8 @@ import { VERSION } from './version.js';
 export const USAGE = `usage:
   mocactl [--setup] [--no-animation]             interactive terminal UI
   mocactl --version                              print this build's version (a release tag, edge-<sha> or dev)
-  mocactl login                                  log in with the GitHub device flow
+  mocactl login [--no-browser]                   log in with the GitHub device flow (in a local
+                                                 terminal: copies the code, opens the browser)
   mocactl logout [--all]                         end this login (--all: every login of yours)
   mocactl auth token [--json]                    print a valid API token, refreshing if needed
                                                  (exit 3: log in first; 4: control plane unreachable)
@@ -100,6 +102,8 @@ export async function main(
     readStdin?: () => Promise<string>;
     /** All of stdin, byte for byte (at least `limit` bytes when given): `sbx put`'s content. */
     readStdinBytes?: (limit?: number) => Promise<Buffer>;
+    /** `login`'s clipboard and browser; absent when nobody is at this machine's screen. */
+    loginHelpers?: LoginHelpers;
   } = {},
 ): Promise<number> {
   // `mocactl sbx` (SBX0) is its own command group with its own flags and its own control plane, so
@@ -110,6 +114,7 @@ export async function main(
       stdinIsTTY: deps.stdinIsTTY,
       readStdin: deps.readStdin,
       readStdinBytes: deps.readStdinBytes,
+      loginHelpers: deps.loginHelpers,
     });
   }
   let parsed;
@@ -131,6 +136,7 @@ export async function main(
         endpoint: { type: 'string' },
         config: { type: 'string' },
         all: { type: 'boolean' },
+        'no-browser': { type: 'boolean' },
         setup: { type: 'boolean' },
         'no-animation': { type: 'boolean' },
         'dry-run': { type: 'boolean' },
@@ -190,6 +196,10 @@ export async function main(
     io.err(`--all only applies to \`mocactl logout\`\n${USAGE}`);
     return 2;
   }
+  if (values['no-browser'] !== undefined && command !== 'login') {
+    io.err(`--no-browser only applies to \`mocactl login\`\n${USAGE}`);
+    return 2;
+  }
   if ((values.repo !== undefined || values.ref !== undefined) && command !== 'spawn') {
     io.err(`--repo and --ref only apply to \`mocactl spawn\`\n${USAGE}`);
     return 2;
@@ -239,7 +249,7 @@ export async function main(
   }
   switch (command) {
     case 'login':
-      return cmdLogin(rt, io, deps.signal);
+      return cmdLogin(rt, io, deps.signal, values['no-browser'] ? undefined : deps.loginHelpers);
     case 'logout':
       if (rest.length > 0) return usage(io);
       return cmdLogout(rt, io, { all: values.all === true });

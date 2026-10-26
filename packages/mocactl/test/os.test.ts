@@ -10,13 +10,39 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { resolvePaths } from '../src/config.js';
-import { editorArgv, editorCommand, openCommand, realOs, writeExport } from '../src/os.js';
+import {
+  editorArgv,
+  editorCommand,
+  loginHelpers,
+  openCommand,
+  realOs,
+  writeExport,
+} from '../src/os.js';
 
 describe('editorCommand', () => {
   it('prefers VISUAL, then EDITOR, then vi', () => {
     expect(editorCommand({ VISUAL: 'code --wait', EDITOR: 'nano' })).toBe('code --wait');
     expect(editorCommand({ EDITOR: 'nano' })).toBe('nano');
     expect(editorCommand({})).toBe('vi');
+  });
+});
+
+describe('loginHelpers', () => {
+  const os = { copy: async () => undefined, openUrl: () => undefined };
+  const tty = { stdin: true, stderr: true };
+
+  it('offers the clipboard and browser in a local terminal', () => {
+    expect(loginHelpers({}, tty, os)).toEqual(os);
+  });
+
+  it('offers nothing when stdin or stderr is not a terminal', () => {
+    expect(loginHelpers({}, { stdin: false, stderr: true }, os)).toBeUndefined();
+    expect(loginHelpers({}, { stdin: true, stderr: false }, os)).toBeUndefined();
+  });
+
+  it('offers nothing over SSH', () => {
+    expect(loginHelpers({ SSH_CONNECTION: '1 2 3 4' }, tty, os)).toBeUndefined();
+    expect(loginHelpers({ SSH_TTY: '/dev/ttys001' }, tty, os)).toBeUndefined();
   });
 });
 

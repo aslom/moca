@@ -25,6 +25,7 @@ import {
   resolveSessionOptions,
 } from './core/session-options.js';
 import { workspaceResetText } from './render/blocks.js';
+import type { OsDeps } from './os.js';
 import { ensureRuntimeAuth, sessionManager, setAuth, type Runtime } from './runtime.js';
 
 export interface Io {
@@ -53,16 +54,44 @@ function missing(rt: Runtime, io: Io, need: Array<keyof typeof MISSING>): boolea
   return absent.length > 0;
 }
 
+/** What a device login at this machine's own screen uses: the clipboard and the browser. */
+export type LoginHelpers = Pick<OsDeps, 'copy' | 'openUrl'>;
+
 /**
  * The device flow's prompt, on stderr: where to go and the code to enter, sanitized (both come from
  * the server). Shared by `mocactl login` and `mocactl sbx login`.
+ *
+ * With `helpers` (a terminal on this machine, no --no-browser) the code is also copied to the
+ * clipboard and then the page is opened, so the user only pastes and approves. GitHub's device
+ * flow has no verification_uri_complete, so the code cannot ride in the URL. A clipboard that
+ * fails (no display, no xclip) is not an error: the printed code still works.
  */
-export function devicePrompt(io: Io): (s: DeviceStart, attempt: number) => void {
-  return (s, attempt) =>
+export function devicePrompt(
+  io: Io,
+  helpers?: LoginHelpers,
+): (s: DeviceStart, attempt: number) => void {
+  return (s, attempt) => {
     io.err(
       `${attempt > 1 ? 'That code expired. ' : ''}Open ${sanitizeRemote(s.verificationUri)} ` +
         `and enter the code ${sanitizeRemote(s.userCode)} (valid for ${codeValidity(s.expiresIn)})`,
     );
+    if (!helpers) return;
+    void helpers
+      .copy(s.userCode)
+      .then(
+        () => true,
+        () => false,
+      )
+      .then((copied) => {
+        io.err(
+          copied
+            ? 'The code is copied to the clipboard; opening the browser…'
+            : 'Opening the browser…',
+        );
+        // openUrl restricts to http/https, so it gets the raw value; the sanitized form is for display.
+        helpers.openUrl(s.verificationUri);
+      });
+  };
 }
 
 /**
@@ -83,12 +112,17 @@ export function deviceLoginEnd(
   return undefined;
 }
 
-export async function cmdLogin(rt: Runtime, io: Io, signal?: AbortSignal): Promise<number> {
+export async function cmdLogin(
+  rt: Runtime,
+  io: Io,
+  signal?: AbortSignal,
+  helpers?: LoginHelpers,
+): Promise<number> {
   if (missing(rt, io, ['controlPlaneUrl']) || !rt.cp) return 2;
   try {
     const login = await deviceLogin(
       { cp: rt.cp, sleep: rt.sleep, now: rt.now },
-      devicePrompt(io),
+      devicePrompt(io, helpers),
       signal,
     );
     setAuth(rt, toCachedAuth(login, rt.endpoints.controlPlaneUrl!));
