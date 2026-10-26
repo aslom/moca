@@ -78,7 +78,7 @@ async function withExec(
 async function plan(
   c: SbxCtx,
   root: string,
-  o: { includeSecrets?: boolean; maxPush?: number },
+  o: { includeSecrets?: boolean; maxPush?: number; cwd?: string },
 ): Promise<PushPlan | number> {
   let p: PushPlan;
   try {
@@ -87,6 +87,15 @@ async function plan(
     if (!(err instanceof PushError)) throw err;
     say(c, err.message);
     return SBX_EXIT.failed;
+  }
+  // Said before anything is sent: run from a subdirectory, `up` and `push` still send the whole
+  // work tree (the sandbox belongs to the working tree, not the directory), and the file count
+  // alone does not make that obvious (#611).
+  if (o.cwd !== undefined && resolve(o.cwd) !== resolve(root)) {
+    say(
+      c,
+      `the whole work tree at ${root} (${p.files} files) is what gets pushed, not just the current directory`,
+    );
   }
   if (p.excludedSecrets.length) {
     say(
@@ -119,6 +128,13 @@ export interface PushFlags {
   force: boolean;
   includeSecrets: boolean;
   maxPush?: number;
+  /**
+   * The directory `up`/`push` was run from, when known: not a CLI flag, but the plan says when it
+   * differs from the work-tree root (#611). Both sides are `resolve`d before the comparison:
+   * `repoRoot` returns git's `--show-toplevel` verbatim, which on Windows is forward-slashed where
+   * `resolve` yields backslashes.
+   */
+  cwd?: string;
 }
 
 /** `mocactl sbx push`: refused while the sandbox holds changes not yet pulled, unless `--force`. */

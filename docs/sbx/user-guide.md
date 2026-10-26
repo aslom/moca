@@ -254,7 +254,9 @@ that is not bound here.
 
   `push` replaces the sandbox's tree with yours. It refuses while the sandbox has changes you have
   not pulled; pull them first, or `mocactl sbx push --force` to discard them. `up` on a sandbox with
-  changes not yet pulled leaves it unpushed, with a warning, and still succeeds.
+  changes not yet pulled leaves it unpushed, with a warning, and still succeeds. What is sent is
+  always the **whole work tree**, whatever directory you run `up` or `push` from; run from a
+  subdirectory, both say so before pushing.
 
 - **Run a command yourself:**
 
