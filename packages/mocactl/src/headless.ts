@@ -57,6 +57,16 @@ function missing(rt: Runtime, io: Io, need: Array<keyof typeof MISSING>): boolea
 /** What a device login at this machine's own screen uses: the clipboard and the browser. */
 export type LoginHelpers = Pick<OsDeps, 'copy' | 'openUrl'>;
 
+/** How long the clipboard may take before the browser opens anyway (a helper can hang, not fail). */
+export const COPY_TIMEOUT_MS = 1000;
+
+/**
+ * The shape of a device user code (GitHub's is `WDJB-MJHT`). The code comes from the server, and
+ * anything else is not put on the clipboard: a hostile control plane could otherwise plant text
+ * with newlines there for the user to paste into a shell.
+ */
+const USER_CODE = /^[A-Z0-9-]{4,16}$/;
+
 /**
  * The device flow's prompt, on stderr: where to go and the code to enter, sanitized (both come from
  * the server). Shared by `mocactl login` and `mocactl sbx login`.
@@ -64,7 +74,8 @@ export type LoginHelpers = Pick<OsDeps, 'copy' | 'openUrl'>;
  * With `helpers` (a terminal on this machine, no --no-browser) the code is also copied to the
  * clipboard and then the page is opened, so the user only pastes and approves. GitHub's device
  * flow has no verification_uri_complete, so the code cannot ride in the URL. A clipboard that
- * fails (no display, no xclip) is not an error: the printed code still works.
+ * fails, hangs past COPY_TIMEOUT_MS, or is handed an odd-shaped code is not an error: the
+ * browser still opens and the printed code still works.
  */
 export function devicePrompt(
   io: Io,
@@ -76,21 +87,27 @@ export function devicePrompt(
         `and enter the code ${sanitizeRemote(s.userCode)} (valid for ${codeValidity(s.expiresIn)})`,
     );
     if (!helpers) return;
-    void helpers
-      .copy(s.userCode)
-      .then(
-        () => true,
-        () => false,
-      )
-      .then((copied) => {
+    let timer: NodeJS.Timeout | undefined;
+    const copied = USER_CODE.test(s.userCode)
+      ? Promise.race([
+          helpers.copy(s.userCode).then(() => true),
+          new Promise<boolean>((resolve) => {
+            timer = setTimeout(() => resolve(false), COPY_TIMEOUT_MS);
+            timer.unref();
+          }),
+        ])
+      : Promise.resolve(false);
+    void copied
+      .catch(() => false)
+      .then((ok) => {
+        clearTimeout(timer);
         io.err(
-          copied
-            ? 'The code is copied to the clipboard; opening the browser…'
-            : 'Opening the browser…',
+          ok ? 'The code is copied to the clipboard; opening the browser…' : 'Opening the browser…',
         );
         // openUrl restricts to http/https, so it gets the raw value; the sanitized form is for display.
         helpers.openUrl(s.verificationUri);
-      });
+      })
+      .catch(() => undefined);
   };
 }
 

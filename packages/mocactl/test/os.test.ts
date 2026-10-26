@@ -32,17 +32,31 @@ describe('loginHelpers', () => {
   const tty = { stdin: true, stderr: true };
 
   it('offers the clipboard and browser in a local terminal', () => {
-    expect(loginHelpers({}, tty, os)).toEqual(os);
+    expect(loginHelpers({}, tty, os, 'darwin')).toEqual(os);
+    expect(loginHelpers({}, tty, os, 'win32')).toEqual(os);
+    expect(loginHelpers({ DISPLAY: ':0' }, tty, os, 'linux')).toEqual(os);
+    expect(loginHelpers({ WAYLAND_DISPLAY: 'wayland-0' }, tty, os, 'linux')).toEqual(os);
   });
 
   it('offers nothing when stdin or stderr is not a terminal', () => {
-    expect(loginHelpers({}, { stdin: false, stderr: true }, os)).toBeUndefined();
-    expect(loginHelpers({}, { stdin: true, stderr: false }, os)).toBeUndefined();
+    expect(loginHelpers({}, { stdin: false, stderr: true }, os, 'darwin')).toBeUndefined();
+    expect(loginHelpers({}, { stdin: true, stderr: false }, os, 'darwin')).toBeUndefined();
   });
 
   it('offers nothing over SSH', () => {
-    expect(loginHelpers({ SSH_CONNECTION: '1 2 3 4' }, tty, os)).toBeUndefined();
-    expect(loginHelpers({ SSH_TTY: '/dev/ttys001' }, tty, os)).toBeUndefined();
+    expect(loginHelpers({ SSH_CONNECTION: '1 2 3 4' }, tty, os, 'darwin')).toBeUndefined();
+    expect(loginHelpers({ SSH_TTY: '/dev/ttys001' }, tty, os, 'darwin')).toBeUndefined();
+    expect(loginHelpers({ SSH_CLIENT: '1 2 3' }, tty, os, 'darwin')).toBeUndefined();
+  });
+
+  it('offers nothing under sudo, which strips SSH_* and would open the browser as root', () => {
+    expect(loginHelpers({ SUDO_USER: 'ed' }, tty, os, 'darwin')).toBeUndefined();
+    expect(loginHelpers({ SUDO_USER: 'ed', DISPLAY: ':0' }, tty, os, 'linux')).toBeUndefined();
+  });
+
+  it('offers nothing off macOS and Windows without a display (headless, container, console)', () => {
+    expect(loginHelpers({}, tty, os, 'linux')).toBeUndefined();
+    expect(loginHelpers({}, tty, os, 'freebsd')).toBeUndefined();
   });
 });
 

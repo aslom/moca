@@ -142,17 +142,29 @@ export function realOs(
 }
 
 /**
- * The clipboard and browser for a device login, or undefined when nobody is at this machine's own
- * screen: stdin or stderr is not a terminal (a script, CI), or the shell came in over SSH, where
- * `open` would start a browser on the far machine and the clipboard is not the user's.
+ * The clipboard and browser for a device login, or undefined when nobody is likely at this
+ * machine's own screen:
+ *  - stdin or stderr is not a terminal (a script, CI);
+ *  - the shell came in over SSH, where `open` would start a browser on the far machine and the
+ *    clipboard is not the user's;
+ *  - it runs under sudo, which strips SSH_* and would start the browser as root;
+ *  - off macOS and Windows, there is no DISPLAY or WAYLAND_DISPLAY: a headless box, a container
+ *    (`docker exec -it`), a virtual console, or mosh/sudo sessions that lost the SSH_* variables.
+ *    Then xdg-open would fail or fall back to a text browser in this terminal.
+ * Not detected: a tmux or screen server started locally and reattached over SSH (its environment
+ * is the local one); `--no-browser` covers that.
  */
 export function loginHelpers(
   env: NodeJS.ProcessEnv,
   tty: { stdin: boolean; stderr: boolean },
   os: Pick<OsDeps, 'copy' | 'openUrl'> = realOs(env),
+  platform: NodeJS.Platform = process.platform,
 ): Pick<OsDeps, 'copy' | 'openUrl'> | undefined {
   if (!tty.stdin || !tty.stderr) return undefined;
   if (env.SSH_CONNECTION || env.SSH_TTY || env.SSH_CLIENT) return undefined;
+  if (env.SUDO_USER) return undefined;
+  const graphical = platform === 'darwin' || platform === 'win32';
+  if (!graphical && !env.DISPLAY && !env.WAYLAND_DISPLAY) return undefined;
   return { copy: os.copy, openUrl: os.openUrl };
 }
 
