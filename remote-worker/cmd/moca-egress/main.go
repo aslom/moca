@@ -53,10 +53,20 @@ func main() {
 		proxy.Close()
 		log.Fatalf("moca-egress: control socket %s: %v", cc.Socket, err)
 	}
+	// Flushes the audit queue. Called after proxy.Close() in every arm below, never before:
+	// Unregister emits one aborted event per live connection as it tears down, and those are
+	// only written if the sink outlives it.
+	closeAudit := func() {
+		if err := egress.CloseAudit(cfg.Audit); err != nil {
+			log.Printf("moca-egress: audit sink: %v", err)
+		}
+	}
+
 	if ctx.Err() != nil {
 		// Stopped before we began serving: nothing is registered yet, so close and exit 0.
 		srv.Close()
 		proxy.Close()
+		closeAudit()
 		return
 	}
 
@@ -75,12 +85,15 @@ func main() {
 		srv.Close()
 		<-serveErr
 		proxy.Close()
+		closeAudit()
 	case err := <-serveErr:
 		if err != nil {
 			log.Printf("moca-egress: control server: %v", err)
 			proxy.Close()
+			closeAudit()
 			os.Exit(1)
 		}
 		proxy.Close()
+		closeAudit()
 	}
 }

@@ -422,6 +422,262 @@ func TestPerVMConnCap(t *testing.T) {
 	h.sink.waitEvent(t, DecisionConnCap)
 }
 
+// fakeClock is a clock the test advances by hand. It is read from the proxy's
+// accept goroutine and written from the test, so both go through the mutex.
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func newFakeClock() *fakeClock { return &fakeClock{t: time.Now()} }
+
+func (c *fakeClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *fakeClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
+
+// capRefusalsInFlight reads vm's in-flight refusal count under the proxy lock.
+func (h *harness) capRefusalsInFlight(vmID string) int {
+	h.p.mu.Lock()
+	defer h.p.mu.Unlock()
+	b := h.p.vms[vmID]
+	if b == nil {
+		return 0
+	}
+	return b.capRefusals
+}
+
+// capCharged counts refusals charged to vm so far: every charge either becomes
+// an event, or is suppressed and reported on a later event's Coalesced, or is
+// still pending in the binding.
+func (h *harness) capCharged(vmID string) int {
+	n := 0
+	for _, e := range capEvents(h.sink.events()) {
+		if e.VMID == vmID {
+			n += 1 + int(e.Coalesced)
+		}
+	}
+	h.p.mu.Lock()
+	defer h.p.mu.Unlock()
+	if b := h.p.vms[vmID]; b != nil {
+		n += int(b.capSuppressed)
+	}
+	return n
+}
+
+// waitCapCharged waits until want refusals have been charged to vm. The accept
+// loop charges asynchronously, so totals are only stable once it has caught up.
+func (h *harness) waitCapCharged(t *testing.T, vmID string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if h.capCharged(vmID) >= want {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("%d of %d refusals charged to %s", h.capCharged(vmID), want, vmID)
+}
+
+// TestCapRefusalsAreBoundedPerVM is #586's first defect: every refusal used to
+// spawn a goroutine holding a socket for ~2s, so a guest in a tight loop could
+// multiply fds in a process shared by every VM. Refusals in flight must stay
+// under the bound no matter how many are offered.
+func TestCapRefusalsAreBoundedPerVM(t *testing.T) {
+	up := newTCPUpstream(t, echo)
+	h := newHarness(t, fmt.Sprintf("up.test:%d", up.port), func(c *Config) { c.MaxConnsPerVM = 1 })
+	h.res.set("up.test", "127.0.0.1")
+	path := h.register("vm-1", "run-a")
+	connect(t, dial(t, path), fmt.Sprintf("up.test:%d", up.port)) // fills the cap
+
+	// Each of these is refused. None reads its 429, so a draining refusal stays
+	// in flight for drainTimeout -- which is what makes the bound observable.
+	const offered = maxCapRefusalsPerVM * 6
+	peak := 0
+	for i := 0; i < offered; i++ {
+		c := dial(t, path)
+		fmt.Fprintf(c, "CONNECT up.test:%d HTTP/1.1\r\nHost: up.test\r\n\r\n", up.port)
+		if n := h.capRefusalsInFlight("vm-1"); n > peak {
+			peak = n
+		}
+		if n := h.capRefusalsInFlight("vm-1"); n > maxCapRefusalsPerVM {
+			t.Fatalf("refusal %d: %d in flight, over the bound of %d: a guest can grow host fds without limit",
+				i, n, maxCapRefusalsPerVM)
+		}
+	}
+	if peak == 0 {
+		t.Fatal("no refusal was ever in flight: the test did not exercise the refusal path")
+	}
+	t.Logf("offered %d refusals, peak in flight %d, bound %d", offered, peak, maxCapRefusalsPerVM)
+}
+
+// TestCapRefusalPastTheBoundClosesWithoutDraining pins the trade: below the
+// bound a guest reads its 429 (TestPerVMConnCap), past it the fd is shed.
+func TestCapRefusalPastTheBoundClosesWithoutDraining(t *testing.T) {
+	up := newTCPUpstream(t, echo)
+	h := newHarness(t, fmt.Sprintf("up.test:%d", up.port), func(c *Config) { c.MaxConnsPerVM = 1 })
+	h.res.set("up.test", "127.0.0.1")
+	path := h.register("vm-1", "run-a")
+	connect(t, dial(t, path), fmt.Sprintf("up.test:%d", up.port))
+
+	// Hold the bound full with refusals that never read their response.
+	held := make([]net.Conn, 0, maxCapRefusalsPerVM)
+	for i := 0; i < maxCapRefusalsPerVM; i++ {
+		c := dial(t, path)
+		fmt.Fprintf(c, "CONNECT up.test:%d HTTP/1.1\r\nHost: up.test\r\n\r\n", up.port)
+		held = append(held, c)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for h.capRefusalsInFlight("vm-1") < maxCapRefusalsPerVM && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if n := h.capRefusalsInFlight("vm-1"); n != maxCapRefusalsPerVM {
+		t.Fatalf("%d refusals in flight, want the bound %d held", n, maxCapRefusalsPerVM)
+	}
+
+	// One more: it is closed at once, so the read ends rather than returning a
+	// 429 or hanging for drainTimeout. How it ends is the kernel's choice, not
+	// this code's: the request sits unread in the receive buffer, so Linux
+	// answers the close with an RST (ECONNRESET) where macOS gives EOF. Either
+	// is a shed fd; what must hold is that no refusal was written and the read
+	// did not block for drainTimeout.
+	over := dial(t, path)
+	fmt.Fprintf(over, "CONNECT up.test:%d HTTP/1.1\r\nHost: up.test\r\n\r\n", up.port)
+	over.SetReadDeadline(time.Now().Add(2 * time.Second))
+	start := time.Now()
+	b, err := io.ReadAll(over)
+	if err != nil && isTimeout(err) {
+		t.Fatalf("past the bound the read blocked for %v: the conn was drained, not shed", time.Since(start))
+	}
+	if len(b) != 0 {
+		t.Fatalf("past the bound the guest got %q, want nothing written: the fd should be shed, not drained", b)
+	}
+	for _, c := range held {
+		c.Close()
+	}
+}
+
+// TestCapEventsAreCoalescedPerVM is the other half of defect 1: one conn_cap
+// line per refusal floods journald, whose rate limit then drops other VMs'
+// events. Repeats inside an interval must be counted onto one event.
+func TestCapEventsAreCoalescedPerVM(t *testing.T) {
+	up := newTCPUpstream(t, echo)
+	h := newHarness(t, fmt.Sprintf("up.test:%d", up.port), func(c *Config) { c.MaxConnsPerVM = 1 })
+	h.res.set("up.test", "127.0.0.1")
+
+	// A clock the test owns, so coalescing is driven without sleeping. It is
+	// read from the accept goroutine, hence the lock inside fakeClock.
+	clk := newFakeClock()
+	h.p.now = clk.now
+
+	path := h.register("vm-1", "run-a")
+	connect(t, dial(t, path), fmt.Sprintf("up.test:%d", up.port))
+
+	refuse := func(n int) {
+		for i := 0; i < n; i++ {
+			c := dial(t, path)
+			fmt.Fprintf(c, "CONNECT up.test:%d HTTP/1.1\r\nHost: up.test\r\n\r\n", up.port)
+			c.Close()
+		}
+	}
+	const burst = 12
+	refuse(burst)
+	h.waitCapCharged(t, "vm-1", burst)
+	if n := countDecision(h.sink.events(), DecisionConnCap); n != 1 {
+		t.Fatalf("%d conn_cap events for %d refusals in one interval, want 1: a tight loop still floods the audit stream", n, burst)
+	}
+
+	// A new interval reports again, and carries what the first interval
+	// suppressed, so the count is not lost.
+	clk.advance(capEventEvery + time.Millisecond)
+	refuse(1)
+	deadline := time.Now().Add(3 * time.Second)
+	for countDecision(h.sink.events(), DecisionConnCap) < 2 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	evs := capEvents(h.sink.events())
+	if len(evs) != 2 {
+		t.Fatalf("%d conn_cap events after a new interval, want 2", len(evs))
+	}
+	if evs[1].Coalesced == 0 {
+		t.Fatal("the second event reports no suppressed refusals: the burst vanished from the audit trail")
+	}
+	// Every refusal is accounted for: two events plus what they coalesced.
+	if total := 2 + int(evs[0].Coalesced) + int(evs[1].Coalesced); total != burst+1 {
+		t.Fatalf("events account for %d refusals, want %d", total, burst+1)
+	}
+}
+
+// TestOneVMsRefusalFloodDoesNotSuppressAnotherVMsEvents is the cross-tenant
+// property that motivates #586: coalescing is per VM, so a noisy guest cannot
+// silence a quiet one.
+func TestOneVMsRefusalFloodDoesNotSuppressAnotherVMsEvents(t *testing.T) {
+	up := newTCPUpstream(t, echo)
+	h := newHarness(t, fmt.Sprintf("up.test:%d", up.port), func(c *Config) { c.MaxConnsPerVM = 1 })
+	h.res.set("up.test", "127.0.0.1")
+	clk := newFakeClock()
+	h.p.now = clk.now
+
+	noisy := h.register("vm-noisy", "run-a")
+	quiet := h.register("vm-quiet", "run-b")
+	hp := fmt.Sprintf("up.test:%d", up.port)
+	connect(t, dial(t, noisy), hp)
+	connect(t, dial(t, quiet), hp)
+
+	for i := 0; i < 20; i++ {
+		c := dial(t, noisy)
+		fmt.Fprintf(c, "CONNECT %s HTTP/1.1\r\nHost: up.test\r\n\r\n", hp)
+		c.Close()
+	}
+	// The quiet VM's single refusal, in the same interval, must still be
+	// recorded: its first refusal is its own interval's first.
+	c := dial(t, quiet)
+	fmt.Fprintf(c, "CONNECT %s HTTP/1.1\r\nHost: up.test\r\n\r\n", hp)
+	defer c.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		var quietSeen bool
+		for _, e := range capEvents(h.sink.events()) {
+			if e.VMID == "vm-quiet" {
+				quietSeen = true
+			}
+		}
+		if quietSeen {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("vm-quiet's refusal was never recorded while vm-noisy flooded; events: %+v", capEvents(h.sink.events()))
+}
+
+func countDecision(evs []Event, decision string) int {
+	var n int
+	for _, e := range evs {
+		if e.Decision == decision {
+			n++
+		}
+	}
+	return n
+}
+
+func capEvents(evs []Event) []Event {
+	var out []Event
+	for _, e := range evs {
+		if e.Decision == DecisionConnCap {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 func TestPerSessionRequestCap(t *testing.T) {
 	up := newHTTPUpstream(t)
 	h := newHarness(t, fmt.Sprintf("up.test:%d", up.port), func(c *Config) { c.MaxRequestsPerSession = 3 })

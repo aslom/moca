@@ -24,6 +24,16 @@ const (
 	// a client that already sent its request see the refusal, not an RST.
 	drainLimit   = 64 << 10
 	drainTimeout = time.Second
+	// maxCapRefusalsPerVM bounds how many connection-cap refusals one VM may
+	// have in flight, each holding a socket for up to two drainTimeouts. Past
+	// it a refusal closes at once: the courtesy of a readable 429 is not worth
+	// unbounded fds in a process shared by every VM. Not configurable; it is a
+	// safety bound, not a policy.
+	maxCapRefusalsPerVM = 8
+	// capEventEvery bounds how often one VM's conn_cap events reach the audit
+	// stream. Refusals inside an interval are counted onto the next event, so
+	// a guest in a tight loop cannot flood out other VMs' events.
+	capEventEvery = time.Second
 )
 
 // refusalBytes renders a named refusal as a complete raw HTTP/1.1 response.

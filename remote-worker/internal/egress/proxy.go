@@ -67,6 +67,13 @@ type vmBinding struct {
 	ln     net.Listener
 	closed bool
 	conns  map[*proxyConn]struct{}
+
+	// capRefusals is the number of connection-cap refusals in flight for this
+	// VM; capSuppressed and capLastEvent coalesce their audit events. All
+	// three are guarded by Proxy.mu.
+	capRefusals   int
+	capSuppressed uint64
+	capLastEvent  time.Time
 }
 
 type sessionCount struct {
@@ -223,12 +230,34 @@ func (p *Proxy) admit(b *vmBinding, c *boundConn) {
 		return
 	}
 	if len(b.conns) >= p.cfg.MaxConnsPerVM {
+		// Both decisions are taken under p.mu, which this branch already holds:
+		// whether to spend a refusal socket, and whether this refusal is the
+		// one that reports the interval. A guest in a tight loop must not be
+		// able to grow either fds or audit volume without bound.
+		drain := b.capRefusals < maxCapRefusalsPerVM
+		if drain {
+			b.capRefusals++
+			p.wg.Add(1)
+		}
+		ev, report := b.chargeCapRefusal(p.now())
 		p.mu.Unlock()
-		p.cfg.Audit.Emit(Event{VMID: caller.VMID, SID: caller.SessionID, Sub: caller.Subject,
-			Status: 429, Decision: DecisionConnCap})
-		p.wg.Add(1)
+		if report {
+			ev.VMID, ev.SID, ev.Sub = caller.VMID, caller.SessionID, caller.Subject
+			p.cfg.Audit.Emit(ev)
+		}
+		if !drain {
+			// Past the bound the 429 is not written at all: shedding the fd
+			// matters more than the guest reading its refusal.
+			_ = c.Close()
+			return
+		}
 		go func() {
 			defer p.wg.Done()
+			defer func() {
+				p.mu.Lock()
+				b.capRefusals--
+				p.mu.Unlock()
+			}()
 			// Not parsed: the cap exists to shed load. The bounded drain, as
 			// for every refusal, lets a guest that pipelined its request see
 			// the named 429 rather than a reset.
@@ -250,6 +279,21 @@ func (p *Proxy) admit(b *vmBinding, c *boundConn) {
 		}()
 		pc.serve()
 	}()
+}
+
+// chargeCapRefusal charges one connection-cap refusal to b and reports the
+// event to emit, if any. The first refusal in an interval is reported, and
+// carries however many were suppressed since the last report; the rest are
+// only counted. Caller holds Proxy.mu.
+func (b *vmBinding) chargeCapRefusal(now time.Time) (Event, bool) {
+	if !b.capLastEvent.IsZero() && now.Sub(b.capLastEvent) < capEventEvery {
+		b.capSuppressed++
+		return Event{}, false
+	}
+	b.capLastEvent = now
+	n := b.capSuppressed
+	b.capSuppressed = 0
+	return Event{Status: 429, Decision: DecisionConnCap, Coalesced: n}, true
 }
 
 // countRequest charges one request to sid and reports whether it is within
