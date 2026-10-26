@@ -24,6 +24,7 @@ const EXPECTED: Record<CpErrorCode, number> = {
   unauthorized: 401,
   forbidden: 403,
   // 404, not 403, for another user's session: a 403 is an existence oracle (spec §8.1).
+  not_found: 404,
   session_not_found: 404,
   session_mismatch: 400,
   not_enrolled: 403,

@@ -10,6 +10,7 @@ import {
   cmdCredentials,
   cmdDoctor,
   cmdLogin,
+  cmdLoginTestUser,
   cmdLogout,
   cmdPromote,
   cmdRun,
@@ -30,6 +31,8 @@ export const USAGE = `usage:
   mocactl --version                              print this build's version (a release tag, edge-<sha> or dev)
   mocactl login [--no-browser]                   log in with the GitHub device flow (in a local
                                                  terminal: copies the code, opens the browser)
+  mocactl login --test-user N                    log in as test user N (needs the control plane's
+                                                 SH_TEST_USERS; secret in MOCA_TEST_USER_SECRET)
   mocactl logout [--all]                         end this login (--all: every login of yours)
   mocactl auth token [--json]                    print a valid API token, refreshing if needed
                                                  (exit 3: log in first; 4: control plane unreachable)
@@ -130,6 +133,7 @@ export async function main(
         'control-plane-url': { type: 'string' },
         'harness-url': { type: 'string' },
         session: { type: 'string' },
+        'test-user': { type: 'string' },
         new: { type: 'boolean' },
         option: { type: 'string', multiple: true },
         json: { type: 'boolean' },
@@ -204,6 +208,10 @@ export async function main(
     io.err(`--no-browser only applies to \`mocactl login\`\n${USAGE}`);
     return 2;
   }
+  if (values['test-user'] !== undefined && command !== 'login') {
+    io.err(`--test-user only applies to \`mocactl login\`\n${USAGE}`);
+    return 2;
+  }
   if ((values.repo !== undefined || values.ref !== undefined) && command !== 'spawn') {
     io.err(`--repo and --ref only apply to \`mocactl spawn\`\n${USAGE}`);
     return 2;
@@ -256,8 +264,19 @@ export async function main(
     await ensureRuntimeAuth(rt);
   }
   switch (command) {
-    case 'login':
-      return cmdLogin(rt, io, deps.signal, values['no-browser'] ? undefined : deps.loginHelpers);
+    case 'login': {
+      const raw = values['test-user'];
+      // A test-user login prints no device code, so it needs neither the clipboard nor the browser.
+      if (raw === undefined) {
+        return cmdLogin(rt, io, deps.signal, values['no-browser'] ? undefined : deps.loginHelpers);
+      }
+      // Validated before any network call, so a typo costs nothing and reports as usage.
+      if (!/^[0-9]+$/.test(raw) || Number(raw) < 1) {
+        io.err(`--test-user needs a whole number from 1 (got ${JSON.stringify(raw)})\n${USAGE}`);
+        return 2;
+      }
+      return cmdLoginTestUser(rt, io, Number(raw), process.env);
+    }
     case 'logout':
       if (rest.length > 0) return usage(io);
       return cmdLogout(rt, io, { all: values.all === true });

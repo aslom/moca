@@ -134,6 +134,54 @@ export function deviceLoginEnd(
   return undefined;
 }
 
+/**
+ * `mocactl login --test-user N` (ADR-0045). The secret comes from MOCA_TEST_USER_SECRET in the
+ * environment, never a flag: a flag would put it in the shell history and in every `ps` listing of
+ * the machine running the test.
+ */
+export async function cmdLoginTestUser(
+  rt: Runtime,
+  io: Io,
+  index: number,
+  env: NodeJS.ProcessEnv,
+): Promise<number> {
+  if (missing(rt, io, ['controlPlaneUrl']) || !rt.cp) return 2;
+  const secret = env.MOCA_TEST_USER_SECRET ?? '';
+  if (secret === '') {
+    io.err(
+      'login failed: --test-user needs the shared secret in MOCA_TEST_USER_SECRET ' +
+        "(the control plane's SH_TEST_USER_SECRET)",
+    );
+    return 2;
+  }
+  try {
+    const login = await rt.cp.testUserToken(index, secret);
+    // The SAME store a device login writes, so renewal and every later command behave identically.
+    setAuth(rt, toCachedAuth(login, rt.endpoints.controlPlaneUrl!));
+    io.err(`logged in as ${login.displayName ?? login.subject} (${login.subject})`);
+    return 0;
+  } catch (err) {
+    // The two misconfigurations worth naming, in the style identity.ts uses for the device flow:
+    // say the fix, and name only settings.
+    if (err instanceof ApiError && err.status === 404) {
+      io.err(
+        'login failed: this control plane has no test users ' +
+          '(set SH_TEST_USERS on the control plane to enable them)',
+      );
+      return 1;
+    }
+    if (err instanceof ApiError && err.code === 'unauthorized') {
+      io.err(
+        'login failed: the test-user secret was refused ' +
+          "(MOCA_TEST_USER_SECRET must match the control plane's SH_TEST_USER_SECRET)",
+      );
+      return 1;
+    }
+    io.err(`login failed: ${describeError(err)}`);
+    return 1;
+  }
+}
+
 export async function cmdLogin(
   rt: Runtime,
   io: Io,

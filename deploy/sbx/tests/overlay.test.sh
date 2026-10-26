@@ -132,6 +132,15 @@ done
 [[ "$(jq -c '[.spec.template.spec.volumes[] | select(.secret) | {s: .secret.secretName, k: [.secret.items[]?.key]}]' <<<"$CP")" == '[{"s":"moca-mu1","k":["SH_SESSION_TOKEN_PRIVATE_KEY","SH_JANITOR_TOKEN"]}]' ]] ||
   fail "the control plane mounts more or less than its signing key and the janitor token: $(jq -c '[.spec.template.spec.volumes[] | select(.secret)]' <<<"$CP")"
 [[ "$(jq -r .spec.template.spec.automountServiceAccountToken <<<"$CP")" == false ]] || fail 'the control plane still mounts a service account token'
+# Exactly ONE source type per volume. The base makes `credentials` a projected volume (ADR-0045);
+# volumes merge by name, so an overlay that supplies `secret:` without nulling `projected:` renders
+# BOTH -- which the API server refuses, and which would re-mount the KEK and exchange token this
+# profile removes. The assertion above cannot see that: `select(.secret)` matches either way.
+VOL_TYPES="$(jq -c '[.spec.template.spec.volumes[] | {name, types: ([to_entries[] | select(.key != "name") | .key] | sort)}]' <<<"$CP")"
+[[ "$(jq -c '[.[] | select((.types | length) != 1)]' <<<"$VOL_TYPES")" == '[]' ]] ||
+  fail "a volume declares more than one source type: $(jq -c '[.[] | select((.types | length) != 1)]' <<<"$VOL_TYPES")"
+[[ "$(jq -r '.[] | select(.name == "credentials") | .types[0]' <<<"$VOL_TYPES")" == secret ]] ||
+  fail "the credentials volume is not a plain secret volume here: $(jq -c '.[] | select(.name == "credentials")' <<<"$VOL_TYPES")"
 pass 'the control plane runs the sandbox profile with only its signing key and the janitor token mounted'
 
 # The control plane's own policy admits nothing (the base's supervisor ingress is reset).

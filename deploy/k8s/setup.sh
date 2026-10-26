@@ -74,6 +74,9 @@ P4_IDS=''
 P4_IDS_GIVEN=''
 # SH_SANDBOX_DEFAULT_TIER was set (even to empty) -- set in parse_args, resolved in load_setup_inputs.
 DEFAULT_TIER_GIVEN=''
+# ADR-0045: how many test:N logins to serve. Resolved sticky in load_setup_inputs, which runs
+# before ensure_secrets (the secret) and write_settings (the count).
+TEST_USERS=0
 # ocp-single's namespace (README §12), validated in parse_args.
 SINGLE_NS=''
 # ocp-single's optional Routes (README §12.5): the public DNS domain when SH_ROUTE_DOMAIN opted in,
@@ -486,8 +489,27 @@ derive_tiers() {
 # loaded dev.local tags, and --image there only picks what to pull, so only the sandbox count is
 # stored for it (and kind runs no P4 hosts, so it is never tiered and keeps no default tier).
 load_setup_inputs() {
-  local json stored
+  local json stored settings
   json="$(configmap_json moca-setup)"
+  # The count lives in moca-settings beside the other control-plane settings, so a re-run keeps it.
+  settings="$(configmap_json moca-settings)"
+  if [[ -n "${SH_TEST_USERS+x}" ]]; then TEST_USERS="${SH_TEST_USERS:-0}"; else TEST_USERS="$(cm_value "$settings" SH_TEST_USERS)"; fi
+  TEST_USERS="${TEST_USERS:-0}"
+  [[ "$TEST_USERS" =~ ^[0-9]+$ ]] || die "SH_TEST_USERS must be a whole number of users (got '$TEST_USERS')"
+  # Base 10 explicitly, and stored normalised: `08` is not valid octal, so (( )) below would die
+  # with a misleading "at most 1000", and `010` would be checked as 8 yet stored as `010`.
+  TEST_USERS="$((10#$TEST_USERS))"
+  ((TEST_USERS <= 1000)) || die "SH_TEST_USERS must be at most 1000 (got $TEST_USERS)"
+  if ((TEST_USERS > 0)); then
+    # ADR-0045: dev/test only. `--target ocp` is the shared-cluster target, where a stale export or
+    # a sticky ConfigMap value would quietly keep a password-gated login path alive, so it needs an
+    # explicit acknowledgement rather than a log line nobody reads. kind and ocp-single are
+    # dev/test targets by definition and need none.
+    if [[ "$TARGET" == ocp && "${SH_TEST_USERS_ACK-}" != 'i-know-this-is-not-for-production' ]]; then
+      die "SH_TEST_USERS=$TEST_USERS on --target ocp: test users are a dev/test feature and this is the shared-cluster target. Re-run with SH_TEST_USERS_ACK=i-know-this-is-not-for-production to confirm, or SH_TEST_USERS= to turn them off"
+    fi
+    log "WARNING: SH_TEST_USERS=$TEST_USERS: test:1..test:$TEST_USERS can log in with the shared secret and no browser (dev/test only, ADR-0045)"
+  fi
   if ! is_kind; then
     [[ -n "$IMAGE" ]] || IMAGE="$(cm_value "$json" IMAGE)"
     [[ -n "$SANDBOX_IMAGE" ]] || SANDBOX_IMAGE="$(cm_value "$json" SANDBOX_IMAGE)"
@@ -752,6 +774,43 @@ ensure_mu1_secret() {
   )
 }
 
+# ADR-0045: the test-user secret, in a Secret OF ITS OWN so control-plane.yaml can mark that source
+# `optional`. It must EXIST only while test users are on: credentialValue returns "unset" only for
+# ENOENT and throws on an empty file, so an empty value anywhere on this path crash-loops the
+# control plane before identity.ts runs. Hence write when on, DELETE when off -- which is also what
+# makes SH_TEST_USERS= (on -> off) leave no secret behind for testUserSecretFromEnv to refuse.
+ensure_test_user_secret() {
+  local json stored tsecret
+  if ((TEST_USERS == 0)); then
+    # Deleted, not emptied: absent is the only state the credential loader reads as unset.
+    kc delete secret moca-test-users -n "$NS" --ignore-not-found >/dev/null
+    TEST_USER_SECRET_DIGEST=''
+    return 0
+  fi
+  json="$(secret_json moca-test-users "$NS")"
+  stored="$(json_value "$json" SH_TEST_USER_SECRET)"
+  json=''
+  # Given wins, else keep what is stored (never rotated on a re-run), else generate.
+  tsecret="${SH_TEST_USER_SECRET-$stored}"
+  if [[ -z "$tsecret" ]]; then
+    # 64 hex characters, well past the 16-character minimum identity.ts enforces.
+    tsecret="$(openssl rand -hex 32)"
+    [[ "$tsecret" =~ ^[0-9a-f]{64}$ ]] || die 'could not generate SH_TEST_USER_SECRET'
+    log 'generated SH_TEST_USER_SECRET; read it with:'
+    log "  kubectl -n $NS get secret moca-test-users -o jsonpath='{.data.SH_TEST_USER_SECRET}' | base64 -d"
+  fi
+  # A DIGEST, never the value: write_settings folds it into the pods' settings-hash so that
+  # changing SH_TEST_USER_SECRET with the SAME user count still rolls the control plane. Without
+  # it the Secret would be rewritten while the running pod kept the old value until something else
+  # restarted it, and `--test-user` logins would fail against a secret the operator had just set.
+  TEST_USER_SECRET_DIGEST="$(printf '%s' "$tsecret" | sha256)"
+  [[ "$tsecret" == "$stored" ]] && return 0
+  (
+    export S_0="$tsecret"
+    apply_secret moca-test-users "$NS" SH_TEST_USER_SECRET
+  )
+}
+
 # moca-provisioner's Secret (spec §3.1, §4.1), only with SH_WORKLOAD_SANDBOXES=1: its Ed25519 attach
 # key (MOCA_ATTACH_PRIVATE_KEY) and the public half the relay verifies with (MOCA_ATTACH_PUBLIC_KEYS),
 # from the same key generator as moca-mu1's signing key -- an attach key is a different key of the
@@ -902,6 +961,7 @@ ensure_secrets() {
   ensure_p4_tokens
   ensure_redis_secret
   ensure_mu1_secret
+  ensure_test_user_secret
   ensure_provisioner_secret
 }
 
@@ -910,6 +970,9 @@ SUP_HOST=''
 CP_HOST=''
 RELAY_HOST=''
 SETTINGS_HASH=''
+# ADR-0045: sha256 of the test-user secret ('' when test users are off), set by
+# ensure_test_user_secret and folded into SETTINGS_HASH so a changed secret rolls the pods.
+TEST_USER_SECRET_DIGEST=''
 # The sandbox tiers (derive_tiers): both '' on a single-tier stack. STORED_DEFAULT_TIER is the sticky
 # SH_SANDBOX_DEFAULT_TIER input as resolved by load_setup_inputs (possibly ''); DEFAULT_TIER is what
 # moca-settings gets.
@@ -997,7 +1060,7 @@ hand_patched_catalog_hosts() {
 # the Route host every run (load_setup_inputs refuses a given value once ROUTE_DOMAIN resolves on).
 # SH_SANDBOX_TIERS and SH_SANDBOX_DEFAULT_TIER are derived too, by derive_tiers from the stack
 # (its sticky input lives in moca-setup). They are written even when '' so every stack hashes the
-# same nine keys; an empty token lifetime is the control plane's default, and an empty catalog
+# same ten keys; an empty token lifetime is the control plane's default, and an empty catalog
 # allow-list its own.
 write_settings() {
   local before after admins fb api_ttl session_ttl catalog_hosts catalog_src url
@@ -1044,15 +1107,16 @@ write_settings() {
     log "WARNING: SH_SESSION_TOKEN_TTL_SECONDS=$session_ttl is over 7 days: every session token stays valid that long"
   after="$(jq -ncS --arg id "$CLIENT_ID" --arg admins "$admins" --arg url "$url" \
     --arg fb "$fb" --arg tiers "$TIERS" --arg dtier "$DEFAULT_TIER" --arg api_ttl "$api_ttl" --arg session_ttl "$session_ttl" \
-    --arg catalog_hosts "$catalog_hosts" \
+    --arg catalog_hosts "$catalog_hosts" --arg test_users "$TEST_USERS" \
     '{SH_GITHUB_CLIENT_ID: $id, SH_ADMIN_SUBJECTS: $admins, SH_PUBLIC_HARNESS_URL: $url, SH_ALLOW_OPERATOR_FALLBACK: $fb,
       SH_SANDBOX_TIERS: $tiers, SH_SANDBOX_DEFAULT_TIER: $dtier,
       SH_API_TOKEN_TTL_SECONDS: $api_ttl, SH_SESSION_TOKEN_TTL_SECONDS: $session_ttl,
-      SH_MODEL_CATALOG_HOSTS: $catalog_hosts}')"
+      SH_MODEL_CATALOG_HOSTS: $catalog_hosts, SH_TEST_USERS: $test_users}')"
   jq -n --arg ns "$NS" --argjson data "$after" \
     '{apiVersion: "v1", kind: "ConfigMap", metadata: {name: "moca-settings", namespace: $ns}, data: $data}' |
     kc apply --server-side --force-conflicts --field-manager=moca-setup -f - >/dev/null
-  SETTINGS_HASH="$(printf '%s' "$after" | sha256)"
+  # The digest joins the HASH INPUT only -- never the ConfigMap, which holds nothing secret.
+  SETTINGS_HASH="$(printf '%s\n%s' "$after" "$TEST_USER_SECRET_DIGEST" | sha256)"
 }
 
 # kind-ci's mock model, from the file itself: no kustomization reads outside its root.
