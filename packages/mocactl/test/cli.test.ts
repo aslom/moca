@@ -180,6 +180,7 @@ describe('main', () => {
     [['credentials', 'show', 'x'], 'unknown credentials command "show"'],
     [['run', 'hi', '--kind', 'bearer'], '--kind only applies to `mocactl credentials add`'],
     [['sessions', '--host', 'x'], '--host only applies to `mocactl credentials add`'],
+    [['sessions', '--no-browser'], '--no-browser only applies to `mocactl login`'],
   ])('rejects %j with exit 2', async (argv, message) => {
     const o = io();
     expect(await main(argv, {}, o, { buildRuntime: fakeBuild })).toBe(2);
@@ -278,6 +279,41 @@ describe('main', () => {
       );
       expect(o.errs.join('')).toContain('--config');
     }
+  });
+});
+
+describe('login --no-browser', () => {
+  const run = async (argv: string[]) => {
+    const steps: string[] = [];
+    const rt = testRuntime({
+      auth: null,
+      cp: fakeControlPlane({
+        pollDeviceAuth: async () => ({
+          token: 'new-api',
+          subject: 'github:9',
+          roles: [],
+          expiresAt: 4_000_000_000,
+        }),
+      }),
+    });
+    const loginHelpers = {
+      copy: async (t: string) => void steps.push(`copy ${t}`),
+      openUrl: (u: string) => void steps.push(`open ${u}`),
+    };
+    const code = await main(argv, {}, io(), { buildRuntime: () => rt, loginHelpers });
+    await new Promise((r) => setImmediate(r));
+    return { code, steps };
+  };
+
+  it('copies the code and opens the browser without the flag', async () => {
+    expect(await run(['login'])).toEqual({
+      code: 0,
+      steps: ['copy ABCD-1234', 'open https://github.com/login/device'],
+    });
+  });
+
+  it('touches neither the clipboard nor the browser with it', async () => {
+    expect(await run(['login', '--no-browser'])).toEqual({ code: 0, steps: [] });
   });
 });
 

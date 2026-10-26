@@ -5,7 +5,7 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { MAX_STDIN_BYTES, q, WORKSPACE } from '@moca/sandbox-client';
 import { loadConfig, normalizeUrl, resolvePaths, type Paths, type TuiConfig } from '../config.js';
 import { sanitizeRemote } from '../core/sanitize.js';
-import type { Io } from '../headless.js';
+import type { Io, LoginHelpers } from '../headless.js';
 import { buildRuntime, ensureRuntimeAuth, type Runtime } from '../runtime.js';
 import { SandboxApiClient } from './api.js';
 import {
@@ -29,7 +29,9 @@ import { findSandboxFile, readBinding, readBoundSandbox, SANDBOX_ID_RE } from '.
 import { checkBeforeRm, cmdPull, cmdPush, cmdUp, DEFAULT_TEMPLATE, unbind } from './sync.js';
 
 export const SBX_USAGE = `usage (the sandbox service, SBX0):
-  mocactl sbx login [--control-plane-url URL]    log in with the GitHub device flow (the URL is remembered)
+  mocactl sbx login [--control-plane-url URL] [--no-browser]
+                                                 log in with the GitHub device flow (the URL is remembered;
+                                                 in a local terminal: copies the code, opens the browser)
   mocactl sbx logout                             end the sandbox-service login (deletes sbx-auth.json)
   mocactl sbx templates [--json]                 the templates a sandbox can be created from
   mocactl sbx create [--template ID] [--name N] [--label k=v ...] [--json]
@@ -92,6 +94,8 @@ export interface SbxDeps {
   claudeVersion?: () => Promise<string | undefined> | string | undefined;
   /** `mcp`'s transport (default stdio). */
   mcpTransport?: Transport;
+  /** `login`'s clipboard and browser; absent when nobody is at this machine's screen. */
+  loginHelpers?: LoginHelpers;
 }
 
 export function resolveSbxUrl(
@@ -215,7 +219,16 @@ const TAKES_SANDBOX_FLAG = new Set([
 const IN_REPO = new Set(['up', 'push', 'pull', 'doctor']);
 /** Flags that belong to some commands only: refused elsewhere rather than silently ignored. */
 const SYNC_FLAGS: [
-  'force' | 'include-secrets' | 'max-push' | 'apply' | 'out' | 'no-agent-config' | 'keep-config',
+  (
+    | 'force'
+    | 'include-secrets'
+    | 'max-push'
+    | 'apply'
+    | 'out'
+    | 'no-agent-config'
+    | 'keep-config'
+    | 'no-browser'
+  ),
   string[],
 ][] = [
   ['force', ['push', 'rm']],
@@ -225,6 +238,7 @@ const SYNC_FLAGS: [
   ['out', ['pull']],
   ['no-agent-config', ['up']],
   ['keep-config', ['rm']],
+  ['no-browser', ['login']],
 ];
 /** `--max-push` in MiB: up to 4 GiB, far above what a push should ever be. */
 const MAX_PUSH_MIB = 4096;
@@ -272,6 +286,7 @@ export async function sbxMain(
         out: { type: 'string', short: 'o' },
         'no-agent-config': { type: 'boolean' },
         'keep-config': { type: 'boolean' },
+        'no-browser': { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
       },
     });
@@ -483,7 +498,11 @@ export async function sbxMain(
 
   switch (command) {
     case 'login':
-      return cmdLogin(ctx, values['control-plane-url'] !== undefined);
+      return cmdLogin(
+        ctx,
+        values['control-plane-url'] !== undefined,
+        values['no-browser'] ? undefined : deps.loginHelpers,
+      );
     case 'logout':
       return cmdLogout(ctx);
     case 'templates':

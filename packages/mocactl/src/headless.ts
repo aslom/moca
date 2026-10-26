@@ -25,6 +25,7 @@ import {
   resolveSessionOptions,
 } from './core/session-options.js';
 import { workspaceResetText } from './render/blocks.js';
+import { openableUrl, type OsDeps } from './os.js';
 import { ensureRuntimeAuth, sessionManager, setAuth, type Runtime } from './runtime.js';
 
 export interface Io {
@@ -53,16 +54,66 @@ function missing(rt: Runtime, io: Io, need: Array<keyof typeof MISSING>): boolea
   return absent.length > 0;
 }
 
+/** What a device login at this machine's own screen uses: the clipboard and the browser. */
+export type LoginHelpers = Pick<OsDeps, 'copy' | 'openUrl'>;
+
+/** How long the clipboard may take before the browser opens anyway (a helper can hang, not fail). */
+export const COPY_TIMEOUT_MS = 1000;
+
+/**
+ * The shape of a device user code (GitHub's is `WDJB-MJHT`). The code comes from the server, and
+ * anything else is not put on the clipboard: a hostile control plane could otherwise plant text
+ * with newlines there for the user to paste into a shell.
+ */
+const USER_CODE = /^[A-Z0-9-]{4,16}$/;
+
 /**
  * The device flow's prompt, on stderr: where to go and the code to enter, sanitized (both come from
  * the server). Shared by `mocactl login` and `mocactl sbx login`.
+ *
+ * With `helpers` (a terminal on this machine, no --no-browser) the code is also copied to the
+ * clipboard and then the page is opened, so the user only pastes and approves. GitHub's device
+ * flow has no verification_uri_complete, so the code cannot ride in the URL. A clipboard that
+ * fails, hangs past COPY_TIMEOUT_MS, or is handed an odd-shaped code is not an error: the
+ * browser still opens and the printed code still works.
  */
-export function devicePrompt(io: Io): (s: DeviceStart, attempt: number) => void {
-  return (s, attempt) =>
+export function devicePrompt(
+  io: Io,
+  helpers?: LoginHelpers,
+): (s: DeviceStart, attempt: number) => void {
+  return (s, attempt) => {
     io.err(
       `${attempt > 1 ? 'That code expired. ' : ''}Open ${sanitizeRemote(s.verificationUri)} ` +
         `and enter the code ${sanitizeRemote(s.userCode)} (valid for ${codeValidity(s.expiresIn)})`,
     );
+    if (!helpers) return;
+    let timer: NodeJS.Timeout | undefined;
+    const copied = USER_CODE.test(s.userCode)
+      ? Promise.race([
+          helpers.copy(s.userCode).then(() => true),
+          new Promise<boolean>((resolve) => {
+            timer = setTimeout(() => resolve(false), COPY_TIMEOUT_MS);
+            timer.unref();
+          }),
+        ])
+      : Promise.resolve(false);
+    void copied
+      .catch(() => false)
+      .then((ok) => {
+        clearTimeout(timer);
+        // openUrl opens only http(s) and is silent otherwise: say nothing about a browser then.
+        const opens = openableUrl(s.verificationUri) !== undefined;
+        const copiedLine = ok ? 'The code is copied to the clipboard' : undefined;
+        if (!opens) {
+          if (copiedLine) io.err(`${copiedLine}.`);
+          return;
+        }
+        io.err(copiedLine ? `${copiedLine}; opening the browser…` : 'Opening the browser…');
+        // openUrl restricts to http/https, so it gets the raw value; the sanitized form is for display.
+        helpers.openUrl(s.verificationUri);
+      })
+      .catch(() => undefined);
+  };
 }
 
 /**
@@ -83,12 +134,17 @@ export function deviceLoginEnd(
   return undefined;
 }
 
-export async function cmdLogin(rt: Runtime, io: Io, signal?: AbortSignal): Promise<number> {
+export async function cmdLogin(
+  rt: Runtime,
+  io: Io,
+  signal?: AbortSignal,
+  helpers?: LoginHelpers,
+): Promise<number> {
   if (missing(rt, io, ['controlPlaneUrl']) || !rt.cp) return 2;
   try {
     const login = await deviceLogin(
       { cp: rt.cp, sleep: rt.sleep, now: rt.now },
-      devicePrompt(io),
+      devicePrompt(io, helpers),
       signal,
     );
     setAuth(rt, toCachedAuth(login, rt.endpoints.controlPlaneUrl!));
