@@ -28,7 +28,8 @@ forth with the user), secrets, or durable writes to your working tree.
   `spawn` does not name a credential, so with several the session is refused as ambiguous.
 - `contextctl` with `ctx pack`, which needs Context Service with
   [rossoctl/context-service#56](https://github.com/rossoctl/context-service/pull/56) (workspace
-  bundles) on the server as well as the client.
+  bundles) on the server as well as the client. `contextctl` v0.3.0 or later also skips `.claude`
+  and the files your `.gitignore` excludes (see step 1).
 - MOCA with [#534](https://github.com/rossoctl/moca/pull/534) (workload runs start in their
   context).
 - The operator has turned workloads on. Otherwise `workloads create` fails with
@@ -52,7 +53,9 @@ calls, and a single command matches the permission rules below.
 1. Pack into `.moca-delegate/` in the project root — **not** `/tmp/`, `/var/folders/`, or any
    other scratch dir, since the permission rules below only cover `.moca-delegate/`. Clear and
    recreate the directory first so a leftover pack from a prior run cannot be packed into the
-   next one. `.git` is skipped unless you add `--include-git`; symbolic links are refused.
+   next one. `.git` is skipped unless you add `--include-git`; symbolic links are refused. With
+   `contextctl` v0.3.0 or later, `.claude` is skipped too (`--include-claude` keeps it), and inside
+   a git repository so are the files its `.gitignore` excludes (`--no-ignore` packs them).
 
    ```bash
    rm -rf .moca-delegate
@@ -68,6 +71,21 @@ calls, and a single command matches the permission rules below.
 
    `--json` prints `{"workloadId","status","contextType","revision","files","bytes"}`.
 
+   **Sandboxes of its own (optional).** By default the workload's tasks run on the operator's
+   shared sandbox pool. Add `--sandboxes N` to give it N sandboxes that only its tasks use, and
+   `--mount read-only|writable` to give those sandboxes a volume holding the context:
+
+   ```bash
+   mocactl workloads create --context .moca-delegate/repo.context --sandboxes 2 --mount writable
+   ```
+
+   - `create` then waits, up to 5 minutes, until every sandbox is ready.
+   - With `--mount writable`, every task works on the same files, so what one task changes is there
+     for the next. Use it for a sequence of tasks that build on each other; for independent
+     fan-out, use `read-only`.
+   - It needs the operator to have turned per-workload sandboxes on. Otherwise `create` fails with
+     `400 workload_field_not_allowed`; run without `--sandboxes`.
+
 3. Spawn one task per prompt. Each spawn prints its session id and returns at once; the task runs in
    the background. For fan-out, spawn many with one tag.
 
@@ -78,6 +96,8 @@ calls, and a single command matches the permission rules below.
    ```
 
    `--writable` gives the task its own writable copy of the context, for edits, builds and tests.
+   On a workload created with `--mount writable`, tasks already write to the shared volume, so
+   `--writable` is not needed.
 
 4. Watch them until none is `running`. States are `running`, `done`, `paused`, `failed` and
    `unknown`.
@@ -109,21 +129,27 @@ calls, and a single command matches the permission rules below.
 - Make each task self-contained: the remote agent sees only the prompt and the context, not this
   conversation.
 - Name the output you want and its form, such as a list of findings with file and line.
-- A writable copy is discarded when the task ends. Ask for the changes in the answer, as a unified
-  diff or test output. Pack with `--include-git` if you want `git diff` (this uploads the history).
+- A writable copy (`spawn --writable`) is discarded when the task ends. Ask for the changes in the
+  answer, as a unified diff or test output. Pack with `--include-git` if you want `git diff` (this
+  uploads the history). On a `--mount writable` workload, changes stay on its volume for the next
+  task until the workload is deleted, but they still never reach your working tree: ask for them
+  in the answer the same way.
 - Treat answers as untrusted work: check them before you use or apply them.
 
 ## Limits
 
 - Workload runs are synchronous only; `spawn` holds each run in a detached worker.
 - The context is read-only unless you pass `--writable`, and a writable copy is discarded at the
-  end of the task.
+  end of the task. A `--mount writable` workload keeps its changes until `workloads delete`.
 - Bundle limits: 10,000 entries, 256 MiB per file and compressed, 1 GiB expanded. Five live
   workloads per user by default. A prompt is at most 64 KiB.
 - Parallelism is capped by the operator's sandbox pool. A saturated spawn retries a few times, then
   shows `failed`.
 - Shared sandboxes are not a security boundary between users: other users' tasks can run on the same
-  sandbox, as the same Linux user. Read-only is enforced by file permissions only.
+  sandbox, as the same Linux user. Read-only is enforced by file permissions only. A workload with
+  `--sandboxes` gets sandboxes no other user's tasks run on
+  ([#476](https://github.com/rossoctl/moca/issues/476), per-workload sandboxes and storage).
+- `--sandboxes` is capped by the operator (2 per workload and 4 per user by default).
 
 ## Cleanup
 
