@@ -83,6 +83,9 @@ calls, and a single command matches the permission rules below.
    - With `--mount writable`, every task works on the same files, so what one task changes is there
      for the next. Use it for a sequence of tasks that build on each other; for independent
      fan-out, use `read-only`.
+   - `spawn` returns at once, so for a sequence wait until each task is `done` (step 4) before
+     spawning the next. Never run several writing tasks at once on a `--mount writable` workload:
+     they share one tree and MOCA adds no locking.
    - It needs the operator to have turned per-workload sandboxes on. Otherwise `create` fails with
      `400 workload_field_not_allowed`; run without `--sandboxes`.
 
