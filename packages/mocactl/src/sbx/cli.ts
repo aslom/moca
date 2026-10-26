@@ -372,9 +372,11 @@ export async function sbxMain(
   // checked, whether it came from an argument, --sandbox or .sbx/sandbox.json: it goes into URLs
   // and the flight recorder's file name.
   let root: string | undefined;
+  // What `up`/`push` were run from, so the plan can say when that is not the work-tree root (#611).
+  const cwd = deps.cwd ?? process.cwd();
   if (IN_REPO.has(command) && !(command === 'pull' && !values.apply && values.sandbox)) {
     try {
-      root = await repoRoot(deps.cwd ?? process.cwd());
+      root = await repoRoot(cwd);
     } catch (err) {
       if (!(err instanceof PushError)) throw err;
       // doctor with --sandbox has checks that need no repository: it runs them, and says so.
@@ -533,6 +535,7 @@ export async function sbxMain(
           ...(values.name ? { name: values.name } : {}),
           noAgentConfig: values['no-agent-config'] === true,
           ...(upBound ? { boundId: upBound } : {}),
+          cwd,
         },
         deps.execFactory,
       );
@@ -545,6 +548,7 @@ export async function sbxMain(
           force: values.force === true,
           includeSecrets: values['include-secrets'] === true,
           ...(maxPush !== undefined ? { maxPush } : {}),
+          cwd,
         },
         deps.execFactory,
       );
