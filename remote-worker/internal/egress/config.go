@@ -88,7 +88,10 @@ func ConfigFromEnv(get func(string) string) (Config, ControlConfig, error) {
 	}
 	cfg.LocalAddrs = localAddrs
 	cfg.Credentials = NoCredentials{}
-	cfg.Audit = NewJSONSink(os.Stdout)
+	// Async, because this sink is stdout: a stalled journald must not block the
+	// proxy's hot path, nor Unregister and the control socket behind it. The
+	// caller flushes it on shutdown via CloseAudit.
+	cfg.Audit = NewAsyncSink(NewJSONSink(os.Stdout), 0)
 
 	cc.Socket = get(envControlSock)
 	if cc.Socket == "" {
