@@ -669,16 +669,29 @@ each run's `podman run --replace` moved the data to a **fresh anonymous volume**
 previous one: those sessions were unreachable but never deleted, and a long-lived rig can hold a
 stack of them (`podman volume ls`).
 
-On such a host the first re-run warns that it is leaving that volume behind and starts the named one
-empty. To migrate the sessions in it instead, re-run once with:
+On such a host the next run **stops** and makes you choose. It will not decide the fate of those
+sessions for you, and it will not carry on and quietly strand them: nothing changes, and `sh-redis`
+keeps running on the old volume, until you re-run with one of:
 
 ```bash
+# Migrate the old sessions onto the named volume (what you almost certainly want).
 sudo env SH_REDIS_ADOPT_VOLUME=1 ./deploy/vm/setup-vm.sh
+
+# Or: start fresh, leaving them behind — not deleted, but no longer reachable.
+sudo env SH_REDIS_ADOPT_VOLUME=0 ./deploy/vm/setup-vm.sh
 ```
 
-That runs `redis-cli SAVE` on the live container, copies its `dump.rdb` into `moca-redis`, converts
-it to an AOF, and starts Redis on the result. It acts only on a container whose `/data` is anonymous;
-it will not touch a named volume.
+`=1` runs `redis-cli SAVE` on the live container, copies its `dump.rdb` into `moca-redis`, converts
+it to an AOF, and starts Redis on the result. It acts only on a container whose `/data` is anonymous,
+it will not touch a named volume, and it refuses outright if `moca-redis` already holds data rather
+than overwriting what is in there. If any step fails it puts the host back as it was — the old
+volume is only ever read — and says so.
+
+**The choice is offered once.** After either run, `sh-redis` is on the named volume and matches what
+the script starts, so no later run has anything left to adopt. If you have already run with `=0` (or
+with an older version of this script, which did this silently) and want those sessions back, the
+by-hand recipe below is the route; `=1` will no longer do it for you, and that is deliberate —
+`moca-redis` holds real sessions by then, and adopting over them would trade one loss for another.
 
 > **Do not just copy a `dump.rdb` into the volume and start Redis.** With `--appendonly yes`,
 > Redis 7 loads the AOF and **ignores** an existing `dump.rdb` — verified against

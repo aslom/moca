@@ -45,6 +45,14 @@ printf 'podman-env SANDBOX_TOKEN=%s\n' "${SANDBOX_TOKEN-<unset>}" >>"$MOCK_ENV_L
 # relay.env): record whether podman's own environment carries it.
 printf 'podman-env MOCA_RELAY_EXEC_TOKEN=%s\n' "${MOCA_RELAY_EXEC_TOKEN-<unset>}" >>"$MOCK_ENV_LOG"
 printf 'podman-env SH_EXCHANGE_TOKEN=%s\n' "${SH_EXCHANGE_TOKEN-<unset>}" >>"$MOCK_ENV_LOG"
+# One step of the Redis adoption made to fail, so its rollback is testable (#410). MOCK_PODMAN_FAIL
+# is a glob matched against the whole argv -- 'cp -p*', '*CONFIG SET*'. Deliberately BEFORE the
+# branches that produce output: a step that fails must not also answer, and the call is still
+# recorded in $MOCK_LOG above, so a test can assert how far the sequence got.
+if [[ -n "${MOCK_PODMAN_FAIL-}" && "$*" == ${MOCK_PODMAN_FAIL} ]]; then
+  echo "mock podman: forced failure matching '$MOCK_PODMAN_FAIL'" >&2
+  exit 1
+fi
 if [[ "$1" == "network" && "$2" == "inspect" ]]; then
   if [[ "$*" == *isolate* ]]; then
     printf '%s\n' "${MOCK_PODMAN_ISOLATE-strict}"
@@ -82,11 +90,23 @@ fi
 if [[ "$1" == "volume" && "$2" == "inspect" ]]; then
   printf '%s\n' "${MOCK_REDIS_VOLUME_ANON-false}"
 fi
+# `volume exists` + the `ls -A /data` probe behind redis_adopt_target_nonempty: a named volume that
+# already holds sessions is the one state adoption must refuse rather than overwrite. Default is
+# "no such volume", which is the pre-#410 host every adoption case below is standing on.
+if [[ "$1" == "volume" && "$2" == "exists" ]]; then
+  [[ -n "${MOCK_REDIS_TARGET_EXISTS-}" ]] || exit 1
+fi
+if [[ "$*" == *"ls -A /data"* ]]; then
+  printf '%s' "${MOCK_REDIS_TARGET_CONTENTS-}"
+fi
 # redis-cli over `podman exec`, for the adoption path. Only INFO persistence needs real stdout:
 # adopt_redis_volume waits on aof_rewrite_in_progress, and a mock that printed nothing would spin
-# there for the full 60-second cap on every run of this suite.
+# there for the full 60-second cap on every run of this suite. CRLF because that is what a real
+# INFO prints, and redis_info_field has to strip it before comparing aof_last_bgrewrite_status
+# against `ok` -- without the \r the comparison silently never matches.
 if [[ "$1" == "exec" && "$*" == *"INFO persistence"* ]]; then
-  printf 'aof_rewrite_in_progress:%s\n' "${MOCK_REDIS_AOF_REWRITE-0}"
+  printf 'aof_rewrite_in_progress:%s\r\naof_last_bgrewrite_status:%s\r\n' \
+    "${MOCK_REDIS_AOF_REWRITE-0}" "${MOCK_REDIS_BGREWRITE_STATUS-ok}"
 fi
 MOCK
 chmod +x "$TMP/bin/podman"
@@ -1154,6 +1174,12 @@ pass "Redis runs on a named volume with AOF on, so sessions survive a re-run and
 # each runs in a subshell. Output is captured because the warning and the "replacing, because X"
 # line are themselves assertions; $MOCK_LOG is a file, so the subshell's podman calls still land in
 # it.
+#
+# start_redis REFUSES (non-zero) on the pre-#410 anonymous volume until the operator chooses, so
+# $REDIS_RC carries its exit status out of the subshell -- this suite runs under `set -e`, and
+# `out="$(redis_run ...)"` on a refusing call would otherwise abort the file instead of asserting
+# on it. A file, not a variable, because the subshell cannot assign to its parent.
+REDIS_RC="$TMP/redis-rc"
 redis_run() (
   export MOCK_REDIS_EXISTS=1
   while [[ "${1:-}" == *=* ]]; do
@@ -1161,8 +1187,11 @@ redis_run() (
     shift
   done
   : >"$MOCK_LOG"
-  start_redis 2>&1
+  local rc=0
+  start_redis 2>&1 || rc=$?
+  echo "$rc" >"$REDIS_RC"
 )
+redis_rc() { cat "$REDIS_RC"; }
 
 # The issue's own acceptance item: a second run over a container that already matches touches
 # nothing. An unconditional --replace is what made a re-run destructive in the first place.
@@ -1177,9 +1206,14 @@ pass "a re-run leaves an already-matching sh-redis alone"
 # running on every existing host -- read as a match and never be fixed. The log must also say WHICH
 # field differed: without that an operator sees their Redis recreated with no way to tell why.
 #
-# The volume gets two rows: a DIFFERENT named volume (an operator's own choice, reported by name)
-# and no /data mount at all. The second is the degenerate anonymous case -- podman prints nothing
-# for the mount -- and must still read as anonymous rather than as the empty-string name.
+# The anonymous volume is deliberately NOT in this table: it is the pre-#410 state, and it stops the
+# installer rather than replacing anything (see the refusal cases below). What belongs here is a
+# DIFFERENT named volume -- an operator's own choice, which is theirs to keep data in and ours to
+# replace the container over, because nothing is orphaned by doing so.
+#
+# appendonly gets two rows for one reason: `--appendonly no`. A bare *appendonly* glob matches that
+# string too, so a container created with persistence explicitly turned OFF read as a match and was
+# kept forever -- the exact failure this whole change is about, hiding inside the check for it.
 while IFS='|' read -r mock expected; do
   out="$(redis_run "$mock")"
   grep -q 'podman run .*sh-redis' "$MOCK_LOG" ||
@@ -1190,35 +1224,100 @@ done <<'CASES'
 MOCK_REDIS_IMAGE=docker.io/redis:6-alpine|image is 'docker.io/redis:6-alpine'
 MOCK_REDIS_PORT=0.0.0.0:6379->6379/tcp|published port is
 MOCK_REDIS_VOLUME=redis-data|/data volume is 'redis-data'
-MOCK_REDIS_VOLUME=|/data volume is ANONYMOUS
 MOCK_REDIS_CMD=[podman run -d --name sh-redis --restart=always -p 127.0.0.1:6379:6379 -v moca-redis:/data docker.io/redis:7-alpine]|without --appendonly yes
+MOCK_REDIS_CMD=[podman run -d --name sh-redis --restart=always -p 127.0.0.1:6379:6379 -v moca-redis:/data docker.io/redis:7-alpine redis-server --appendonly no]|without --appendonly yes
 CASES
 pass "a difference in image, port, volume or appendonly each replaces sh-redis, saying which"
 
-# --- the pre-#410 anonymous volume: warned about, never moved unasked (#410) -------------------
+# --- the pre-#410 anonymous volume: the installer STOPS and makes the operator choose (#410) ----
 # redis:7-alpine declares VOLUME /data, so the old no-`-v` form did not destroy data outright --
 # each --replace moved it to a fresh anonymous volume and orphaned the last (the P6.3 rig
-# accumulated 11). The sessions are therefore still recoverable, which is why the default path
-# warns loudly instead of quietly starting a fresh named volume beside them.
+# accumulated 11). The sessions are therefore still recoverable, which is the whole reason this
+# state gets a decision rather than a default.
 #
 # The mock state below is the shape a real pre-#410 host is actually in, and it is the reason
 # redis_container_diff has to ask `volume inspect`: podman gives the anonymous volume a 64-hex NAME
 # and reports it on the mount like any other, so the id alone is indistinguishable from a name an
 # operator chose. Only the volume's own .Anonymous flag separates the two.
 ANON_VOL=f3c1b0a9e7d5c3b1a9f7e5d3c1b0a9f7e5d3c1b0a9f7e5d3c1b0a9f7e5d3c1b0
-out="$(redis_run "MOCK_REDIS_VOLUME=$ANON_VOL" MOCK_REDIS_VOLUME_ANON=true)"
+anon_host=("MOCK_REDIS_VOLUME=$ANON_VOL" MOCK_REDIS_VOLUME_ANON=true)
+
+# THE BUG THIS CASE EXISTS FOR (review of #607). An earlier cut warned here and carried on, which
+# made its own advice unreachable: the run that printed "re-run with SH_REDIS_ADOPT_VOLUME=1" then
+# replaced sh-redis with the moca-redis container, so the next run's diff said `matches`, start_redis
+# returned early, and the adoption never ran. The sessions stayed orphaned with no route back. So
+# the claim is not "it warns" -- it is that NOTHING CHANGES until the operator picks, which is only
+# true if start_redis FAILS here.
+out="$(redis_run "${anon_host[@]}")"
+[[ "$(redis_rc)" != 0 ]] ||
+  fail "start_redis must FAIL on the pre-#410 anonymous volume: carrying on replaces sh-redis and" \
+    "makes the SH_REDIS_ADOPT_VOLUME=1 re-run it just advised a no-op: $out"
+if grep -qE 'podman run ' "$MOCK_LOG"; then
+  fail "the refusal must not start anything -- a replaced sh-redis is what strands the sessions:" \
+    "$(cat "$MOCK_LOG")"
+fi
+# Both routes, by name. Printing only =1 would leave an operator who does not want the old sessions
+# with no documented way past the refusal except reading the script.
 [[ "$out" == *SH_REDIS_ADOPT_VOLUME=1* ]] ||
-  fail "the anonymous-volume warning must name the flag that migrates it: $out"
-[[ "$out" == *"NOT"* ]] ||
-  fail "the warning must say the old sessions are not deleted, so an operator knows they can still" \
-    "be migrated: $out"
+  fail "the refusal must name the flag that migrates the sessions: $out"
+[[ "$out" == *SH_REDIS_ADOPT_VOLUME=0* ]] ||
+  fail "the refusal must name the explicit opt-out, or it is a dead end: $out"
 # `volume inspect` is excluded: the diff itself reads .Anonymous, which is a read of METADATA, not
 # of the sessions. `volume create`/`volume rm`, `podman exec` (SAVE) and `stop` are the calls that
-# would move or disturb the data, and none of them may happen without the flag.
-if grep -qE 'podman (exec|volume (create|rm)|stop) ' "$MOCK_LOG"; then
-  fail "without the flag, nothing may touch the old volume's data: $(cat "$MOCK_LOG")"
+# would move or disturb the data, and none of them may happen before the operator chooses.
+if grep -qE 'podman (exec|volume (create|rm)|stop|start) ' "$MOCK_LOG"; then
+  fail "before the operator chooses, nothing may touch either volume: $(cat "$MOCK_LOG")"
 fi
-pass "an anonymous Redis volume warns, naming the adopt flag, and is left untouched"
+pass "the pre-#410 anonymous volume stops the installer, naming both routes, and changes nothing"
+
+# The degenerate shape of the same state: podman prints NOTHING for the mount. Must still read as
+# anonymous and refuse, rather than as a volume literally named "" that gets quietly replaced.
+redis_run MOCK_REDIS_VOLUME= >/dev/null
+[[ "$(redis_rc)" != 0 ]] ||
+  fail "a container with no /data mount reported is anonymous too, and must refuse: $(cat "$MOCK_LOG")"
+pass "a container whose /data mount podman reports as empty refuses the same way"
+
+# The explicit opt-out still starts Redis -- and still says the old sessions are not deleted, since
+# "I don't need them" and "I want them gone" are different requests.
+out="$(redis_run "${anon_host[@]}" SH_REDIS_ADOPT_VOLUME=0)"
+[[ "$(redis_rc)" == 0 ]] ||
+  fail "SH_REDIS_ADOPT_VOLUME=0 is a choice, not an error: $out"
+grep -qE "podman run .*-v $MOCA_REDIS_VOLUME:/data" "$MOCK_LOG" ||
+  fail "the opt-out must still start Redis on the named volume: $(cat "$MOCK_LOG")"
+if grep -qE 'podman (exec|volume rm) ' "$MOCK_LOG"; then
+  fail "the opt-out leaves the old data alone; it does not delete it: $(cat "$MOCK_LOG")"
+fi
+[[ "$out" == *"NOT"* ]] ||
+  fail "the opt-out must say the old sessions are not deleted: $out"
+# And it must say this is the point of no return, because it is: after this run sh-redis matches
+# what the script starts, so the automatic migration is gone for good.
+[[ "$out" == *"LAST RUN"* ]] ||
+  fail "the opt-out must warn that no later run can adopt those sessions automatically: $out"
+pass "SH_REDIS_ADOPT_VOLUME=0 starts fresh, keeps the old data, and says it is the last chance"
+
+# The sequence an operator actually walks (review of #607): hit the refusal, then re-run with the
+# flag. The second run must find the SAME pre-#410 state -- which is only true because the first
+# one changed nothing -- and migrate. This is the case the first cut of this PR could not pass.
+redis_run "${anon_host[@]}" >/dev/null
+[[ "$(redis_rc)" != 0 ]] || fail "setup: the plain run should have refused"
+out="$(redis_run "${anon_host[@]}" SH_REDIS_ADOPT_VOLUME=1)"
+[[ "$(redis_rc)" == 0 ]] ||
+  fail "the re-run with the flag the refusal printed must succeed: $out"
+grep -q 'cp -p /data/dump.rdb' "$MOCK_LOG" ||
+  fail "the re-run with the flag must actually migrate, not no-op: $(cat "$MOCK_LOG")"
+pass "refuse, then re-run with the flag: the route the refusal advertises is the route that works"
+
+# Adoption into a target that already holds data is refused, not performed. This is the operator who
+# ran with =0 and came back with =1 later: by then moca-redis holds real sessions, and copying the
+# older anonymous ones over them would destroy the newer set to recover the older one.
+out="$(redis_run "${anon_host[@]}" SH_REDIS_ADOPT_VOLUME=1 \
+  MOCK_REDIS_TARGET_EXISTS=1 MOCK_REDIS_TARGET_CONTENTS=appendonlydir)"
+[[ "$(redis_rc)" != 0 ]] ||
+  fail "adopting into a non-empty $MOCA_REDIS_VOLUME must refuse, not overwrite it: $out"
+if grep -qE 'podman (exec|stop|volume rm) ' "$MOCK_LOG"; then
+  fail "the refusal must leave BOTH volumes untouched: $(cat "$MOCK_LOG")"
+fi
+pass "adoption refuses a non-empty target instead of overwriting the sessions already in it"
 
 # With the flag: the ORDER is the claim. The recovery recipe on #410 ("copy dump.rdb in, start
 # Redis") yields an EMPTY Redis once AOF is on, because redis:7-alpine loads the AOF and ignores an
@@ -1228,12 +1327,60 @@ pass "an anonymous Redis volume warns, naming the adopt flag, and is left untouc
 #
 # This pins the shape and the order against the mocks; it cannot and does not re-verify Redis's own
 # loading behaviour, which the live probe established.
-redis_run "MOCK_REDIS_VOLUME=$ANON_VOL" MOCK_REDIS_VOLUME_ANON=true SH_REDIS_ADOPT_VOLUME=1 >/dev/null
-adopt_order="$(sed -nE 's/.*(redis-cli SAVE|stop sh-redis|cp -p \/data\/dump\.rdb|--appendonly no|CONFIG SET appendonly yes|--appendonly yes).*/\1/p' "$MOCK_LOG" | tr '\n' '|')"
-[[ "$adopt_order" == "redis-cli SAVE|stop sh-redis|cp -p /data/dump.rdb|--appendonly no|CONFIG SET appendonly yes|--appendonly yes|" ]] ||
-  fail "adoption ran out of order (SAVE, stop, copy, appendonly-off conversion, CONFIG SET, then" \
-    "the final run): got '$adopt_order' from $(cat "$MOCK_LOG")"
+redis_run "${anon_host[@]}" SH_REDIS_ADOPT_VOLUME=1 >/dev/null
+adopt_order="$(sed -nE 's/.*(start sh-redis|redis-cli SAVE|stop sh-redis|cp -p \/data\/dump\.rdb|--appendonly no|CONFIG SET appendonly yes|--appendonly yes).*/\1/p' "$MOCK_LOG" | tr '\n' '|')"
+[[ "$adopt_order" == "start sh-redis|redis-cli SAVE|stop sh-redis|cp -p /data/dump.rdb|--appendonly no|CONFIG SET appendonly yes|--appendonly yes|" ]] ||
+  fail "adoption ran out of order (start, SAVE, stop, copy, appendonly-off conversion, CONFIG SET," \
+    "then the final run): got '$adopt_order' from $(cat "$MOCK_LOG")"
 pass "SH_REDIS_ADOPT_VOLUME=1 migrates the old volume in the order the live probe proved"
+
+# `podman start` leading that sequence is not decoration: it is what makes a retry possible. A first
+# attempt that died after `podman stop` leaves sh-redis stopped, and `podman exec` on a stopped
+# container errors -- so without this the flag the error message recommends would wedge the
+# installer permanently, which is the state the rollback below is designed to avoid.
+[[ "$adopt_order" == "start sh-redis|redis-cli SAVE|"* ]] ||
+  fail "SAVE must be preceded by podman start, so a retry after a failed attempt can work"
+pass "adoption starts sh-redis before SAVE, so a retry after a failed attempt is not wedged"
+
+# A failure mid-migration puts the host BACK. The anonymous volume is only ever read, so the test is
+# that sh-redis runs again on it and the half-written named volume is removed -- a partial AOF left
+# in place is precisely what Redis would then load instead of the sessions.
+out="$(redis_run "${anon_host[@]}" SH_REDIS_ADOPT_VOLUME=1 'MOCK_PODMAN_FAIL=*CONFIG SET*')"
+[[ "$(redis_rc)" != 0 ]] ||
+  fail "a failed adoption must not report success: $out"
+grep -q "volume rm --force $MOCA_REDIS_VOLUME" "$MOCK_LOG" ||
+  fail "rollback must remove the half-converted $MOCA_REDIS_VOLUME: $(cat "$MOCK_LOG")"
+grep -q 'rm -f --ignore sh-redis-adopt' "$MOCK_LOG" ||
+  fail "rollback must remove the conversion container, or the next run cannot create it:" \
+    "$(cat "$MOCK_LOG")"
+# The last podman call must be the restart, not the teardown: sh-redis was stopped by the migration
+# and an operator whose Redis stays down has an outage, not a failed migration.
+[[ "$(grep -c 'podman start sh-redis' "$MOCK_LOG")" == 2 ]] ||
+  fail "rollback must start sh-redis again on the anonymous volume: $(cat "$MOCK_LOG")"
+[[ "$out" == *"intact"* ]] ||
+  fail "the failure message must say the old sessions are intact: $out"
+pass "a failed adoption rolls back: old container running, half-written named volume removed"
+
+# The AOF-rewrite wait timing out is a FAILURE, not something to carry on from. Shutting down over
+# an unfinished rewrite leaves a partial AOF, which Redis loads in preference to the dump.rdb beside
+# it -- the same silently-empty outcome the whole adoption order exists to avoid, one step later.
+# SH_REDIS_ADOPT_REWRITE_TRIES is cut to 2 because reaching the END of the loop is the point: at the
+# real 60 it would be a correct test that added a minute to every run of this suite.
+out="$(redis_run "${anon_host[@]}" SH_REDIS_ADOPT_VOLUME=1 MOCK_REDIS_AOF_REWRITE=1 \
+  SH_REDIS_ADOPT_REWRITE_TRIES=2)"
+[[ "$(redis_rc)" != 0 ]] ||
+  fail "an unfinished AOF rewrite must fail the adoption, not fall through to SHUTDOWN: $out"
+if grep -q 'SHUTDOWN NOSAVE' "$MOCK_LOG"; then
+  fail "SHUTDOWN over an in-progress rewrite is what truncates the AOF: $(cat "$MOCK_LOG")"
+fi
+pass "an AOF rewrite that never finishes fails the adoption instead of truncating it"
+
+# ...and finishing is not the same as succeeding: a failed bgrewrite also reports in_progress:0,
+# with nothing usable on disk. Without this check the log would claim the sessions were adopted.
+out="$(redis_run "${anon_host[@]}" SH_REDIS_ADOPT_VOLUME=1 MOCK_REDIS_BGREWRITE_STATUS=err)"
+[[ "$(redis_rc)" != 0 ]] ||
+  fail "aof_last_bgrewrite_status:err must fail the adoption: $out"
+pass "a failed AOF rewrite fails the adoption, even though it is no longer in progress"
 
 # Only the state it recognizes. A container differing in some OTHER field already has a named
 # volume, so running the migration over it would copy that volume's own dump.rdb onto itself.
