@@ -543,13 +543,18 @@ func TestCapRefusalPastTheBoundClosesWithoutDraining(t *testing.T) {
 	}
 
 	// One more: it is closed at once, so the read ends rather than returning a
-	// 429 or hanging for drainTimeout.
+	// 429 or hanging for drainTimeout. How it ends is the kernel's choice, not
+	// this code's: the request sits unread in the receive buffer, so Linux
+	// answers the close with an RST (ECONNRESET) where macOS gives EOF. Either
+	// is a shed fd; what must hold is that no refusal was written and the read
+	// did not block for drainTimeout.
 	over := dial(t, path)
 	fmt.Fprintf(over, "CONNECT up.test:%d HTTP/1.1\r\nHost: up.test\r\n\r\n", up.port)
 	over.SetReadDeadline(time.Now().Add(2 * time.Second))
+	start := time.Now()
 	b, err := io.ReadAll(over)
-	if err != nil && !errors.Is(err, io.EOF) {
-		t.Fatalf("past the bound: read %v, want a clean close", err)
+	if err != nil && isTimeout(err) {
+		t.Fatalf("past the bound the read blocked for %v: the conn was drained, not shed", time.Since(start))
 	}
 	if len(b) != 0 {
 		t.Fatalf("past the bound the guest got %q, want nothing written: the fd should be shed, not drained", b)
