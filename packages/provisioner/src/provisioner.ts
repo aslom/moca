@@ -707,7 +707,7 @@ async function removeWorkload(deps: ProvisionerDeps, k: Keys): Promise<{ remaini
  */
 export function reserveBundle(deps: ProvisionerDeps, ref: WorkloadRef, bytes: number): () => void {
   const k = keysOf(ref);
-  if (!deps.bundles.reserve(k.wl, k.own, bytes)) throw new ProvisionError(503, 'seed_budget_full');
+  if (!deps.bundles.reserve(k.own, bytes)) throw new ProvisionError(503, 'seed_budget_full');
   let released = false;
   return () => {
     if (!released) deps.bundles.release(k.own, bytes);
