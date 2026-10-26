@@ -493,6 +493,19 @@ describe('cmdLogin', () => {
       expect(o.stderr.join('\n')).not.toContain('clipboard');
     });
 
+    it('neither opens nor mentions a browser for a URL openUrl would refuse', async () => {
+      const o = io();
+      const steps: string[] = [];
+      devicePrompt(o, {
+        copy: async (t) => void steps.push(`copy ${t}`),
+        openUrl: (u) => void steps.push(`open ${u}`),
+      })({ ...start(), verificationUri: 'file:///etc/passwd' }, 1);
+      await flush();
+      expect(steps).toEqual(['copy ABCD-1234']);
+      expect(o.stderr.join('\n')).not.toContain('browser');
+      expect(o.stderr.at(-1)).toBe('The code is copied to the clipboard.');
+    });
+
     it('swallows an openUrl that throws rather than leaving an unhandled rejection', async () => {
       const o = io();
       const unhandled: unknown[] = [];

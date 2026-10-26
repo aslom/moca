@@ -282,6 +282,41 @@ describe('main', () => {
   });
 });
 
+describe('login --no-browser', () => {
+  const run = async (argv: string[]) => {
+    const steps: string[] = [];
+    const rt = testRuntime({
+      auth: null,
+      cp: fakeControlPlane({
+        pollDeviceAuth: async () => ({
+          token: 'new-api',
+          subject: 'github:9',
+          roles: [],
+          expiresAt: 4_000_000_000,
+        }),
+      }),
+    });
+    const loginHelpers = {
+      copy: async (t: string) => void steps.push(`copy ${t}`),
+      openUrl: (u: string) => void steps.push(`open ${u}`),
+    };
+    const code = await main(argv, {}, io(), { buildRuntime: () => rt, loginHelpers });
+    await new Promise((r) => setImmediate(r));
+    return { code, steps };
+  };
+
+  it('copies the code and opens the browser without the flag', async () => {
+    expect(await run(['login'])).toEqual({
+      code: 0,
+      steps: ['copy ABCD-1234', 'open https://github.com/login/device'],
+    });
+  });
+
+  it('touches neither the clipboard nor the browser with it', async () => {
+    expect(await run(['login', '--no-browser'])).toEqual({ code: 0, steps: [] });
+  });
+});
+
 describe('B14: an expired login is refreshed before a command runs', () => {
   it('refreshes once, then lists sessions with the new token', async () => {
     const rt = testRuntime();

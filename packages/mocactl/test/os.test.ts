@@ -32,10 +32,10 @@ describe('loginHelpers', () => {
   const tty = { stdin: true, stderr: true };
 
   it('offers the clipboard and browser in a local terminal', () => {
-    expect(loginHelpers({}, tty, os, 'darwin')).toEqual(os);
-    expect(loginHelpers({}, tty, os, 'win32')).toEqual(os);
-    expect(loginHelpers({ DISPLAY: ':0' }, tty, os, 'linux')).toEqual(os);
-    expect(loginHelpers({ WAYLAND_DISPLAY: 'wayland-0' }, tty, os, 'linux')).toEqual(os);
+    expect(loginHelpers({}, tty, os, 'darwin')).toBeDefined();
+    expect(loginHelpers({}, tty, os, 'win32')).toBeDefined();
+    expect(loginHelpers({ DISPLAY: ':0' }, tty, os, 'linux')).toBeDefined();
+    expect(loginHelpers({ WAYLAND_DISPLAY: 'wayland-0' }, tty, os, 'linux')).toBeDefined();
   });
 
   it('offers nothing when stdin or stderr is not a terminal', () => {
@@ -54,6 +54,49 @@ describe('loginHelpers', () => {
     expect(loginHelpers({ SUDO_USER: 'ed', DISPLAY: ':0' }, tty, os, 'linux')).toBeUndefined();
   });
 
+  it('offers the given copy and openUrl, and is busy only while a copy is unsettled', async () => {
+    const opened: string[] = [];
+    let release!: () => void;
+    const copies: string[] = [];
+    const h = loginHelpers(
+      {},
+      tty,
+      {
+        copy: (t) => {
+          copies.push(t);
+          return new Promise<void>((r) => (release = r));
+        },
+        openUrl: (u) => void opened.push(u),
+      },
+      'darwin',
+    )!;
+    expect(h.busy()).toBe(false);
+    const p = h.copy('ABCD-1234');
+    expect(h.busy()).toBe(true);
+    release();
+    await p;
+    expect(h.busy()).toBe(false);
+    expect(copies).toEqual(['ABCD-1234']);
+    h.openUrl('https://x/');
+    expect(opened).toEqual(['https://x/']);
+  });
+
+  it('is not left busy by a copy that fails', async () => {
+    const h = loginHelpers(
+      {},
+      tty,
+      {
+        copy: async () => {
+          throw new Error('no clipboard');
+        },
+        openUrl: () => undefined,
+      },
+      'darwin',
+    )!;
+    await expect(h.copy('ABCD-1234')).rejects.toThrow('no clipboard');
+    expect(h.busy()).toBe(false);
+  });
+
   it('offers nothing off macOS and Windows without a display (headless, container, console)', () => {
     expect(loginHelpers({}, tty, os, 'linux')).toBeUndefined();
     expect(loginHelpers({}, tty, os, 'freebsd')).toBeUndefined();
@@ -65,9 +108,17 @@ describe('openCommand', () => {
     expect(openCommand('darwin', 'https://x')).toEqual({ cmd: 'open', args: ['https://x/'] });
     expect(openCommand('linux', 'https://x')).toEqual({ cmd: 'xdg-open', args: ['https://x/'] });
     expect(openCommand('win32', 'https://x')).toEqual({
-      cmd: 'cmd',
-      args: ['/c', 'start', '', 'https://x/'],
+      cmd: 'rundll32',
+      args: ['url.dll,FileProtocolHandler', 'https://x/'],
     });
+  });
+
+  it('never hands a Windows URL to cmd.exe, which would parse & | and %VAR% in it', () => {
+    const url = 'https://evil.example/?a&calc.exe|x%PATH%';
+    const command = openCommand('win32', url);
+    expect(command).toEqual({ cmd: 'rundll32', args: ['url.dll,FileProtocolHandler', url] });
+    expect(command?.cmd).not.toMatch(/^cmd/i);
+    expect(command?.args).not.toContain('/c');
   });
 });
 

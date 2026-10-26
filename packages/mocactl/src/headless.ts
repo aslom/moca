@@ -25,7 +25,7 @@ import {
   resolveSessionOptions,
 } from './core/session-options.js';
 import { workspaceResetText } from './render/blocks.js';
-import type { OsDeps } from './os.js';
+import { openableUrl, type OsDeps } from './os.js';
 import { ensureRuntimeAuth, sessionManager, setAuth, type Runtime } from './runtime.js';
 
 export interface Io {
@@ -101,9 +101,14 @@ export function devicePrompt(
       .catch(() => false)
       .then((ok) => {
         clearTimeout(timer);
-        io.err(
-          ok ? 'The code is copied to the clipboard; opening the browser…' : 'Opening the browser…',
-        );
+        // openUrl opens only http(s) and is silent otherwise: say nothing about a browser then.
+        const opens = openableUrl(s.verificationUri) !== undefined;
+        const copiedLine = ok ? 'The code is copied to the clipboard' : undefined;
+        if (!opens) {
+          if (copiedLine) io.err(`${copiedLine}.`);
+          return;
+        }
+        io.err(copiedLine ? `${copiedLine}; opening the browser…` : 'Opening the browser…');
         // openUrl restricts to http/https, so it gets the raw value; the sanitized form is for display.
         helpers.openUrl(s.verificationUri);
       })
