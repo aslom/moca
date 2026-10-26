@@ -162,7 +162,10 @@ re-running with just that one:
   (`docs/reference/configuration.md`; without it, listing and choosing models per session
   degrades to `model_catalog_unavailable`). Empty, the default, allows only those two. A scheme,
   port or path in an entry is refused here, matching the control plane's own boot check. A change
-  rolls the control plane.
+  rolls the control plane. A pre-0.8 stack may carry the allow-list as a hand-patched
+  `SH_MODEL_CATALOG_HOSTS` env on the control plane Deployment (the manifests did not wire it
+  then); setup.sh strips that entry before its own apply -- server-side apply would merge the
+  literal with the ConfigMap ref above and the API server would reject the Deployment.
 - `SH_PUBLIC_HARNESS_URL` (kind and `--target ocp-single` without Routes) overrides the default
   `http://127.0.0.1:8080` the control plane advertises via `GET /v1/discovery`; set it when 8080
   conflicts with another local service. The port in the URL also becomes the printed `kubectl

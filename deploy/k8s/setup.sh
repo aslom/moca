@@ -1450,6 +1450,27 @@ write_overlay() {
   } >"$GEN_DIR/kustomization.yaml"
 }
 
+# The pre-0.8 catalog allow-list: before the manifests wired it into moca-settings, the only way
+# to set it on k8s was a hand patch of the control plane Deployment -- a literal env value owned
+# by another field manager. The manifests apply that env entry as a configMapKeyRef, and
+# server-side apply never declares `value`, so the literal survives the merge and the API server
+# rejects the Deployment ("may not be specified when `value` is not empty"). Strip the hand patch
+# before the apply; write_settings has already carried the value into moca-settings by here. A
+# failed read aborts the run like configmap_json's: an unreadable Deployment must not look like a
+# missing one. An entry that is already valueFrom (a stack this script applied) is left alone, or
+# every re-run would roll the control plane for nothing.
+strip_catalog_hosts_env() {
+  local json
+  json="$(kc get deployment moca-control-plane -n "$NS" --ignore-not-found -o json)"
+  [[ -n "$json" ]] || return 0
+  printf '%s' "$json" | jq -e '
+    [.spec.template.spec.containers[]? | select(.name == "control-plane")
+      | .env[]? | select(.name == "SH_MODEL_CATALOG_HOSTS" and has("value"))] | length != 0' \
+    >/dev/null || return 0
+  log 'removing the hand-patched SH_MODEL_CATALOG_HOSTS env from deployment/moca-control-plane (the allow-list now lives in moca-settings)'
+  kc set env deployment/moca-control-plane -n "$NS" SH_MODEL_CATALOG_HOSTS- >/dev/null
+}
+
 apply_stack() {
   kc apply -k "$GEN_DIR" >/dev/null
 }
@@ -1566,6 +1587,7 @@ main() {
   grant_scc
   write_overlay "$K8S_DIR/.generated/$TARGET"
   warn_storage_class
+  strip_catalog_hosts_env
   apply_stack
   wait_ready
   wait_records

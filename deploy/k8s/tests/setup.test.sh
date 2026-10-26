@@ -146,7 +146,28 @@ case "${1-} ${2-}" in
 # The provisioner, while the last apply listed the component; stopped (and started again) on disable.
 # MOCK_PROVISIONER_STUCK=1: its pod never goes away.
 "get deployment")
-  ! grep -q workload-sandboxes "$MOCK_STATE/applied-kustomization.yaml" 2>/dev/null || echo deployment.apps/moca-provisioner ;;
+  if [[ "$3" == moca-control-plane ]]; then
+    # The upgrade migration reads the control plane Deployment from the store, like a Secret or
+    # ConfigMap; --ignore-not-found on a missing one prints nothing and exits 0.
+    f="$(store "$ns" Deployment moca-control-plane)"
+    if [[ ! -f "$f" ]]; then
+      [[ " $* " != *" --ignore-not-found "* ]] || exit 0
+      echo "Error from server (NotFound): deployments \"moca-control-plane\" not found" >&2
+      exit 1
+    fi
+    cat "$f"
+  else
+    ! grep -q workload-sandboxes "$MOCK_STATE/applied-kustomization.yaml" 2>/dev/null || echo deployment.apps/moca-provisioner
+  fi ;;
+# The 0.8 upgrade migration: a trailing dash removes the env entry from the stored Deployment.
+"set env")
+  [[ "$3" == deployment/moca-control-plane && "$4" == SH_MODEL_CATALOG_HOSTS- ]] ||
+    { echo "mock kubectl: unhandled: $*" >&2; exit 2; }
+  f="$(store "$ns" Deployment moca-control-plane)"
+  [[ -f "$f" ]] || { echo "Error from server (NotFound): deployments \"moca-control-plane\" not found" >&2; exit 1; }
+  jq '(.spec.template.spec.containers[] | select(.name == "control-plane") | .env) |=
+      map(select(.name != "SH_MODEL_CATALOG_HOSTS"))' "$f" >"$f.new"
+  mv "$f.new" "$f" ;;
 "scale deployment/moca-provisioner") : ;;
 "get pods") [[ -z "${MOCK_PROVISIONER_STUCK-}" ]] || echo pod/moca-provisioner-0 ;;
 # kube_api_egress's reads. MOCK_NO_VAP=1: a cluster older than 1.30; MOCK_NO_API_ENDPOINTS=1: no
@@ -1395,6 +1416,45 @@ jq '.data.SH_MODEL_CATALOG_HOSTS = "gw.example.com:4000"' "$MOCK_STATE/moca__Con
 (export SH_GITHUB_CLIENT_ID=Iv1.a; expect_fail --target kind --skip-build)
 expect_out "moca-settings holds SH_MODEL_CATALOG_HOSTS='gw.example.com:4000'"
 pass 'a malformed catalog allow-list is refused, given (before any apply) or stored'
+
+# The 0.8 upgrade of a hand-patched allow-list: before the manifests wired it into moca-settings
+# (5615ffd6), the only way to set it on k8s was a hand patch of the control plane Deployment -- a
+# literal env value owned by another field manager. The manifests now apply that env entry as a
+# configMapKeyRef, and server-side apply never declares `value`, so the literal survives the merge
+# and the API server rejects the Deployment ("may not be specified when `value` is not empty").
+# setup.sh must strip the hand patch before the apply; moca-settings carries the value from then on.
+seed_control_plane_env() { # $1: the SH_MODEL_CATALOG_HOSTS env entry, as strict JSON (--argjson)
+  jq -n --argjson entry "$1" '{apiVersion: "apps/v1", kind: "Deployment",
+    metadata: {name: "moca-control-plane", namespace: "moca"},
+    spec: {template: {spec: {containers: [{name: "control-plane",
+      env: [{name: "HOME", value: "/tmp"}, $entry]}]}}}}' \
+    >"$MOCK_STATE/moca__Deployment__moca-control-plane.json"
+}
+reset_state
+seed_control_plane_env '{"name": "SH_MODEL_CATALOG_HOSTS", "value": "litellm.cb.example.com"}'
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
+grep -q ' set env deployment/moca-control-plane .*SH_MODEL_CATALOG_HOSTS-$' "$MOCK_LOG" ||
+  fail 'a hand-patched SH_MODEL_CATALOG_HOSTS env value was not stripped'
+strip_line="$(grep -n ' set env deployment/moca-control-plane ' "$MOCK_LOG" | head -1 | cut -d: -f1)"
+apply_line="$(grep -n 'apply -k' "$MOCK_LOG" | head -1 | cut -d: -f1)"
+[[ -n "$strip_line" && -n "$apply_line" && "$strip_line" -lt "$apply_line" ]] ||
+  fail 'the hand patch was not stripped before the apply (the API server would see value and valueFrom together)'
+jq -e '(.spec.template.spec.containers[0].env // []) | map(select(.name == "SH_MODEL_CATALOG_HOSTS")) | length == 0' \
+  "$MOCK_STATE/moca__Deployment__moca-control-plane.json" >/dev/null ||
+  fail 'the strip left the SH_MODEL_CATALOG_HOSTS entry on the live Deployment'
+# Without a hand patch there is nothing to strip: an absent entry (a stack that never set the
+# allow-list) and a valueFrom one (a stack this setup.sh already applied) must not be touched,
+# or every re-run would roll the control plane for nothing.
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
+! grep -q ' set env deployment/moca-control-plane' "$MOCK_LOG" ||
+  fail 'a Deployment without the hand patch was patched anyway'
+reset_state
+seed_control_plane_env '{"name": "SH_MODEL_CATALOG_HOSTS", "valueFrom": {"configMapKeyRef": {"name": "moca-settings", "key": "SH_MODEL_CATALOG_HOSTS"}}}'
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
+! grep -q ' set env deployment/moca-control-plane' "$MOCK_LOG" ||
+  fail 'a valueFrom SH_MODEL_CATALOG_HOSTS (a stack this setup.sh applied) was stripped, rolling the control plane for nothing'
+pass 'the 0.8 upgrade strips a hand-patched SH_MODEL_CATALOG_HOSTS env before the apply, and strips nothing without one'
 echo "== workload sandboxes (SH_WORKLOAD_SANDBOXES, workload sandboxes spec §4)"
 reset_state
 (export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
