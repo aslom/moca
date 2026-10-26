@@ -536,6 +536,14 @@ Control messages, length-prefixed protobuf (`proto/egress/v1/control.proto`):
 
 If `moca-egress` restarts, `vmpool` re-sends `Register` for every live VM on reconnect.
 
+The control connection is shared by every VM on the host, so losing it unbinds them all — and an
+unbind ends a VM's in-flight requests. A control call that gives up on its own deadline therefore
+**keeps the connection**: its reply is still owed, the client discards exactly that one, and the
+stream comes back into step, so one slow call costs only itself rather than aborting every other
+VM's in-flight requests. Because `moca-egress` binds a VM before it verifies the grant, a `Register`
+abandoned that way may still have taken effect; the client sends a compensating `Unregister` in the
+background, so `moca-egress` converges on the client's view either way.
+
 ### 8.4 Guest side: P4.1, unchanged
 
 `HTTPS_PROXY=http://127.0.0.1:3128` → the guest agent splices to vsock port 1025 (P4.1 T1/T2). One
