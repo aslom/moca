@@ -620,10 +620,19 @@ proxy's `DynamicUser` needs no group). While `moca-egress` is down, restores fai
   commands — each leaves `1 + D` VMs resident until the 90-second `StandbyIdle` sweep parks it. Past
   it, turns answer 503 + `Retry-After` rather than overcommitting the host.
 - **A workspace lives on one sandbox.** A session that moves (its sandbox gone past the grace) starts on an empty workspace; nothing copies it.
-- **A `setup-vm.sh` re-run forgets every session.** It recreates `sh-redis` (`--replace`, no volume;
-  `deploy/vm/setup-vm.sh`, `start_redis`). The control plane's session and ownership index goes with
-  it, so every user's sessions are gone. Their workspaces stay under `/srv/workspaces` until idle
-  reclaim, orphaned. Do not re-run the installer mid-demo.
+- **On a host installed before #410, the next `setup-vm.sh` run STOPS until you choose.** Redis now
+  keeps its data on a named volume with AOF on, and `start_redis` leaves an already-matching
+  `sh-redis` running rather than recreating it, so an ordinary re-run keeps every session. But a
+  container from before that change holds its data on an anonymous volume, and the script will not
+  decide what happens to it: the run refuses, changes nothing, and asks for
+  `sudo env SH_REDIS_ADOPT_VOLUME=1 ./deploy/vm/setup-vm.sh` (migrate those sessions onto the named
+  volume) or `=0` (start fresh, leaving them behind — not deleted, but unreachable, and the control
+  plane's session and ownership index then reads as gone, with the workspaces orphaned under
+  `/srv/workspaces` until idle reclaim). **Get this out of the way before a demo, not mid-demo**,
+  and note the choice only comes up once: after either run Redis is on the named volume and there is
+  nothing left to adopt. See "Redis persistence" in `deploy/vm/README.md` for the trap in recovering
+  such a volume by hand — copying a `dump.rdb` into a volume whose Redis has AOF on yields a
+  silently empty Redis.
 
 ## Uninstall
 
