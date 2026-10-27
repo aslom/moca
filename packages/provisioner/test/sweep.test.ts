@@ -4,6 +4,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { makeSigner, workloadKeyFor, workloadRecordKey } from '@moca/control-plane';
 import { orphanSweeper, redisRecords } from '../src/main.js';
 import {
+  deleteWorkload,
   putWorkload,
   sweepOrphans,
   type ProvisionerConfig,
@@ -15,8 +16,9 @@ import { BundleStore } from '../src/seed.js';
 import { FakeKube, workloadTemplate } from './fake-kube.js';
 
 // The orphan sweep (spec §6.2): a workload's objects go once its Redis record is missing, deleted,
-// deleting or of another generation, and all of them are older than the grace. Delete-only, and
-// conservative: anything it cannot read as the provisioner wrote it is skipped, never deleted.
+// deleting or of another generation, and all of them are older than the grace; on a missing record
+// the PVC stays. Delete-only, and conservative: anything it cannot read as the provisioner wrote it
+// is skipped, never deleted, and a Redis that looks emptied stops the pass.
 
 const signer = makeSigner(
   generateKeyPairSync('ed25519').privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
@@ -79,6 +81,8 @@ const left = (r: WorkloadRef) => {
 };
 const ALL = { sts: true, svc: true, secret: true, pvc: true };
 const NONE = { sts: false, svc: false, secret: false, pvc: false };
+/** What a missing record leaves: the PVC, never deleted on that alone. */
+const CLAIM_ONLY = { ...NONE, pvc: true };
 
 beforeEach(() => {
   kube = new FakeKube();
@@ -101,7 +105,7 @@ beforeEach(() => {
 });
 
 describe('the orphan sweep: what goes', () => {
-  it('a workload with no record: kept within the grace, all four objects deleted after it', async () => {
+  it('a workload with no record: kept within the grace, its sandboxes deleted after it, its PVC kept', async () => {
     const r = ref();
     await putWorkload(deps, r, MOUNTED);
     expect(left(r)).toEqual(ALL);
@@ -110,21 +114,45 @@ describe('the orphan sweep: what goes', () => {
     expect(left(r)).toEqual(ALL);
     now += 1;
     expect(await sweepOrphans(deps, GRACE)).toEqual({ swept: 1, skipped: 0, failed: 0 });
-    expect(left(r)).toEqual(NONE);
+    // A missing record cannot be told from an emptied Redis: the storage stays (spec §6.2).
+    expect(left(r)).toEqual(CLAIM_ONLY);
     const wl = wlOf(r);
     // Each one logged by kind, name and reason; never a token or the owner.
     expect(logs).toEqual([
       `provisioner: orphan sweep deleted StatefulSet ${wl} (record missing)`,
       `provisioner: orphan sweep deleted Secret ${wl}-attach (record missing)`,
       `provisioner: orphan sweep deleted Service ${wl} (record missing)`,
-      `provisioner: orphan sweep deleted PersistentVolumeClaim ${wl} (record missing)`,
     ]);
-    expect(logs.join()).not.toContain('alice');
+    expect(errors).toEqual([`provisioner: orphan sweep kept PVC ${wl}: record missing`]);
+    expect(logs.join() + errors.join()).not.toContain('alice');
+    expect(kube.calls).not.toContain(`delete persistentvolumeclaims ${wl}`);
+  });
+
+  it('a PVC kept on a missing record stays on later passes, and goes once the record says deleted', async () => {
+    const r = ref();
+    await putWorkload(deps, r, MOUNTED);
+    now += GRACE;
+    await sweepOrphans(deps, GRACE);
+    expect(left(r)).toEqual(CLAIM_ONLY);
+    errors = [];
+    kube.calls = [];
+    expect(await sweepOrphans(deps, GRACE)).toEqual({ swept: 0, skipped: 1, failed: 0 });
+    expect(left(r)).toEqual(CLAIM_ONLY);
+    expect(kube.calls.some((c) => c.startsWith('delete '))).toBe(false);
+    expect(errors).toEqual([`provisioner: orphan sweep kept PVC ${wlOf(r)}: record missing`]);
+    // An explicit deleted (or deleting, or another generation) is what deletes storage.
+    records.put(r, 'deleted');
+    expect(await sweepOrphans(deps, GRACE)).toEqual({ swept: 1, skipped: 0, failed: 0 });
+    expect(left(r)).toEqual(NONE);
+    expect(logs).toContain(
+      `provisioner: orphan sweep deleted PersistentVolumeClaim ${wlOf(r)} (record deleted)`,
+    );
   });
 
   it("deletes in removeWorkload's order: StatefulSet, Secret, Service, the PVC last", async () => {
     const r = ref();
     await putWorkload(deps, r, MOUNTED);
+    records.put(r, 'deleted');
     now += GRACE;
     kube.calls = [];
     await sweepOrphans(deps, GRACE);
@@ -186,6 +214,7 @@ describe('the orphan sweep: what goes', () => {
   it('a PVC its finalizer holds stays reported, and the next pass deletes it', async () => {
     const r = ref();
     await putWorkload(deps, r, MOUNTED);
+    records.put(r, 'deleted');
     now += GRACE;
     // The API server's view of a delete under kubernetes.io/pvc-protection: stays, marked.
     const del = kube.delete.bind(kube);
@@ -344,7 +373,10 @@ describe('the orphan sweep: isolation and ordering', () => {
     const a = ref('github:alice', 'a');
     const b = ref('github:bob', 'b');
     const c = ref('github:carol', 'c');
-    for (const r of [a, b, c]) await putWorkload(deps, r, { count: 1, tier: 'container' });
+    for (const r of [a, b, c]) {
+      await putWorkload(deps, r, { count: 1, tier: 'container' });
+      records.put(r, 'deleted');
+    }
     now += GRACE;
     const get = records.get.bind(records);
     records.get = async (key) => {
@@ -365,6 +397,8 @@ describe('the orphan sweep: isolation and ordering', () => {
     const b = ref('github:bob', 'b');
     await putWorkload(deps, a, { count: 1, tier: 'container' });
     await putWorkload(deps, b, { count: 1, tier: 'container' });
+    records.put(a, 'deleted');
+    records.put(b, 'deleted');
     now += GRACE;
     const del = kube.delete.bind(kube);
     kube.delete = async (kind, name) => {
@@ -434,6 +468,191 @@ describe('the orphan sweep: isolation and ordering', () => {
     expect(left(r).sts).toBe(false);
     expect(logs).toContain('provisioner: swept 1 orphaned workload(s)');
   });
+
+  it("is serialized with the owner's PUT: the re-read record under the queue keeps old objects", async () => {
+    // All objects old, the record missing at the first look, and live again by the time the sweep
+    // holds Alice's queue. The PUT re-creates nothing (a scale-up of objects that all exist), so
+    // only the second record read can keep them: the grace re-check sees nothing young.
+    const r = ref();
+    await putWorkload(deps, r, MOUNTED);
+    records.put(r, 'ready');
+    now += GRACE;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let reached = false;
+    const list = kube.list.bind(kube);
+    kube.list = async (kind, selector) => {
+      // The PUT's owner-cap count, not the sweep's own list.
+      if (kind === 'statefulsets' && selector.startsWith('moca.dev/owner=')) {
+        reached = true;
+        await gate;
+      }
+      return list(kind, selector);
+    };
+    const put = putWorkload(deps, r, { ...MOUNTED, count: 2 });
+    await vi.waitFor(() => expect(reached).toBe(true));
+    records.map.clear();
+    let swept = false;
+    const sweep = sweepOrphans(deps, GRACE).then((v) => ((swept = true), v));
+    // The first look has read the record (missing) and the delete is waiting behind the PUT.
+    await vi.waitFor(() => expect(records.reads.length).toBe(1));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(swept).toBe(false);
+    records.put(r, 'ready');
+    release();
+    await put;
+    expect(await sweep).toEqual({ swept: 0, skipped: 0, failed: 0 });
+    expect(records.reads.length).toBe(2);
+    expect(left(r)).toEqual(ALL);
+    expect(kube.calls.filter((c) => c.startsWith('delete '))).toEqual([]);
+    // Nothing young: the objects the second read kept are all past the grace.
+    for (const kind of ['statefulsets', 'services', 'persistentvolumeclaims'] as const) {
+      const at = Date.parse(kube.objects[kind].get(wlOf(r))!.metadata.creationTimestamp!);
+      expect(now - at / 1000).toBeGreaterThanOrEqual(GRACE);
+    }
+  });
+});
+
+describe('the orphan sweep: a Redis that does not answer', () => {
+  const hang = () => new Promise<string | null>(() => {});
+
+  it('a first read that never answers fails that workload once the timeout passes, objects kept', async () => {
+    const a = ref('github:alice', 'a');
+    const b = ref('github:bob', 'b');
+    await putWorkload(deps, a, { count: 1, tier: 'container' });
+    await putWorkload(deps, b, { count: 1, tier: 'container' });
+    records.put(b, 'deleted');
+    now += GRACE;
+    const get = records.get.bind(records);
+    records.get = (key) => (key === workloadRecordKey(a.owner, a.name) ? hang() : get(key));
+    expect(await sweepOrphans(deps, GRACE, 50)).toEqual({ swept: 1, skipped: 0, failed: 1 });
+    expect(left(a)).toMatchObject({ sts: true, svc: true, secret: true });
+    expect(left(b)).toMatchObject({ sts: false, svc: false, secret: false });
+    expect(errors).toEqual([
+      `provisioner: orphan check of workload ${wlOf(a)} failed: Redis read timed out after 50 ms`,
+    ]);
+  });
+
+  it("a read on the owner's queue that never answers releases the queue at the timeout, and the next pass runs", async () => {
+    const r = ref();
+    await putWorkload(deps, r, MOUNTED);
+    records.put(r, 'deleted');
+    now += GRACE;
+    // The first look reads `deleted`; the re-read under Alice's queue hangs (a blackholed socket).
+    const get = records.get.bind(records);
+    let reads = 0;
+    let hung = false;
+    records.get = (key) => {
+      if (++reads === 2) {
+        hung = true;
+        return hang();
+      }
+      return get(key);
+    };
+    const sweep = orphanSweeper(
+      { ...deps, records: Object.assign(records, { ready: () => true }) },
+      GRACE,
+      100,
+    );
+    const pass = sweep();
+    await vi.waitFor(() => expect(hung).toBe(true));
+    // Alice's DELETE queues behind the sweep's hung read, and runs once the timeout releases it.
+    const started = Date.now();
+    const del = deleteWorkload(deps, r);
+    expect(await del).toMatchObject({ remaining: expect.any(Number) });
+    expect(Date.now() - started).toBeLessThan(2000);
+    await pass;
+    expect(errors).toContain(
+      `provisioner: orphan check of workload ${wlOf(r)} failed: Redis read timed out after 100 ms`,
+    );
+    // The sweep itself deleted nothing: the DELETE did.
+    expect(logs.filter((l) => l.includes('orphan sweep deleted'))).toEqual([]);
+    // The pass ended, so the next one starts (not the same promise) and runs to the end.
+    const r2 = ref('github:alice', 'next');
+    await putWorkload(deps, r2, { count: 1, tier: 'container' });
+    records.put(r2, 'deleted');
+    now += GRACE;
+    const next = sweep();
+    expect(next).not.toBe(pass);
+    await next;
+    expect(left(r2).sts).toBe(false);
+  });
+
+  it('a PUT queued behind a hung re-read waits no longer than the timeout, and its objects stay', async () => {
+    const r = ref();
+    await putWorkload(deps, r, { count: 1, tier: 'container' });
+    now += GRACE;
+    const get = records.get.bind(records);
+    let reads = 0;
+    let hung = false;
+    records.get = (key) => {
+      if (++reads === 2) {
+        hung = true;
+        return hang();
+      }
+      return get(key);
+    };
+    const sweep = sweepOrphans(deps, GRACE, 100);
+    await vi.waitFor(() => expect(hung).toBe(true));
+    const started = Date.now();
+    await putWorkload(deps, r, { count: 1, tier: 'container' });
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(await sweep).toEqual({ swept: 0, skipped: 0, failed: 1 });
+    expect(left(r)).toMatchObject({ sts: true, svc: true, secret: true });
+  });
+});
+
+describe('the orphan sweep: a Redis that looks emptied', () => {
+  it('every record missing (two or more workloads): the pass deletes nothing and says so', async () => {
+    const rs = [ref('github:alice', 'a'), ref('github:bob', 'b')];
+    for (const r of rs) await putWorkload(deps, r, MOUNTED);
+    now += GRACE;
+    kube.calls = [];
+    expect(await sweepOrphans(deps, GRACE)).toEqual({
+      swept: 0,
+      skipped: 0,
+      failed: 0,
+      aborted: true,
+    });
+    for (const r of rs) expect(left(r)).toEqual(ALL);
+    expect(kube.calls.some((c) => c.startsWith('delete '))).toBe(false);
+    expect(errors).toEqual([
+      expect.stringContaining('ORPHAN SWEEP ABORTED, nothing deleted: 2 of the 2'),
+    ]);
+  });
+
+  it('more than half missing aborts, even with deletable deleted records among them', async () => {
+    const rs = ['a', 'b', 'c', 'd', 'e'].map((n) => ref(`github:${n}`, n));
+    for (const r of rs) await putWorkload(deps, r, { count: 1, tier: 'container' });
+    records.put(rs[0], 'ready');
+    records.put(rs[1], 'deleted');
+    now += GRACE;
+    expect(await sweepOrphans(deps, GRACE)).toMatchObject({ swept: 0, aborted: true });
+    for (const r of rs) expect(left(r)).toMatchObject({ sts: true, svc: true, secret: true });
+    expect(errors.join()).toContain('3 of the 5 workload records read are missing');
+  });
+
+  it('half missing or fewer is a normal pass; the kept claims do not count toward the next guard', async () => {
+    const rs = ['a', 'b', 'c', 'd'].map((n) => ref('github:alice', n));
+    for (const r of rs) await putWorkload(deps, r, { ...MOUNTED, count: 1 });
+    records.put(rs[0], 'ready');
+    records.put(rs[1], 'ready');
+    now += GRACE;
+    expect(await sweepOrphans(deps, GRACE)).toEqual({ swept: 2, skipped: 0, failed: 0 });
+    expect(left(rs[2])).toEqual(CLAIM_ONLY);
+    expect(left(rs[3])).toEqual(CLAIM_ONLY);
+    // Two lone claims, two live workloads: the claims are not read as a mostly-missing Redis.
+    errors = [];
+    expect(await sweepOrphans(deps, GRACE)).toEqual({ swept: 0, skipped: 2, failed: 0 });
+    expect(errors.join()).not.toContain('ABORTED');
+  });
+
+  it('a lone orphan with no record is still swept (one is not a pattern)', async () => {
+    const r = ref();
+    await putWorkload(deps, r, { count: 1, tier: 'container' });
+    now += GRACE;
+    expect(await sweepOrphans(deps, GRACE)).toEqual({ swept: 1, skipped: 0, failed: 0 });
+  });
 });
 
 describe('the orphan sweep against a real Redis (redisRecords)', () => {
@@ -448,25 +667,29 @@ describe('the orphan sweep against a real Redis (redisRecords)', () => {
   it('reads records with GET and sweeps only the orphan', async () => {
     await client.connect();
     const store = redisRecords(url);
-    await vi.waitFor(() => expect(store.ready()).toBe(true));
-    const d = { ...deps, records: store };
-    const owner = `github:sweep-${randomUUID()}`;
-    const live = ref(owner, 'live');
-    const gone = ref(owner, 'gone');
-    await putWorkload(d, live, { count: 1, tier: 'container' });
-    await putWorkload(d, gone, { count: 1, tier: 'container' });
-    for (const [r, status] of [
-      [live, 'ready'],
-      [gone, 'deleted'],
-    ] as const) {
-      const key = workloadRecordKey(r.owner, r.name);
-      keys.push(key);
-      await client.set(key, JSON.stringify({ ...r, status, contextType: 'workspace' }));
+    // Closed even when an assertion fails: its reconnect loop would keep the worker alive.
+    try {
+      await vi.waitFor(() => expect(store.ready()).toBe(true));
+      const d = { ...deps, records: store };
+      const owner = `github:sweep-${randomUUID()}`;
+      const live = ref(owner, 'live');
+      const gone = ref(owner, 'gone');
+      await putWorkload(d, live, { count: 1, tier: 'container' });
+      await putWorkload(d, gone, { count: 1, tier: 'container' });
+      for (const [r, status] of [
+        [live, 'ready'],
+        [gone, 'deleted'],
+      ] as const) {
+        const key = workloadRecordKey(r.owner, r.name);
+        keys.push(key);
+        await client.set(key, JSON.stringify({ ...r, status, contextType: 'workspace' }));
+      }
+      now += GRACE;
+      expect(await sweepOrphans(d, GRACE)).toEqual({ swept: 1, skipped: 0, failed: 0 });
+      expect(left(live)).toMatchObject({ sts: true, svc: true, secret: true });
+      expect(left(gone)).toMatchObject({ sts: false, svc: false, secret: false });
+    } finally {
+      store.close();
     }
-    now += GRACE;
-    expect(await sweepOrphans(d, GRACE)).toEqual({ swept: 1, skipped: 0, failed: 0 });
-    expect(left(live)).toMatchObject({ sts: true, svc: true, secret: true });
-    expect(left(gone)).toMatchObject({ sts: false, svc: false, secret: false });
-    store.close();
   });
 });

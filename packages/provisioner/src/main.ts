@@ -13,6 +13,7 @@ import { createClient } from 'redis';
 import { inClusterOptions, RestKube } from './kube.js';
 import {
   DEFAULT_ORPHAN_GRACE_S,
+  DEFAULT_REDIS_TIMEOUT_MS,
   remintExpiring,
   settleSeeds,
   sweepOrphans,
@@ -28,7 +29,8 @@ import { startSeedServer, startServer, type ServerDeps } from './server.js';
  * namespace. Secrets are files under CREDENTIALS_DIRECTORY (credentialValue), as the control
  * plane's are: MOCA_ATTACH_PRIVATE_KEY (its own Ed25519 key, PKCS#8 base64 or PEM),
  * MOCA_PROVISIONER_TOKEN (the workers' service token) and REDIS_URL (the deployment's one Redis
- * credential, read by the orphan sweep only; unset, there is no sweep).
+ * credential, read-write like every caller's (spec §9), used by the orphan sweep only, for GETs;
+ * unset, there is no sweep).
  */
 
 function required(value: string | undefined, name: string): string {
@@ -63,9 +65,11 @@ export function configFromEnv(env: NodeJS.ProcessEnv): ProvisionerConfig {
 }
 
 /**
- * The workload records the orphan sweep reads (spec §6.2): GET only. No offline queue, so a read
- * while Redis is down fails at once (that workload is skipped this pass) instead of waiting for a
- * reconnect; the sweep runs only while the client is ready anyway (orphanSweeper).
+ * The workload records the orphan sweep reads (spec §6.2): this code only GETs, though the
+ * credential could write. No offline queue, so a read while Redis is down fails at once (that
+ * workload is skipped this pass) instead of waiting for a reconnect; the sweep runs only while the
+ * client is ready anyway (orphanSweeper). A read on a socket that stops answering while the client
+ * still looks ready is bounded by the sweep itself (MOCA_PROVISIONER_REDIS_TIMEOUT_MS).
  */
 export function redisRecords(
   url: string,
@@ -91,6 +95,7 @@ export function redisRecords(
 export function depsFromEnv(env: NodeJS.ProcessEnv): ServerDeps & {
   reconcileS: number;
   orphanGraceS: number;
+  redisTimeoutMs: number;
   attachKeys: Map<string, KeyObject>;
   records?: RecordStore & { ready: () => boolean; close: () => void };
 } {
@@ -132,16 +137,23 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): ServerDeps & {
     userKeys,
     reconcileS: positiveIntEnv(env, 'MOCA_PROVISIONER_RECONCILE_S', 300),
     orphanGraceS: positiveIntEnv(env, 'MOCA_PROVISIONER_ORPHAN_GRACE_S', DEFAULT_ORPHAN_GRACE_S),
+    redisTimeoutMs: positiveIntEnv(
+      env,
+      'MOCA_PROVISIONER_REDIS_TIMEOUT_MS',
+      DEFAULT_REDIS_TIMEOUT_MS,
+    ),
   };
 }
 
 /**
  * The orphan sweep (sweepOrphans, spec §6.2), on the reconcile tick: one pass at a time, and none
- * while Redis is not ready (every record would read as unknown, so nothing could be decided).
+ * while Redis is not ready (every record would read as unknown, so nothing could be decided). Every
+ * record read is bounded by `timeoutMs`, so a pass always ends and the next one can start.
  */
 export function orphanSweeper(
   deps: ProvisionerDeps & { records: RecordStore & { ready: () => boolean } },
   graceS: number,
+  timeoutMs = DEFAULT_REDIS_TIMEOUT_MS,
 ) {
   let running: Promise<void> | null = null;
   return (): Promise<void> => {
@@ -149,7 +161,7 @@ export function orphanSweeper(
       console.error('provisioner: orphan sweep skipped: Redis is not ready');
       return Promise.resolve();
     }
-    return (running ??= sweepOrphans(deps, graceS)
+    return (running ??= sweepOrphans(deps, graceS, timeoutMs)
       .then((r) => {
         if (r.swept > 0) console.log(`provisioner: swept ${r.swept} orphaned workload(s)`);
       })
@@ -202,7 +214,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   );
   const settle = seedSettler(deps);
   const records = deps.records;
-  const sweep = records ? orphanSweeper({ ...deps, records }, deps.orphanGraceS) : null;
+  const sweep = records
+    ? orphanSweeper({ ...deps, records }, deps.orphanGraceS, deps.redisTimeoutMs)
+    : null;
   if (!sweep) console.error('provisioner: REDIS_URL is not set: no orphan sweep (spec §6.2)');
   // Re-mint attach tokens nearing expiry (spec §3.1), finish seeds a restart left behind (spec
   // §5.3), then sweep orphaned workloads (spec §6.2).

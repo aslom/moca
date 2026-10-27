@@ -509,15 +509,38 @@ workload StatefulSets, Services and PVCs in `moca-sandbox` and reads each one's 
 from its annotation, reading Redis with the deployment's one credential (there are no ACL users,
 §3.1). It deletes the objects when the record is missing, `deleted`, `deleting`, or of another
 generation, and every object of the workload is older than a grace
-(`MOCA_PROVISIONER_ORPHAN_GRACE_S`, default 600, 10 minutes). The same loop re-mints attach tokens
-nearing expiry (§3.1) and removes `moca.dev/seed-revision` once seeding is done (§5.3).
-Contexts left by a failed rollback are out of its reach: Context Service owns them.
+(`MOCA_PROVISIONER_ORPHAN_GRACE_S`, default 600, 10 minutes), except that **a missing record never
+deletes a workload's storage**: on `missing` it deletes the StatefulSet, Secret and Service and
+keeps the PVC. The same loop re-mints attach tokens nearing expiry (§3.1) and removes
+`moca.dev/seed-revision` once seeding is done (§5.3). Contexts left by a failed rollback are out of its reach: Context Service owns them.
 
 Details, as built (2026-10-25):
 
+- **A missing record keeps the PVC.** A record is written before any object, so `missing` is
+  either a lost record or an emptied or wrong Redis (lost AOF or PVC, `FLUSHALL`, a restore,
+  `REDIS_URL` pointing at another instance or db index), and the two cannot be told apart. On
+  `missing` the reconciler frees the sandboxes and the owner's cap (StatefulSet, Secret, Service)
+  and logs `kept PVC <wl>: record missing`; the claim is deleted only on an explicit `deleted` or
+  `deleting`, or a record of another generation. A kept claim is then the workload's only object,
+  and each later pass logs it again. To remove it by hand, once the workspace is known to be
+  unwanted: `kubectl -n moca-sandbox delete pvc <wl>`.
+- **An emptied Redis stops the pass.** When the first look finds most records missing, nothing is
+  deleted in that pass, and it is logged as `ORPHAN SWEEP ABORTED`: at least 2 workloads and more
+  than half of those whose record it read (`MISSING_ABORT_MIN`, `MISSING_ABORT_FRACTION` in
+  `provisioner.ts`). Claims kept alone on an earlier pass are not counted. A lone orphan with no
+  record is still swept.
+- **Redis reads time out.** node-redis has no command timeout, so each record read is bounded by
+  `MOCA_PROVISIONER_REDIS_TIMEOUT_MS` (default 2000). A read that times out fails that workload for
+  the pass (logged, its objects kept); on the owner's queue it releases the queue, so a hung Redis
+  never holds that owner's `PUT`, `DELETE` or re-mint past the bound, and the pass always ends.
 - **Secrets are not listed** (the Role has no read on them, §4.1). A workload's Secret is deleted
   blind with its other objects, by its derived name, and every delete removes it before the
-  Service and PVC, so a failed Secret delete leaves an object the next pass still sees.
+  Service and PVC, so a failed Secret delete leaves an object the next pass still sees. A delete
+  made before this order (provisioners before #615 deleted StatefulSet, Service, PVC, then
+  Secret) can have left a lone `<wl>-attach` Secret, which no pass sees. To find and remove such
+  Secrets, list the workload Secrets and delete each one whose workload has no StatefulSet:
+  `kubectl -n moca-sandbox get secret -l app=moca-workload-sandbox,app.kubernetes.io/managed-by=moca-provisioner -L moca.dev/workload`,
+  then `kubectl -n moca-sandbox delete secret <wl>-attach`.
 - **`deleting` counts as gone.** It is a delete the owner asked for whose worker gave up waiting
   (its `DELETE` answered `202` and was not repeated). The reconciler finishes the provisioner's
   half; the owner's next `DELETE` still finishes the Context and the record.
@@ -629,7 +652,12 @@ on this path for phase 2 workloads.
   `moca-sandbox`.
 - **A compromised provisioner, within its policy.** It cannot read a Secret or mount another one,
   but it can mint attach tokens for any `wl` it likes (it holds the key) and so register sandboxes
-  under any workload label, delete any workload's objects, and fill the namespace's pod quota.
+  under any workload label, delete any workload's objects, and fill the namespace's pod quota. It
+  also holds the deployment's read-write Redis credential (`REDIS_URL`, for the reconciler, §6.2;
+  there are no ACL users, §3.1): its code only reads workload records, but the credential could
+  write any key, `sh:sandbox:records` included, and whoever writes that chooses the executor for
+  every turn. That is the same reach as a compromised worker, and the provisioner's seed port is
+  reachable from model code, so this is a real widening of who holds it.
 - **Egress.** Workload sandboxes keep the shared pool's public internet egress (MI1 R8 until S5),
   so model code can still send out what it can read: its own owner's data.
 - **Operators and namespace admins.** Anyone who can exec into `moca-sandbox` pods or mount its

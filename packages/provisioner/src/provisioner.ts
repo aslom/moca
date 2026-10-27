@@ -694,12 +694,14 @@ export function deleteWorkload(
  * exist: it is the one kind the provisioner cannot list, so a failed Secret delete leaves an object
  * the orphan sweep can see, and the next DELETE or sweep retries it. Nothing here waits, so a claim
  * its protection finalizer holds is only reported (`remaining`), and the next call retries.
- * `onDelete` hears each object a delete was issued for (the orphan sweep logs them).
+ * `onDelete` hears each object a delete was issued for (the orphan sweep logs them). `keepClaim`
+ * leaves the PVC alone: the orphan sweep's delete on a missing record (spec §6.2).
  */
 async function removeWorkload(
   deps: ProvisionerDeps,
   k: Keys,
   onDelete?: (kind: string, name: string) => void,
+  keepClaim = false,
 ): Promise<{ remaining: number }> {
   const { kube } = deps;
   // Retired, not only dropped: a late hand-off for it is refused, never held again.
@@ -714,7 +716,7 @@ async function removeWorkload(
   // Unread, as every Secret: its name is derived from the verified owner, so it is this workload's.
   if (await kube.delete('secrets', secretName(k.wl))) onDelete?.('secrets', secretName(k.wl));
   await drop('services');
-  const claimLeft = (await drop('persistentvolumeclaims')) ? 1 : 0;
+  const claimLeft = !keepClaim && (await drop('persistentvolumeclaims')) ? 1 : 0;
   const pods = await kube.list('pods', `${WORKLOAD_LABEL}=${k.wl},${OWNER_LABEL}=${k.own}`);
   return { remaining: pods.length + claimLeft };
 }
@@ -894,6 +896,24 @@ async function remintOne(deps: ProvisionerDeps, s: KubeObject): Promise<boolean>
 /** MOCA_PROVISIONER_ORPHAN_GRACE_S's default: an object younger than this is never swept. */
 export const DEFAULT_ORPHAN_GRACE_S = 600;
 
+/**
+ * MOCA_PROVISIONER_REDIS_TIMEOUT_MS's default: the bound on each record read. node-redis has no
+ * command timeout, so a GET on a half-open or blackholed socket would otherwise never answer, and
+ * the second read, on the owner's queue, would hold that owner's PUT, DELETE and re-mint with it.
+ */
+export const DEFAULT_REDIS_TIMEOUT_MS = 2000;
+
+/**
+ * The emptied-Redis guard (spec §6.2): a pass deletes nothing when more than this fraction of the
+ * workloads it read a record for have none (at least MISSING_ABORT_MIN of them). A record is written
+ * before any object, so many missing at once is not orphans but a Redis that lost its data (AOF or
+ * PVC lost, FLUSHALL, a restore) or a REDIS_URL pointing at another instance or db index.
+ */
+export const MISSING_ABORT_FRACTION = 0.5;
+/** The fewest workloads the guard aborts for: a lone orphan with no record is still swept. */
+export const MISSING_ABORT_MIN = 2;
+const MISSING = 'record missing';
+
 /** The kinds the sweep lists. Not Secrets: the Role has no read on them (spec §4.1). */
 const SWEPT_KINDS = ['statefulsets', 'services', 'persistentvolumeclaims'] as const;
 const KIND_NAME: Record<string, string> = {
@@ -914,23 +934,43 @@ export interface SweepResult {
   swept: number;
   /** Workloads left alone because something about them is not as the provisioner writes it. */
   skipped: number;
-  /** Workloads whose check or delete failed; the next pass retries. */
+  /** Workloads whose check or delete failed (a Redis read timed out, too); the next pass retries. */
   failed: number;
+  /** Set when the emptied-Redis guard stopped the pass before any delete. */
+  aborted?: true;
+}
+
+/** A workload the first look found deletable: re-checked on its owner's queue before any delete. */
+interface DueGroup {
+  g: SweepGroup;
+  k: Keys;
+  recordKey: string;
+  gen: string;
 }
 
 /**
  * The orphan sweep (spec §6.2): delete a workload's StatefulSet, Service, Secret and PVC when its
- * Redis record is missing, `deleted`, `deleting`, or of another generation, and every one of its
- * objects is older than `graceS`. A `deleting` record is one whose owner asked for the delete and
- * whose worker gave up waiting (its DELETE answered 202 and was not repeated); the sweep finishes
- * the provisioner's half, and the owner's next DELETE the rest (Context, record). A live record
+ * Redis record is `deleted`, `deleting`, or of another generation, and every one of its objects is
+ * older than `graceS`. A `deleting` record is one whose owner asked for the delete and whose worker
+ * gave up waiting (its DELETE answered 202 and was not repeated); the sweep finishes the
+ * provisioner's half, and the owner's next DELETE the rest (Context, record). A live record
  * (`creating`, `awaiting_upload`, `provisioning`, `ready`) of the same generation is never touched.
+ *
+ * A missing record frees the sandboxes (StatefulSet, Secret, Service) but never deletes the PVC:
+ * an emptied or wrong Redis cannot be told from a lost record, and a writable workspace may exist
+ * nowhere else. The claim is logged as kept and left for an operator. And when the first look finds
+ * most of the records it read missing (MISSING_ABORT_FRACTION, MISSING_ABORT_MIN), the pass deletes
+ * nothing at all.
  *
  * Delete-only: it creates and mints nothing, so a forged record (workers can write Redis, spec §9)
  * can at worst delete a workload's objects. It is conservative about everything else: an object
  * whose labels, name, record-key or generation annotation are not as the provisioner writes them, a
  * group whose objects disagree, a record that does not parse or that this workload key does not
  * derive from, or an object with no readable creation time, is logged and skipped, never deleted.
+ *
+ * Every record read is bounded by `timeoutMs`: one that times out fails that workload (logged, its
+ * objects kept), and on the owner's queue the timeout releases the queue, so a hung Redis never
+ * holds an owner's PUT, DELETE or re-mint past it, and the pass always ends.
  *
  * Each workload is handled on its own (one that fails never stops the others), on its owner's
  * queue, so a delete here cannot interleave with that owner's PUT, DELETE or re-mint, and is
@@ -940,6 +980,7 @@ export interface SweepResult {
 export async function sweepOrphans(
   deps: ProvisionerDeps & { records: RecordStore },
   graceS: number,
+  timeoutMs = DEFAULT_REDIS_TIMEOUT_MS,
 ): Promise<SweepResult> {
   const selector = `app=${APP_LABEL},${MANAGED_BY_LABEL}=${MANAGED_BY}`;
   const groups = new Map<string, SweepGroup>();
@@ -954,18 +995,64 @@ export async function sweepOrphans(
       groups.set(id, g);
     }
   }
+  const failed = (wl: string, err: unknown) => {
+    result.failed++;
+    const why = err instanceof Error ? err.message : String(err);
+    console.error(`provisioner: orphan check of workload ${wl} failed: ${why}`);
+  };
+  // The first look at every workload, before any delete: the emptied-Redis guard needs them all.
+  const due: DueGroup[] = [];
+  let read = 0;
+  let missing = 0;
   for (const g of groups.values()) {
     try {
-      const r = await sweepOne(deps, g, graceS);
+      const r = await firstLook(deps, g, graceS, timeoutMs);
+      if (r.counted) read++;
+      if (r.counted && r.missing) missing++;
+      if (r.outcome === 'skipped') result.skipped++;
+      if (r.outcome === 'due') due.push(r.due);
+    } catch (err) {
+      failed(g.wl, err);
+    }
+  }
+  if (missing >= MISSING_ABORT_MIN && missing > MISSING_ABORT_FRACTION * read) {
+    console.error(
+      `provisioner: ORPHAN SWEEP ABORTED, nothing deleted: ${missing} of the ${read} workload ` +
+        'records read are missing from Redis. Redis may have lost its data, or REDIS_URL may point ' +
+        'at another instance; check it before anything else (spec §6.2).',
+    );
+    return { ...result, aborted: true };
+  }
+  for (const d of due) {
+    try {
+      const r = await sweepDue(deps, d, graceS, timeoutMs);
       if (r === 'swept') result.swept++;
       if (r === 'skipped') result.skipped++;
     } catch (err) {
-      result.failed++;
-      const why = err instanceof Error ? err.message : String(err);
-      console.error(`provisioner: orphan check of workload ${g.wl} failed: ${why}`);
+      failed(d.g.wl, err);
     }
   }
   return result;
+}
+
+/** One record read, bounded: node-redis has no command timeout (DEFAULT_REDIS_TIMEOUT_MS). */
+async function readRecord(
+  deps: { records: RecordStore },
+  key: string,
+  timeoutMs: number,
+): Promise<string | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`Redis read timed out after ${timeoutMs} ms`)),
+      timeoutMs,
+    );
+  });
+  try {
+    return await Promise.race([deps.records.get(key), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 type Verdict = { keep: true; why?: string } | { keep: false; why: string };
@@ -976,9 +1063,10 @@ async function judge(
   k: Keys,
   recordKey: string,
   gen: string,
+  timeoutMs: number,
 ): Promise<Verdict> {
-  const raw = await deps.records.get(recordKey);
-  if (raw === null) return { keep: false, why: 'record missing' };
+  const raw = await readRecord(deps, recordKey, timeoutMs);
+  if (raw === null) return { keep: false, why: MISSING };
   let rec: unknown;
   try {
     rec = JSON.parse(raw);
@@ -1042,30 +1130,73 @@ function ageS(obj: KubeObject, now: number): number | null {
   return Number.isFinite(at) ? now - Math.floor(at / 1000) : null;
 }
 
-async function sweepOne(
+/** The claim of a group, when it is the group's only object: a missing record's leftover. */
+function loneClaim(g: SweepGroup): KubeObject | null {
+  const [only, ...rest] = g.objects;
+  return only && rest.length === 0 && only.kind === 'persistentvolumeclaims' ? only.obj : null;
+}
+
+const keptClaim = (name: string) =>
+  console.error(`provisioner: orphan sweep kept PVC ${name}: record missing`);
+
+/**
+ * The first look at one workload, off the owner's queue: the cheap checks, then one record read.
+ * `counted` (and `missing`) feed the emptied-Redis guard; a claim kept alone after an earlier
+ * missing-record sweep is not counted, or two such would stop every later pass.
+ */
+async function firstLook(
   deps: ProvisionerDeps & { records: RecordStore },
   g: SweepGroup,
   graceS: number,
-): Promise<'swept' | 'skipped' | 'kept'> {
+  timeoutMs: number,
+): Promise<
+  | { outcome: 'kept' | 'skipped'; counted?: boolean; missing?: boolean }
+  | { outcome: 'due'; due: DueGroup; counted: boolean; missing: boolean }
+> {
   const skip = (why: string) => {
     console.error(`provisioner: orphan sweep skips workload ${g.wl}: ${why}`);
-    return 'skipped' as const;
+    return { outcome: 'skipped' as const };
   };
   const keys = groupKeys(g);
   if ('bad' in keys) return skip(keys.bad);
   const { k, recordKey, gen } = keys;
   // Already going (a claim its finalizer holds until the pod is gone): nothing left to delete. The
-  // Secret went before the Service and claim (removeWorkload), so none is left behind unseen.
-  if (g.objects.every(({ obj }) => obj.metadata.deletionTimestamp)) return 'kept';
-  // Cheap checks first, off the owner's queue: most workloads are live, or too young.
+  // Secret went before the Service and claim (removeWorkload), so none is left behind unseen
+  // (a delete made before that order could leave one: spec §6.2).
+  if (g.objects.every(({ obj }) => obj.metadata.deletionTimestamp)) return { outcome: 'kept' };
+  // Cheap checks first: most workloads are live, or too young.
   const now = nowOf(deps);
   for (const { obj } of g.objects) {
     const age = ageS(obj, now);
     if (age === null) return skip(`${obj.metadata.name} has no creation time`);
-    if (age < graceS) return 'kept';
+    if (age < graceS) return { outcome: 'kept' };
   }
-  const first = await judge(deps, k, recordKey, gen);
-  if (first.keep) return first.why ? skip(first.why) : 'kept';
+  const v = await judge(deps, k, recordKey, gen, timeoutMs);
+  const lone = loneClaim(g);
+  const counted = !lone;
+  const missing = !v.keep && v.why === MISSING;
+  if (v.keep) return v.why ? { ...skip(v.why), counted } : { outcome: 'kept', counted };
+  // A claim already kept on a missing record: nothing else of it to delete, and it stays.
+  if (lone && missing) {
+    keptClaim(lone.metadata.name);
+    return { outcome: 'skipped' };
+  }
+  return { outcome: 'due', due: { g, k, recordKey, gen }, counted, missing };
+}
+
+/** The delete, on the owner's queue, after re-reading the objects and the record there. */
+async function sweepDue(
+  deps: ProvisionerDeps & { records: RecordStore },
+  d: DueGroup,
+  graceS: number,
+  timeoutMs: number,
+): Promise<'swept' | 'skipped' | 'kept'> {
+  const { k, recordKey, gen } = d;
+  const skip = (why: string) => {
+    console.error(`provisioner: orphan sweep skips workload ${k.wl}: ${why}`);
+    return 'skipped' as const;
+  };
+  // A throw here (a Redis read that timed out) ends this call, and serialized releases the queue.
   return serialized(k.own, async () => {
     // Again under the owner's queue, against fresh reads: a PUT or DELETE may have run since.
     const fresh: SweepGroup = { wl: k.wl, objects: [] };
@@ -1081,12 +1212,26 @@ async function sweepOne(
       const age = ageS(obj, nowOf(deps));
       if (age === null || age < graceS) return 'kept';
     }
-    const verdict = await judge(deps, k, recordKey, gen);
+    const verdict = await judge(deps, k, recordKey, gen, timeoutMs);
     if (verdict.keep) return verdict.why ? skip(verdict.why) : 'kept';
-    await removeWorkload(deps, k, (kind, name) =>
-      // Kind, name and reason only: never a token, a record or its owner.
-      console.log(`provisioner: orphan sweep deleted ${KIND_NAME[kind]} ${name} (${verdict.why})`),
+    // A missing record never deletes the claim: only an explicit deleted/deleting or another
+    // generation does (spec §6.2).
+    const keepClaim = verdict.why === MISSING;
+    let deleted = 0;
+    await removeWorkload(
+      deps,
+      k,
+      (kind, name) => {
+        deleted++;
+        // Kind, name and reason only: never a token, a record or its owner.
+        console.log(
+          `provisioner: orphan sweep deleted ${KIND_NAME[kind]} ${name} (${verdict.why})`,
+        );
+      },
+      keepClaim,
     );
-    return 'swept';
+    const claim = fresh.objects.find(({ kind }) => kind === 'persistentvolumeclaims');
+    if (keepClaim && claim) keptClaim(claim.obj.metadata.name);
+    return deleted > 0 ? 'swept' : 'kept';
   });
 }
