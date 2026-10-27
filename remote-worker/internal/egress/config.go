@@ -39,6 +39,7 @@ const (
 	envCredTokenFile   = "MOCA_EGRESS_CREDENTIALS_TOKEN_FILE"
 	envCredCA          = "MOCA_EGRESS_CREDENTIALS_CA"
 	envCredTimeout     = "MOCA_EGRESS_CREDENTIALS_TIMEOUT"
+	envNoneTTL         = "MOCA_EGRESS_NONE_TTL_S"
 	envCACertFile      = "MOCA_EGRESS_CA_CERT_FILE"
 	envCAKeyFile       = "MOCA_EGRESS_CA_KEY_FILE"
 	envUpstreamCA      = "MOCA_EGRESS_UPSTREAM_CA"
@@ -146,7 +147,7 @@ func ConfigFromEnv(get func(string) string) (Config, ControlConfig, error) {
 func credentialsFromEnv(get func(string) string, cfg *Config) error {
 	raw := strings.TrimSpace(get(envCredURL))
 	if raw == "" {
-		for _, n := range []string{envCredTokenFile, envCredCA, envCredTimeout, envCACertFile, envCAKeyFile, envUpstreamCA} {
+		for _, n := range []string{envCredTokenFile, envCredCA, envCredTimeout, envNoneTTL, envCACertFile, envCAKeyFile, envUpstreamCA} {
 			if strings.TrimSpace(get(n)) != "" {
 				return fmt.Errorf("%s is set but %s is not", n, envCredURL)
 			}
@@ -234,8 +235,15 @@ func credentialsFromEnv(get func(string) string, cfg *Config) error {
 			return fmt.Errorf("%s=%q: want a positive Go duration", envCredTimeout, v)
 		}
 	}
+	noneTTL, err := positiveSeconds(get, envNoneTTL, 60*time.Second)
+	if err != nil {
+		return err
+	}
+	if noneTTL < minTTL || noneTTL > maxTTL {
+		return fmt.Errorf("%s=%q: want 5-300 seconds", envNoneTTL, strings.TrimSpace(get(envNoneTTL)))
+	}
 	cp, err := NewCPCredentials(CPCredentialsOptions{
-		URL: raw, Token: strings.TrimSpace(string(tok)), RootCAs: roots, Timeout: timeout,
+		URL: raw, Token: strings.TrimSpace(string(tok)), RootCAs: roots, Timeout: timeout, NoneTTL: noneTTL,
 	})
 	if err != nil {
 		return fmt.Errorf("%s: %w", envCredURL, err)

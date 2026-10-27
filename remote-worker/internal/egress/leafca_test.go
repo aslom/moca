@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"net"
 	"strings"
@@ -25,6 +26,11 @@ type testCA struct {
 
 func newTestCA(t *testing.T, isCA bool) testCA {
 	t.Helper()
+	return newTestCAWindow(t, isCA, time.Now().Add(-time.Hour), time.Now().Add(48*time.Hour))
+}
+
+func newTestCAWindow(t *testing.T, isCA bool, notBefore, notAfter time.Time) testCA {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -32,8 +38,8 @@ func newTestCA(t *testing.T, isCA bool) testCA {
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
 		Subject:               pkix.Name{CommonName: "test ca"},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(48 * time.Hour),
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
 		BasicConstraintsValid: true,
 		IsCA:                  isCA,
@@ -164,5 +170,66 @@ func TestNewLeafCARefusesBadInput(t *testing.T) {
 		if strings.Contains(err.Error(), "PRIVATE KEY") || strings.Contains(err.Error(), string(good.keyPEM)) {
 			t.Errorf("%s: error carries key material: %v", name, err)
 		}
+	}
+}
+
+func TestNewLeafCARefusesOutOfWindowCA(t *testing.T) {
+	now := time.Now()
+	expired := newTestCAWindow(t, true, now.Add(-48*time.Hour), now.Add(-time.Hour))
+	future := newTestCAWindow(t, true, now.Add(time.Hour), now.Add(48*time.Hour))
+	for name, c := range map[string]testCA{"expired": expired, "not yet valid": future} {
+		_, err := NewLeafCA(c.certPEM, c.keyPEM, time.Now)
+		if err == nil {
+			t.Errorf("%s CA accepted", name)
+		} else if strings.Contains(err.Error(), "PRIVATE KEY") {
+			t.Errorf("%s: error carries key material", name)
+		}
+	}
+}
+
+func TestLeafNotAfterCappedAtCA(t *testing.T) {
+	now := time.Now()
+	ca := newTestCAWindow(t, true, now.Add(-time.Hour), now.Add(3*time.Hour))
+	l, err := NewLeafCA(ca.certPEM, ca.keyPEM, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := l.Leaf("a.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, _ := x509.ParseCertificate(c.Certificate[0])
+	if !leaf.NotAfter.Equal(ca.cert.NotAfter) {
+		t.Fatalf("leaf NotAfter %v, CA %v", leaf.NotAfter, ca.cert.NotAfter)
+	}
+}
+
+func TestLeafRefusedOnceCAExpires(t *testing.T) {
+	now := time.Now()
+	ca := newTestCAWindow(t, true, now.Add(-time.Hour), now.Add(2*time.Hour))
+	cur := now
+	l, err := NewLeafCA(ca.certPEM, ca.keyPEM, func() time.Time { return cur })
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur = now.Add(3 * time.Hour)
+	if _, err := l.Leaf("a.example"); err == nil {
+		t.Fatal("minted past CA expiry")
+	}
+}
+
+func TestLeafCacheBounded(t *testing.T) {
+	ca := newTestCA(t, true)
+	l, err := NewLeafCA(ca.certPEM, ca.keyPEM, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < maxLeafCache+20; i++ {
+		if _, err := l.Leaf(fmt.Sprintf("h%d.example", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := l.cached(); n > maxLeafCache {
+		t.Fatalf("cache = %d", n)
 	}
 }

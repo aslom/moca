@@ -17,6 +17,7 @@ import (
 )
 
 const (
+	maxLeafCache = 1024 // hosts held; the earliest-expiring leaf goes first
 	leafLifetime = 24 * time.Hour
 	// leafRefreshBefore is how long before expiry a cached leaf stops being
 	// handed out, so a connection never starts on a certificate about to lapse.
@@ -35,8 +36,9 @@ type LeafCA struct {
 }
 
 type leafEntry struct {
-	cert     *tls.Certificate
-	notAfter time.Time
+	cert      *tls.Certificate
+	notAfter  time.Time
+	refreshAt time.Time // when the entry stops being handed out
 }
 
 // NewLeafCA parses a CA certificate and its private key. It refuses a
@@ -59,6 +61,11 @@ func NewLeafCA(certPEM, keyPEM []byte, now func() time.Time) (*LeafCA, error) {
 	}
 	if cert.KeyUsage != 0 && cert.KeyUsage&x509.KeyUsageCertSign == 0 {
 		return nil, errors.New("the CA certificate may not sign certificates (keyCertSign is missing)")
+	}
+	if n := now(); n.Before(cert.NotBefore) {
+		return nil, errors.New("the CA certificate is not yet valid")
+	} else if !n.Before(cert.NotAfter) {
+		return nil, errors.New("the CA certificate has expired")
 	}
 	key, err := parseSigner(keyPEM)
 	if err != nil {
@@ -97,8 +104,11 @@ func (ca *LeafCA) Leaf(host string) (*tls.Certificate, error) {
 	ca.mu.Lock()
 	defer ca.mu.Unlock()
 	now := ca.now()
-	if e, ok := ca.cache[host]; ok && now.Before(e.notAfter.Add(-leafRefreshBefore)) {
+	if e, ok := ca.cache[host]; ok && now.Before(e.refreshAt) {
 		return e.cert, nil
+	}
+	if !now.Before(ca.cert.NotAfter) {
+		return nil, errors.New("egress: the interception CA has expired")
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -109,6 +119,11 @@ func (ca *LeafCA) Leaf(host string) (*tls.Certificate, error) {
 		return nil, err
 	}
 	notAfter := now.Add(leafLifetime)
+	refreshAt := notAfter.Add(-leafRefreshBefore)
+	if notAfter.After(ca.cert.NotAfter) {
+		// Never outlive the CA; a leaf capped here is good until then.
+		notAfter, refreshAt = ca.cert.NotAfter, ca.cert.NotAfter
+	}
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: host},
@@ -127,7 +142,18 @@ func (ca *LeafCA) Leaf(host string) (*tls.Certificate, error) {
 		return nil, errors.New("cannot sign a leaf certificate")
 	}
 	c := &tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
-	ca.cache[host] = &leafEntry{cert: c, notAfter: notAfter}
+	if _, ok := ca.cache[host]; !ok && len(ca.cache) >= maxLeafCache {
+		var oldest string
+		var oldestAt time.Time
+		first := true
+		for h, e := range ca.cache {
+			if first || e.notAfter.Before(oldestAt) {
+				oldest, oldestAt, first = h, e.notAfter, false
+			}
+		}
+		delete(ca.cache, oldest)
+	}
+	ca.cache[host] = &leafEntry{cert: c, notAfter: notAfter, refreshAt: refreshAt}
 	return c, nil
 }
 

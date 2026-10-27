@@ -259,3 +259,21 @@ func TestConfigNoCredentialsByDefault(t *testing.T) {
 		t.Fatalf("credentials = %T", cfg.Credentials)
 	}
 }
+
+func TestConfigNoneTTL(t *testing.T) {
+	for v, ok := range map[string]bool{"5": true, "60": true, "300": true, "4": false, "301": false, "0": false, "-1": false, "x": false} {
+		_, _, err := ConfigFromEnv(credEnv(t, map[string]string{"MOCA_EGRESS_NONE_TTL_S": v}))
+		if (err == nil) != ok {
+			t.Errorf("%q: err = %v", v, err)
+		} else if err != nil && !strings.Contains(err.Error(), "MOCA_EGRESS_NONE_TTL_S") {
+			t.Errorf("%q: error does not name the variable: %v", v, err)
+		}
+	}
+	cfg, _, err := ConfigFromEnv(credEnv(t, map[string]string{"MOCA_EGRESS_NONE_TTL_S": "90"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Credentials.(*CPCredentials).noneTTL; got != 90*time.Second {
+		t.Errorf("noneTTL = %v", got)
+	}
+}

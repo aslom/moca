@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -128,7 +129,13 @@ func (ic *tlsInterceptor) serve(pc *proxyConn, t target, addrs []netip.Addr, br 
 					DialAddr: c.dial, Decision: DecisionMisdirected}, true)
 				return nil, errors.New("egress: SNI does not match the CONNECT host")
 			}
-			return ic.ca.Leaf(t.host)
+			leaf, err := ic.ca.Leaf(t.host)
+			if err != nil {
+				// Handshake failure plus an audit event; never a panic.
+				pc.emit(Event{Host: t.host, Method: http.MethodConnect, Status: http.StatusBadGateway,
+					DialAddr: c.dial, Decision: DecisionLeafUnavailable}, true)
+			}
+			return leaf, err
 		},
 	})
 	defer func() {
@@ -283,9 +290,9 @@ func (c *icConn) next() bool {
 	}
 
 	scrubHeaders(req.Header)
-	// The guest only ever holds a placeholder: whatever it put in
-	// Authorization does not reach an intercepted upstream.
-	req.Header.Del("Authorization")
+	// An uncovered request gets ordinary scrubbing only (spec 5.2), so the
+	// guest's own Authorization passes. On a match, Set below overwrites a
+	// guest value of the same name.
 	if matched {
 		for _, h := range cred.Headers { // read-only: the slice is shared with the cache
 			req.Header.Set(h.Name, h.Value)
@@ -302,9 +309,11 @@ func (c *icConn) exchange(req *http.Request, ev Event) bool {
 	pc := c.pc
 	guestClose := req.Close
 	// The upstream sees the checked target as Host, whatever the guest said.
+	// The control plane's parseDestination refuses IPv6 literals in phase 1;
+	// the bracketing is here so a later phase cannot send a bare "::1" Host.
 	req.Host = c.t.host
-	if c.t.port != 443 {
-		req.Host = net.JoinHostPort(c.t.host, itoa(int(c.t.port)))
+	if c.t.port != 443 || strings.Contains(c.t.host, ":") {
+		req.Host = net.JoinHostPort(c.t.host, strconv.Itoa(int(c.t.port)))
 	}
 	req.Close = false
 	req.Trailer = nil
@@ -374,9 +383,9 @@ func (c *icConn) exchange(req *http.Request, ev Event) bool {
 			if r.err != nil {
 				stop()
 				ev.BytesUp = bytesUp.Load()
-				ev.Status, ev.Decision = http.StatusBadGateway, DecisionUpstreamUnreachable
-				ev.Credential = ""
-				return c.refuse(Event{Status: ev.Status, Decision: ev.Decision}, ev)
+				// The request did carry the token: ev.Credential stays and the
+				// Decision names the failure.
+				return c.refuse(Event{Status: http.StatusBadGateway, Decision: DecisionUpstreamUnreachable}, ev)
 			}
 			if r.resp.StatusCode == http.StatusContinue {
 				if _, err := io.WriteString(c.gtls, "HTTP/1.1 100 Continue\r\n\r\n"); err != nil {
@@ -471,18 +480,4 @@ func (g *expectGate) Read(p []byte) (int, error) {
 		return 0, g.err
 	}
 	return g.ReadCloser.Read(p)
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var b [8]byte
-	i := len(b)
-	for n > 0 {
-		i--
-		b[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(b[i:])
 }

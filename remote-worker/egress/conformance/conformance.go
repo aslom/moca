@@ -42,6 +42,7 @@ const (
 	EnvCredentialsTokenFile = "MOCA_EGRESS_CREDENTIALS_TOKEN_FILE"
 	EnvCredentialsCA        = "MOCA_EGRESS_CREDENTIALS_CA"
 	EnvCredentialsTimeout   = "MOCA_EGRESS_CREDENTIALS_TIMEOUT"
+	EnvNoneTTL              = "MOCA_EGRESS_NONE_TTL_S"
 	EnvCACertFile           = "MOCA_EGRESS_CA_CERT_FILE"
 	EnvCAKeyFile            = "MOCA_EGRESS_CA_KEY_FILE"
 	EnvUpstreamCA           = "MOCA_EGRESS_UPSTREAM_CA"

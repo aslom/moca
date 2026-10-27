@@ -153,6 +153,11 @@ func TestLookupRejectsMalformedElement(t *testing.T) {
 		"dotdot":         el("443", `"/a/../b"`, h1),
 		"trailing slash": el("443", `"/a/"`, h1),
 		"not json":       `"x"`,
+		"name a/b":       el("443", `"/"`, `[{"name":"a/b","value":"v"}]`),
+		"name too long":  el("443", `"/"`, `[{"name":"`+strings.Repeat("a", 65)+`","value":"v"}]`),
+		"proxy- prefix":  el("443", `"/"`, `[{"name":"Proxy-Foo","value":"v"}]`),
+		"x-moca- prefix": el("443", `"/"`, `[{"name":"X-Moca-Vm","value":"v"}]`),
+		"duplicate name": el("443", `"/"`, `[{"name":"X-A","value":"1"},{"name":"x-a","value":"2"}]`),
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -365,5 +370,124 @@ func TestNewCPCredentialsURLRules(t *testing.T) {
 	}
 	if _, err := NewCPCredentials(CPCredentialsOptions{URL: "https://cp.example"}); err == nil {
 		t.Error("empty token accepted")
+	}
+}
+
+func TestLookupRefusesCPRefusedHeaderNames(t *testing.T) {
+	for _, n := range []string{"host", "Connection", "content-length", "Transfer-Encoding", "TE", "trailer",
+		"upgrade", "Keep-Alive", "Cookie", "set-cookie"} {
+		t.Run(n, func(t *testing.T) {
+			el := fmt.Sprintf(`{"name":"n","port":443,"pathPrefix":"/","headers":[{"name":%q,"value":"v"}],"expiresAt":null}`, n)
+			f := newCPFake(t, okBody(60, gh+","+el))
+			c := f.client(t, nil)
+			for i := 0; i < 2; i++ {
+				if _, err := c.Lookup(context.Background(), cl1, "x.example"); err == nil {
+					t.Fatal("want error")
+				}
+			}
+			if f.calls.Load() != 2 {
+				t.Fatalf("calls = %d, error was cached", f.calls.Load())
+			}
+		})
+	}
+}
+
+func TestLookupDropsExpiredElements(t *testing.T) {
+	clk := &clock{t: time.Unix(1000, 0)}
+	at := func(d time.Duration) string {
+		return `"expiresAt":"` + clk.now().Add(d).UTC().Format(time.RFC3339) + `"`
+	}
+	with := func(name string, d time.Duration) string {
+		return fmt.Sprintf(`{"name":%q,"port":443,"pathPrefix":"/%s","headers":[{"name":"X-A","value":"v"}],%s}`, name, name, at(d))
+	}
+	t.Run("kept alongside", func(t *testing.T) {
+		f := newCPFake(t, okBody(60, with("old", 3*time.Second)+","+with("past", -time.Hour)+","+with("live", time.Hour)))
+		set, err := f.client(t, clk).Lookup(context.Background(), cl1, "x.example")
+		if err != nil || len(set) != 1 || set[0].Name != "live" {
+			t.Fatalf("set = %v err = %v", set, err)
+		}
+	})
+	t.Run("all dropped is an empty set cached at the floor", func(t *testing.T) {
+		f := newCPFake(t, okBody(60, with("old", 2*time.Second)))
+		c := f.client(t, clk)
+		for i := 0; i < 2; i++ {
+			set, err := c.Lookup(context.Background(), cl1, "x.example")
+			if err != nil || len(set) != 0 {
+				t.Fatalf("set = %v err = %v", set, err)
+			}
+		}
+		if f.calls.Load() != 1 {
+			t.Fatalf("calls = %d", f.calls.Load())
+		}
+		clk.add(6 * time.Second)
+		_, _ = c.Lookup(context.Background(), cl1, "x.example")
+		if f.calls.Load() != 2 {
+			t.Fatalf("not expired at the floor, calls = %d", f.calls.Load())
+		}
+	})
+}
+
+func TestLookupNoneTTLs(t *testing.T) {
+	notFound := func(body string) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(404); fmt.Fprint(w, body) }
+	}
+	// refetchAfter reports whether a second lookup after d hits the control plane again.
+	refetchAfter := func(t *testing.T, body string, d time.Duration) bool {
+		f := newCPFake(t, notFound(body))
+		clk := &clock{t: time.Unix(1000, 0)}
+		c := f.client(t, clk)
+		_, _ = c.Lookup(context.Background(), cl1, "x.example")
+		clk.add(d)
+		_, _ = c.Lookup(context.Background(), cl1, "x.example")
+		return f.calls.Load() == 2
+	}
+	if refetchAfter(t, `{"error":"no_credential"}`, 59*time.Second) {
+		t.Error("no_credential expired before NoneTTL")
+	}
+	if !refetchAfter(t, `{"error":"no_credential"}`, 61*time.Second) {
+		t.Error("no_credential outlived NoneTTL")
+	}
+	if refetchAfter(t, `{"error":"sandbox_not_found"}`, 4*time.Second) {
+		t.Error("sandbox_not_found expired before the floor")
+	}
+	if !refetchAfter(t, `{"error":"sandbox_not_found"}`, 6*time.Second) {
+		t.Error("sandbox_not_found pinned past the floor")
+	}
+	if !refetchAfter(t, `{"error":"no_credential","ttlSeconds":10}`, 11*time.Second) {
+		t.Error("ttlSeconds not honoured")
+	}
+	if refetchAfter(t, `{"error":"no_credential","ttlSeconds":10}`, 9*time.Second) {
+		t.Error("ttlSeconds not honoured (early)")
+	}
+	if refetchAfter(t, `{"error":"no_credential","ttlSeconds":9999}`, 299*time.Second) {
+		t.Error("ttlSeconds not clamped high")
+	}
+	if !refetchAfter(t, `{"error":"no_credential","ttlSeconds":9999}`, 301*time.Second) {
+		t.Error("ttlSeconds not clamped high (late)")
+	}
+	if !refetchAfter(t, `{"error":"no_credential","ttlSeconds":1}`, 6*time.Second) {
+		t.Error("ttlSeconds not clamped low")
+	}
+}
+
+func TestNewCPCredentialsURLRefusals(t *testing.T) {
+	for _, u := range []string{
+		"https://user:pw@cp.example", "https://user@cp.example", "https://cp.example?x=1",
+		"https://cp.example/?", "https://cp.example#frag", "https://cp.example/api", "https://cp.example/a/",
+	} {
+		_, err := NewCPCredentials(CPCredentialsOptions{URL: u, Token: "t"})
+		if err == nil {
+			t.Errorf("%q accepted", u)
+		} else if strings.Contains(err.Error(), "pw") {
+			t.Errorf("%q: error echoes userinfo: %v", u, err)
+		}
+	}
+	for _, u := range []string{"https://cp.example", "https://cp.example/", "https://cp.example:8443"} {
+		c, err := NewCPCredentials(CPCredentialsOptions{URL: u, Token: "t"})
+		if err != nil {
+			t.Errorf("%q: %v", u, err)
+		} else if !strings.HasSuffix(c.endpoint, "/v1/egress/credential") || strings.Contains(c.endpoint, "//v1") {
+			t.Errorf("endpoint = %s", c.endpoint)
+		}
 	}
 }

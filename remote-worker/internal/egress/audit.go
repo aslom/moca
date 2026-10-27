@@ -27,6 +27,7 @@ const (
 	DecisionPlaintextCredential   = "plaintext_credential"
 	DecisionUpstreamUnverified    = "upstream_unverified"
 	DecisionMisdirected           = "misdirected_request"
+	DecisionLeafUnavailable       = "leaf_unavailable"
 	// DecisionAuditDropped reports events an async sink could not queue. It
 	// carries no VM: the drops may span VMs, and Dropped says how many.
 	DecisionAuditDropped = "audit_dropped"

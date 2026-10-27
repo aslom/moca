@@ -386,10 +386,9 @@ func TestInterceptSelectsByPrefix(t *testing.T) {
 		t.Fatalf("/jira/y headers %v", h)
 	}
 	e.get(g, "/docs", "Authorization: Bearer guest-own", "X-Api-Key: guest-key")
-	if h := e.up.last(t).Header; h.Get("Authorization") != "" || h.Get("X-Api-Key") == "" {
-		// A request no element matches is forwarded with nothing injected. The
-		// guest's own Authorization must not reach upstream; only the proxy and
-		// moca headers are scrubbed, so an ordinary X-Api-Key passes.
+	if h := e.up.last(t).Header; h.Get("Authorization") != "Bearer guest-own" || h.Get("X-Api-Key") != "guest-key" {
+		// A request no element matches is forwarded with nothing injected and
+		// ordinary scrubbing only (spec 5.2): the guest's own headers pass.
 		t.Fatalf("/docs headers %v", h)
 	}
 	ev := e.h.sink.waitEvent(t, DecisionForward)
@@ -671,5 +670,38 @@ func TestInterceptIdleGuestEnds(t *testing.T) {
 	g.expectClosed()
 	if d := time.Since(start); d > 2*time.Second {
 		t.Fatalf("idle conn lived %v", d)
+	}
+}
+
+func TestInterceptUncoveredKeepsGuestAuthorization(t *testing.T) {
+	e := newICEnv(t, icOpts{})
+	e.pol.Set(e.cred("gh", "/github", authHdr("Bearer real")))
+	g := e.open()
+	if resp, _ := e.get(g, "/other", "Authorization: Bearer own"); resp.StatusCode != 200 {
+		t.Fatal(resp.StatusCode)
+	}
+	if got := e.up.last(t).Header.Values("Authorization"); len(got) != 1 || got[0] != "Bearer own" {
+		t.Fatalf("upstream Authorization %q", got)
+	}
+}
+
+func TestInterceptUpstreamClosesAfterInjectionKeepsCredentialInAudit(t *testing.T) {
+	e := newICEnv(t, icOpts{})
+	e.up.custom = func(w http.ResponseWriter, r *http.Request) {
+		hj, _ := w.(http.Hijacker)
+		c, _, err := hj.Hijack()
+		if err == nil {
+			c.Close()
+		}
+	}
+	e.pol.Set(e.cred("gh", "/", authHdr("Bearer real")))
+	g := e.open()
+	g.raw(e.reqLine("GET", "/x"))
+	ev := e.h.sink.waitEvent(t, DecisionUpstreamUnreachable)
+	if ev.Credential != "gh" {
+		t.Fatalf("event %+v", ev)
+	}
+	if strings.Contains(e.h.sink.jsonText(), "Bearer real") {
+		t.Fatal("audit leaked a value")
 	}
 }

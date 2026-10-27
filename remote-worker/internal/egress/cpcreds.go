@@ -50,7 +50,7 @@ type CPCredentialsOptions struct {
 	Token   string         // the egress token
 	RootCAs *x509.CertPool // nil = system roots
 	Timeout time.Duration  // per call, default 3s
-	NoneTTL time.Duration  // how long a 404 is cached, default 60s
+	NoneTTL time.Duration  // how long no_credential is cached, default 60s (sandbox_not_found: the 5s floor)
 	Now     func() time.Time
 }
 
@@ -91,6 +91,19 @@ func NewCPCredentials(o CPCredentialsOptions) (*CPCredentials, error) {
 	if err != nil || u.Host == "" {
 		return nil, errors.New("credentials URL is not a valid URL")
 	}
+	// Refused by shape only; nothing from the URL is echoed (it may carry userinfo).
+	if u.User != nil {
+		return nil, errors.New("credentials URL must not carry userinfo")
+	}
+	if u.RawQuery != "" || u.ForceQuery {
+		return nil, errors.New("credentials URL must not carry a query")
+	}
+	if u.Fragment != "" || strings.Contains(o.URL, "#") {
+		return nil, errors.New("credentials URL must not carry a fragment")
+	}
+	if u.Path != "" && u.Path != "/" {
+		return nil, errors.New("credentials URL must not carry a path")
+	}
 	switch {
 	case u.Scheme == "https":
 	case u.Scheme == "http" && u.Hostname() == "127.0.0.1":
@@ -117,7 +130,7 @@ func NewCPCredentials(o CPCredentialsOptions) (*CPCredentials, error) {
 		TLSHandshakeTimeout: o.Timeout,
 	}
 	return &CPCredentials{
-		endpoint: strings.TrimRight(o.URL, "/") + "/v1/egress/credential",
+		endpoint: u.JoinPath("v1", "egress", "credential").String(),
 		token:    o.Token,
 		timeout:  o.Timeout,
 		noneTTL:  o.NoneTTL,
@@ -243,10 +256,20 @@ func (c *CPCredentials) fetch(k cpKey) ([]Credential, time.Duration, error) {
 		return c.decode(raw)
 	case http.StatusNotFound:
 		var e struct {
-			Error string `json:"error"`
+			Error      string `json:"error"`
+			TTLSeconds *int   `json:"ttlSeconds"`
 		}
 		if json.Unmarshal(raw, &e) == nil && (e.Error == "no_credential" || e.Error == "sandbox_not_found") {
-			return nil, c.noneTTL, nil
+			// A sandbox that has only just become ready must not be pinned to
+			// "none": sandbox_not_found lives for the floor only.
+			ttl := c.noneTTL
+			if e.Error == "sandbox_not_found" {
+				ttl = minTTL
+			}
+			if e.TTLSeconds != nil { // forward-compatible: honour the server's word
+				ttl = clampTTL(*e.TTLSeconds)
+			}
+			return nil, ttl, nil
 		}
 	}
 	return nil, 0, fmt.Errorf("credential lookup: control plane answered %d", resp.StatusCode)
@@ -258,12 +281,9 @@ func (c *CPCredentials) decode(raw []byte) ([]Credential, time.Duration, error) 
 		return nil, 0, errors.New("credential lookup: undecodable response")
 	}
 	now := c.now()
-	ttl := time.Duration(w.TTLSeconds) * time.Second
-	if w.TTLSeconds > int(maxTTL/time.Second) { // also guards overflow
-		ttl = maxTTL
-	}
-	ttl = max(minTTL, min(ttl, maxTTL))
+	ttl := clampTTL(w.TTLSeconds)
 	out := make([]Credential, 0, len(w.Credentials))
+	dropped := false
 	for i, e := range w.Credentials {
 		cred := Credential{Name: e.Name, PathPrefix: e.PathPrefix, Subject: w.Subject, Port: e.Port}
 		if err := validElement(e); err != nil {
@@ -278,6 +298,12 @@ func (c *CPCredentials) decode(raw []byte) ([]Credential, time.Duration, error) 
 				return nil, 0, fmt.Errorf("credential lookup: element %d: bad expiresAt", i)
 			}
 			if !t.IsZero() {
+				// An element that lapses within the floor is dropped, not
+				// refused: the rest of the set stands (spec 4.2).
+				if t.Before(now.Add(minTTL)) {
+					dropped = true
+					continue
+				}
 				cred.ExpiresAt = t
 				if rem := t.Sub(now); rem < ttl {
 					ttl = rem
@@ -286,19 +312,59 @@ func (c *CPCredentials) decode(raw []byte) ([]Credential, time.Duration, error) 
 		}
 		out = append(out, cred)
 	}
+	if dropped && len(out) == 0 {
+		ttl = minTTL // everything lapsed: an empty set, rechecked at the floor
+	}
 	return out, ttl, nil
 }
 
-// validElement mirrors the control plane's write-time grammar, so a bad
+// clampTTL turns a wire TTL in seconds into a duration within [minTTL, maxTTL].
+func clampTTL(sec int) time.Duration {
+	if sec > int(maxTTL/time.Second) { // also guards overflow
+		return maxTTL
+	}
+	return max(minTTL, time.Duration(sec)*time.Second)
+}
+
+// refusedHeaders mirrors REFUSED_HEADERS in
+// packages/control-plane/src/egress-binding.ts. Keep the two in step.
+var refusedHeaders = map[string]bool{
+	"host": true, "connection": true, "content-length": true, "transfer-encoding": true,
+	"te": true, "trailer": true, "upgrade": true, "keep-alive": true, "cookie": true, "set-cookie": true,
+}
+
+// validHeaderName mirrors HEADER_RE and checkHeader in egress-binding.ts.
+func validHeaderName(n string) bool {
+	if len(n) < 1 || len(n) > 64 {
+		return false
+	}
+	for i := 0; i < len(n); i++ {
+		c := n[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-') {
+			return false
+		}
+	}
+	l := strings.ToLower(n)
+	return !refusedHeaders[l] && !strings.HasPrefix(l, "proxy-") && !strings.HasPrefix(l, "x-moca-")
+}
+
+// validElement mirrors the control plane's write-time grammar
+// (packages/control-plane/src/egress-binding.ts: checkEgressBindings), so a bad
 // stored value can never become a selection the proxy trusts. Errors never
 // echo a header value.
 func validElement(e wireCredential) error {
 	if n := len(e.Headers); n < 1 || n > maxHeaders {
 		return fmt.Errorf("%d headers (want 1-%d)", n, maxHeaders)
 	}
+	seen := make(map[string]bool, len(e.Headers))
 	for _, h := range e.Headers {
-		if h.Name == "" || strings.ContainsAny(h.Name, "\r\n\x00: \t") {
+		if !validHeaderName(h.Name) {
 			return errors.New("invalid header name")
+		}
+		if l := strings.ToLower(h.Name); seen[l] {
+			return errors.New("duplicate header name")
+		} else {
+			seen[l] = true
 		}
 		if strings.ContainsAny(h.Value, "\r\n\x00") {
 			return errors.New("invalid header value")
