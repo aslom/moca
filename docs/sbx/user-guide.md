@@ -123,8 +123,12 @@ opencode run "Fix the failing test and run the suite"
 
 ```bash
 npm install -g @openai/codex
-codex --version        # 0.163.0 or later
+codex --version
 ```
+
+`mocactl sbx codex` needs a Codex that takes `-c` and `--disable`, which 0.163.0 and 0.164.0 do
+(those are the versions it was tested against). `codex mcp list` inside a repository is the quick
+check: if it errors on the flags, upgrade.
 
 **Give it credentials.** This is Codex's own account, nothing to do with your sandbox-service
 login — `mocactl sbx login` does not authenticate Codex, and Codex never sees your sandbox token.

@@ -102,8 +102,15 @@ describe('mocactl sbx codex (#593)', () => {
 
   it('refuses --json: a TUI prints none, and a caller parsing stdout would get the TUI', async () => {
     const { home, env, io } = setup();
-    const code = await sbxMain(['codex', '--sandbox', SBX, '--json'], env, io, { home });
+    const c = fakeCodex();
+    const code = await sbxMain(['codex', '--sandbox', SBX, '--json'], env, io, {
+      home,
+      codex: c.deps,
+    });
     expect(code).toBe(2);
+    // The CLI's own NO_JSON guard, before dispatch: codex is never started.
+    expect(io.errs.join('\n')).toMatch(/codex has no --json output/);
+    expect(c.calls).toEqual([]);
   });
 
   it('builds the override as TOML that codex -c parses, naming the mcp server it starts', () => {

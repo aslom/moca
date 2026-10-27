@@ -64,12 +64,9 @@ export async function cmdCodex(
   deps: CodexDeps = {},
   sandboxId?: string,
 ): Promise<number> {
+  // `--json` is refused before dispatch: `codex` is in the CLI's NO_JSON set, since a TUI
+  // prints none and a caller parsing stdout would get the TUI.
   const args = codexArgs(rest, sandboxId);
-  if (deps.spawnCodex === undefined && c.json) {
-    // A TUI's output is not JSON, and callers of --json parse stdout.
-    c.io.err('sbx: codex does not support --json');
-    return SBX_EXIT.usage;
-  }
   const child: CodexChild = deps.spawnCodex
     ? deps.spawnCodex(args)
     : spawn('codex', args, { stdio: 'inherit' });
