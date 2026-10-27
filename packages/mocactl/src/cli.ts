@@ -1,3 +1,4 @@
+import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { parseOptionFlags } from './core/session-options.js';
 import type { CredentialConsumer } from './api/types.js';
@@ -19,7 +20,7 @@ import {
 } from './headless.js';
 import { buildRuntime, ensureRuntimeAuth, type Runtime } from './runtime.js';
 import { sbxMain } from './sbx/cli.js';
-import { cmdGet, cmdSpawn, cmdSubagents, runSpawnWorker } from './subagent.js';
+import { cmdGet, cmdSpawn, cmdSubagents, MAX_PROMPT_BYTES, runSpawnWorker } from './subagent.js';
 import { WORKLOAD_MOUNTS, type WorkloadMount } from './api/workloads.js';
 import { cmdWorkloadCreate, cmdWorkloadDelete, cmdWorkloadGet } from './workloads.js';
 import { VERSION } from './version.js';
@@ -50,6 +51,8 @@ export const USAGE = `usage:
                                                  fork a detached subagent (solve needs --repo/--ref;
                                                  --label names one dispatch within a --tag group,
                                                  surfaced on 'mocactl subagents --json' as label)
+  mocactl spawn --prompt-file FILE [...]         read the prompt from FILE (UTF-8, trimmed); use when
+                                                 the prompt would otherwise be awkward on argv
   mocactl spawn "prompt" --kind prompt --workload ID [--writable] [...]
                                                  run the subagent on a workload's context
                                                  (--writable: its own copy, discarded after)
@@ -151,6 +154,7 @@ export async function main(
         name: { type: 'string' },
         sandboxes: { type: 'string' },
         mount: { type: 'string' },
+        'prompt-file': { type: 'string' },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'V' },
       },
@@ -222,6 +226,10 @@ export async function main(
   }
   if (values.writable !== undefined && command !== 'spawn') {
     io.err(`--writable only applies to \`mocactl spawn\`\n${USAGE}`);
+    return 2;
+  }
+  if (values['prompt-file'] !== undefined && command !== 'spawn') {
+    io.err(`--prompt-file only applies to \`mocactl spawn\`\n${USAGE}`);
     return 2;
   }
   if (values.writable && values.workload === undefined) {
@@ -342,10 +350,55 @@ export async function main(
       });
     }
     case 'spawn': {
-      const prompt = rest.join(' ').trim();
-      if (!prompt) {
-        io.err(`spawn needs a prompt\n${USAGE}`);
-        return 2;
+      const promptFile = values['prompt-file'];
+      let prompt: string;
+      if (promptFile !== undefined) {
+        if (rest.length > 0) {
+          io.err(`--prompt-file and an inline prompt cannot be used together\n${USAGE}`);
+          return 2;
+        }
+        // Open once, stat and read the same fd. O_NOFOLLOW refuses symlinks so a swapped
+        // path cannot redirect the read elsewhere between stat and read (CodeQL CWE-367).
+        // O_NONBLOCK keeps open() from parking on a FIFO with no writer; the isFile() check
+        // then refuses it like any other non-regular file.
+        let fd: number | undefined;
+        try {
+          fd = openSync(
+            promptFile,
+            fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+          );
+          const st = fstatSync(fd);
+          if (!st.isFile()) {
+            io.err(`--prompt-file: ${promptFile} is not a regular file`);
+            return 2;
+          }
+          if (st.size > MAX_PROMPT_BYTES) {
+            io.err(`--prompt-file: ${promptFile} is ${st.size} bytes; max is ${MAX_PROMPT_BYTES}`);
+            return 2;
+          }
+          prompt = readFileSync(fd, 'utf8').trim();
+        } catch (err) {
+          const code = (err as NodeJS.ErrnoException).code;
+          if (code === 'ELOOP') {
+            io.err(`--prompt-file: ${promptFile} is a symlink; pass the target path`);
+          } else {
+            io.err(`--prompt-file: cannot read ${promptFile}: ${(err as Error).message}`);
+          }
+          return 2;
+        } finally {
+          // readFileSync(fd) leaves the fd open; close it on every exit path.
+          if (fd !== undefined) closeSync(fd);
+        }
+        if (!prompt) {
+          io.err(`--prompt-file: ${promptFile} has no prompt content (empty or whitespace-only)`);
+          return 2;
+        }
+      } else {
+        prompt = rest.join(' ').trim();
+        if (!prompt) {
+          io.err(`spawn needs a prompt\n${USAGE}`);
+          return 2;
+        }
       }
       const kind = values.kind;
       if (kind !== 'prompt' && kind !== 'solve') {
