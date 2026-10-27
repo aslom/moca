@@ -23,6 +23,7 @@ import {
 } from './commands.js';
 import { cmdDoctor } from './doctor.js';
 import { type ExecFactory } from './exec.js';
+import { cmdCodex, type CodexDeps } from './codex.js';
 import { cmdMcp, cmdPut, cmdRun, parseTimeout, workspacePath } from './run.js';
 import { PushError, repoRoot } from './push.js';
 import { findSandboxFile, readBinding, readBoundSandbox, SANDBOX_ID_RE } from './state.js';
@@ -54,6 +55,12 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  the sandbox token's lifetime minus 60 s)
   mocactl sbx put PATH [--sandbox ID]            write stdin to PATH under /workspace
   mocactl sbx mcp [--sandbox ID]                 the stdio MCP server for Claude Code / OpenCode
+  mocactl sbx codex [-- CODEX_ARGS ...]          run Codex CLI on this sandbox's MCP tools, for one
+                                                 run (-c, nothing written: Codex reads no
+                                                 project-local config, so up cannot configure it).
+                                                 Its shell tool is off, but unified_exec cannot be
+                                                 disabled, so local execution is restricted, not
+                                                 denied: use Codex's own sandbox_mode as well
   mocactl sbx up [--template T] [--name N] [--include-secrets] [--max-push MiB] [--no-agent-config] [--cortex]
                                                  in a git repository: create or reuse its sandbox,
                                                  push the working tree, bind it in .sbx/sandbox.json,
@@ -100,6 +107,8 @@ export interface SbxDeps {
   agentop?: AgentopExec;
   /** `mcp`'s transport (default stdio). */
   mcpTransport?: Transport;
+  /** `codex`'s child process (default: the `codex` on PATH). */
+  codex?: CodexDeps;
   /** `login`'s clipboard and browser; absent when nobody is at this machine's screen. */
   loginHelpers?: LoginHelpers;
 }
@@ -206,7 +215,18 @@ export async function openSbx(
 }
 
 /** The commands with no --json output (R5i): refused with exit 2 rather than ignored. */
-const NO_JSON = new Set(['login', 'logout', 'env', 'run', 'put', 'mcp', 'up', 'push', 'pull']);
+const NO_JSON = new Set([
+  'login',
+  'logout',
+  'env',
+  'run',
+  'put',
+  'mcp',
+  'codex',
+  'up',
+  'push',
+  'pull',
+]);
 /** The commands that open without the login check: they log in, out, or check it themselves (R7). */
 const OWN_LOGIN = new Set(['login', 'logout', 'doctor']);
 /** The commands that act on one sandbox: `[ID]` as an argument (or `--sandbox ID`). */
@@ -216,6 +236,7 @@ const TAKES_SANDBOX_FLAG = new Set([
   'run',
   'put',
   'mcp',
+  'codex',
   'push',
   'pull',
   'doctor',
@@ -325,6 +346,7 @@ export async function sbxMain(
     'run',
     'put',
     'mcp',
+    'codex',
     'up',
     'push',
     'pull',
@@ -387,7 +409,9 @@ export async function sbxMain(
   // `run` takes everything after the command (after `--`) as CMD; `put` exactly one PATH; rm, token
   // and env at most one ID; every other command no argument at all.
   const argsOk =
+    // run quotes its CMD; codex forwards its own flags and prompt to the child.
     command === 'run' ||
+    command === 'codex' ||
     (command === 'put'
       ? arg !== undefined && extra.length === 0
       : extra.length === 0 && (arg === undefined || TAKES_ID_ARG.has(command)));
@@ -557,6 +581,19 @@ export async function sbxMain(
       return cmdPut(ctx, id!, target!, content!, deps.execFactory);
     case 'mcp':
       return cmdMcp(ctx, id!, deps.mcpTransport, deps.execFactory);
+    case 'codex':
+      // Only an explicit --sandbox is passed on: without one, the `mocactl sbx mcp` that codex
+      // starts resolves the binding itself, so the agent follows .sbx/sandbox.json as it changes.
+      // --control-plane-url is forwarded (as the normalized ctx.url) because codex does not give
+      // the server its environment, so the server cannot see MOCACTL_SBX_URL or the flag (#639
+      // review); FORWARDED_ENV carries the env-var case.
+      return cmdCodex(
+        ctx,
+        positionals.slice(1),
+        deps.codex ?? {},
+        values.sandbox,
+        values['control-plane-url'] !== undefined ? ctx.url : undefined,
+      );
     case 'up':
       return cmdUp(
         ctx,
