@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { CpError } from '../src/errors.js';
 import { HANDLERS, type CpDeps, type RequestCtx } from '../src/handlers.js';
+import { InMemoryCredentialStore } from '../src/credential-store.js';
 import { makeDeps, ctx, alice, bob, codeOf } from './helpers/deps.js';
 
 const body = (over: Record<string, unknown> = {}) => ({
@@ -221,5 +222,69 @@ describe('DELETE /v1/credentials/{name}', () => {
         ),
       ),
     ).toBe('invalid_request');
+  });
+});
+
+describe('sandbox profile', () => {
+  const egressDeps = (): CpDeps => {
+    const base = makeDeps().config.sandbox!;
+    return makeDeps({
+      credentials: new InMemoryCredentialStore(),
+      config: {
+        routeProfile: 'sandbox',
+        sandbox: {
+          ...base,
+          egress: {
+            hosts: [{ id: 'kvm', workers: ['sbx_default'], token: 'a'.repeat(64) }], // notsecret
+            ttlSeconds: 60,
+          },
+        },
+      },
+    });
+  };
+  const outsider = {
+    sub: 'github:5555',
+    tenant: 'github:5555',
+    roles: [],
+    scope: ['api'],
+  } as unknown as typeof alice;
+
+  it('refuses a non-sandbox-egress consumer', async () =>
+    expect(
+      await codeOf(() =>
+        HANDLERS.putCredential!(
+          ctx({ principal: alice, params: { name: 'gh' }, body: body({ consumer: 'inference' }) }),
+          egressDeps(),
+        ),
+      ),
+    ).toBe('invalid_request'));
+
+  it('refuses an unenrolled subject on all three routes', async () => {
+    for (const op of ['putCredential', 'listCredentials', 'deleteCredential'])
+      expect(
+        await codeOf(() =>
+          HANDLERS[op]!(
+            ctx({ principal: outsider, params: { name: 'gh' }, body: body() }),
+            egressDeps(),
+          ),
+        ),
+      ).toBe('not_enrolled');
+  });
+
+  it('stores and lists only sandbox-egress credentials', async () => {
+    const d = egressDeps();
+    await HANDLERS.putCredential!(
+      ctx({ principal: alice, params: { name: 'gh' }, body: body() }),
+      d,
+    );
+    const stored = (await d.credentials.get('github:1234', 'gh'))!;
+    await d.credentials.put('github:1234', {
+      ...stored,
+      descriptor: { ...stored.descriptor, name: 'inf', consumer: 'inference' },
+    });
+    const r = await HANDLERS.listCredentials!(ctx({ principal: alice }), d);
+    expect((r.body as { credentials: { name: string }[] }).credentials.map((c) => c.name)).toEqual([
+      'gh',
+    ]);
   });
 });

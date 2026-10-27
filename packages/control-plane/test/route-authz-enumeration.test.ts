@@ -133,6 +133,18 @@ describe('sandbox-scoped routes (SBX0 §5.1)', () => {
     expect(scoped.every((r) => r.path.startsWith('/v1/sandboxes/{id}'))).toBe(true);
   });
 
+  it('sets requiresEgress only on the egress routes', () => {
+    expect(
+      ROUTES.filter((r) => r.requiresEgress)
+        .map((r) => `${r.method} ${r.path}`)
+        .sort(),
+    ).toEqual([
+      'DELETE /v1/credentials/{name}',
+      'GET /v1/credentials',
+      'PUT /v1/credentials/{name}',
+    ]);
+  });
+
   it('refuses the janitor route without the janitor bearer', async () => {
     const janitor = ROUTES.filter((r) => r.auth === 'janitor');
     expect(janitor.length).toBe(1);

@@ -84,6 +84,7 @@ export function buildHandler(deps: CpDeps): (req: IncomingMessage, res: ServerRe
         req.method ?? '',
         req.url ?? '',
         deps.config.routeProfile ?? 'harness',
+        { egress: deps.config.sandbox?.egress !== undefined },
       );
       if (!matched) {
         res.writeHead(404, JSON_HEADERS).end(JSON.stringify({ error: 'not_found' }));

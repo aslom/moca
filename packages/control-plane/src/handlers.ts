@@ -21,7 +21,13 @@ import {
 } from './bundle-budget.js';
 import { type AuditLog, defaultAuditLog } from './audit-log.js';
 import { CpError } from './errors.js';
-import { asRecord, auditBestEffort, isAdmin, seconds } from './handler-util.js';
+import {
+  asRecord,
+  auditBestEffort,
+  isAdmin,
+  requireEnrolledPrincipal,
+  seconds,
+} from './handler-util.js';
 import { subjectHash } from './subject-document.js';
 import {
   resolveInferenceName,
@@ -794,7 +800,8 @@ export const HANDLERS: Record<string, Handler> = {
    * fact.
    */
   putCredential: async (ctx, deps) => {
-    const p = requirePrincipal(ctx);
+    const sandbox = deps.config.routeProfile === 'sandbox';
+    const p = sandbox ? requireEnrolledPrincipal(ctx, deps.config) : requirePrincipal(ctx);
     const name = validateCredentialName(ctx.params.name ?? '');
     if (name === OPERATOR_FALLBACK_NAME) {
       // The audit names the operator's key this way (exchange.ts, createSession): a subject's own
@@ -802,6 +809,12 @@ export const HANDLERS: Record<string, Handler> = {
       throw new CpError('invalid_request', `credential name '${name}' is reserved`);
     }
     const cred = parseCredentialBody(name, ctx.body);
+    if (sandbox && cred.descriptor.consumer !== 'sandbox-egress') {
+      throw new CpError(
+        'invalid_request',
+        'the sandbox service stores only consumer: sandbox-egress credentials',
+      );
+    }
     await deps.credentials.put(p.sub, cred);
     await auditBestEffort(deps, 'putCredential', `credential=${name}`, {
       subject: p.sub,
@@ -813,10 +826,12 @@ export const HANDLERS: Record<string, Handler> = {
 
   /** Metadata only, and it decrypts nothing: the descriptor lives in annotations (spec §6.2). */
   listCredentials: async (ctx, deps) => {
-    const p = requirePrincipal(ctx);
+    const sandbox = deps.config.routeProfile === 'sandbox';
+    const p = sandbox ? requireEnrolledPrincipal(ctx, deps.config) : requirePrincipal(ctx);
     // No ?owner= is read here. Listing another user's credential NAMES is not a privilege MU1
     // grants, and not reading the parameter is what stops it becoming one by accident.
-    const descriptors = await deps.credentials.list(p.sub);
+    const all = await deps.credentials.list(p.sub);
+    const descriptors = sandbox ? all.filter((d) => d.consumer === 'sandbox-egress') : all;
     return {
       status: 200,
       body: {
@@ -833,7 +848,10 @@ export const HANDLERS: Record<string, Handler> = {
   },
 
   deleteCredential: async (ctx, deps) => {
-    const p = requirePrincipal(ctx);
+    const p =
+      deps.config.routeProfile === 'sandbox'
+        ? requireEnrolledPrincipal(ctx, deps.config)
+        : requirePrincipal(ctx);
     const name = validateCredentialName(ctx.params.name ?? '');
     await deps.credentials.delete(p.sub, name);
     await auditBestEffort(deps, 'deleteCredential', `credential=${name}`, {
