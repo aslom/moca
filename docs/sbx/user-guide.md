@@ -127,8 +127,20 @@ codex --version
 ```
 
 `mocactl sbx codex` needs a Codex that takes `-c` and `--disable`, which 0.163.0 and 0.164.0 do
-(those are the versions it was tested against). `codex mcp list` inside a repository is the quick
-check: if it errors on the flags, upgrade.
+(those are the versions it was tested against). To check your own, pass both and see the server
+listed:
+
+```bash
+codex -c 'mcp_servers.sandbox={command="mocactl",args=["sbx","mcp"]}' --disable shell_tool mcp list
+```
+
+```
+Name     Command  Args     Env  Cwd  Status   Auth
+sandbox  mocactl  sbx mcp  -    -    enabled  Unsupported
+```
+
+If it errors on the flags, upgrade. (`Auth Unsupported` is expected: the sandbox server does not
+use MCP's own authentication.)
 
 **Give it credentials.** This is Codex's own account, nothing to do with your sandbox-service
 login — `mocactl sbx login` does not authenticate Codex, and Codex never sees your sandbox token.
@@ -176,6 +188,14 @@ yourself, that is:
 ```bash
 codex -c 'mcp_servers.sandbox={command="mocactl",args=["sbx","mcp"]}' --disable shell_tool
 ```
+
+Codex does not give a stdio MCP server its own environment — the server sees only Codex's
+allowlist (`HOME`, `PATH`, `SHELL`, `LANG`, `TMPDIR`, the `NODE_EXTRA_CA_CERTS` family, …) and
+whatever the server asks for. `mocactl sbx codex` therefore asks for `MOCACTL_SBX_URL`,
+`XDG_CONFIG_HOME` and `XDG_STATE_HOME`, so the server reads the same login and talks to the same
+control plane as you do, and forwards `--control-plane-url` when you pass one. Anything else you
+set in your shell does not reach it; Claude Code and OpenCode pass everything, so this is specific
+to Codex.
 
 A session looks like this — every call through the sandbox, your tree untouched until you pull:
 

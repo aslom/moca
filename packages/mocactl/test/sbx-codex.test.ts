@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { codexArgs, serverOverride } from '../src/sbx/codex.js';
+import { codexArgs, FORWARDED_ENV, serverOverride } from '../src/sbx/codex.js';
 import { sbxMain } from '../src/sbx/cli.js';
-import { fakeCp, SBX, setup, TOKEN } from './helpers/sbx.js';
+import { fakeCp, SBX, setup, TOKEN, URL_ } from './helpers/sbx.js';
 
 /** A stand-in for the `codex` child: records its argv, then reports an exit code or an error. */
 function fakeCodex(outcome: { code?: number; err?: NodeJS.ErrnoException } = { code: 0 }) {
@@ -42,12 +42,8 @@ describe('mocactl sbx codex (#593)', () => {
     expect(code).toBe(0);
     expect(c.calls).toHaveLength(1);
     // --sandbox is forwarded to the mcp server codex starts, not dropped.
-    expect(c.calls[0]).toEqual([
-      '-c',
-      `mcp_servers.sandbox={command="mocactl",args=["sbx","mcp","--sandbox","${SBX}"]}`,
-      '--disable',
-      'shell_tool',
-    ]);
+    expect(c.calls[0]).toEqual(['-c', serverOverride(SBX), '--disable', 'shell_tool']);
+    expect(c.calls[0]?.[1]).toContain(`"--sandbox","${SBX}"`);
   });
 
   it("passes the caller's own arguments through, after ours, so theirs win", async () => {
@@ -113,13 +109,45 @@ describe('mocactl sbx codex (#593)', () => {
     expect(c.calls).toEqual([]);
   });
 
+  it('asks codex to forward the environment the mcp server needs, since codex passes none', () => {
+    // Codex gives a stdio server only its own allowlist, so without env_vars the server would
+    // read a different login and target a different control plane than the launcher (#639 review).
+    expect(FORWARDED_ENV).toEqual(['MOCACTL_SBX_URL', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME']);
+    for (const name of FORWARDED_ENV) expect(serverOverride()).toContain(`"${name}"`);
+    expect(serverOverride()).toContain(
+      'env_vars=["MOCACTL_SBX_URL","XDG_CONFIG_HOME","XDG_STATE_HOME"]',
+    );
+  });
+
+  it('forwards --control-plane-url to the server, which cannot see the flag or the env var', async () => {
+    const { home, env, io } = setup();
+    const c = fakeCodex();
+    await sbxMain(['codex', '--sandbox', SBX, '--control-plane-url', URL_], env, io, {
+      home,
+      fetchImpl: mint().fetchImpl,
+      codex: c.deps,
+    });
+    expect(c.calls[0]?.[1]).toContain(`"--control-plane-url","${URL_}"`);
+  });
+
+  it('leaves --control-plane-url out when it was not given, so the server resolves it as usual', async () => {
+    const { home, env, io } = setup();
+    const c = fakeCodex();
+    await sbxMain(['codex', '--sandbox', SBX], env, io, {
+      home,
+      fetchImpl: mint().fetchImpl,
+      codex: c.deps,
+    });
+    expect(c.calls[0]?.[1]).not.toContain('--control-plane-url');
+  });
+
   it('builds the override as TOML that codex -c parses, naming the mcp server it starts', () => {
     // With no id, `mocactl sbx mcp` resolves the binding itself: none is baked in.
-    expect(serverOverride()).toBe('mcp_servers.sandbox={command="mocactl",args=["sbx","mcp"]}');
-    expect(serverOverride()).not.toMatch(/--sandbox/);
-    expect(serverOverride(SBX)).toBe(
-      `mcp_servers.sandbox={command="mocactl",args=["sbx","mcp","--sandbox","${SBX}"]}`,
+    expect(serverOverride()).toMatch(
+      /^mcp_servers\.sandbox=\{command="mocactl",args=\["sbx","mcp"\]/,
     );
+    expect(serverOverride()).not.toMatch(/--sandbox/);
+    expect(serverOverride(SBX)).toContain(`args=["sbx","mcp","--sandbox","${SBX}"]`);
     expect(codexArgs([])).toEqual(['-c', serverOverride(), '--disable', 'shell_tool']);
   });
 });

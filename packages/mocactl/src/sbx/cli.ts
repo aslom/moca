@@ -584,7 +584,16 @@ export async function sbxMain(
     case 'codex':
       // Only an explicit --sandbox is passed on: without one, the `mocactl sbx mcp` that codex
       // starts resolves the binding itself, so the agent follows .sbx/sandbox.json as it changes.
-      return cmdCodex(ctx, positionals.slice(1), deps.codex ?? {}, values.sandbox);
+      // --control-plane-url is forwarded (as the normalized ctx.url) because codex does not give
+      // the server its environment, so the server cannot see MOCACTL_SBX_URL or the flag (#639
+      // review); FORWARDED_ENV carries the env-var case.
+      return cmdCodex(
+        ctx,
+        positionals.slice(1),
+        deps.codex ?? {},
+        values.sandbox,
+        values['control-plane-url'] !== undefined ? ctx.url : undefined,
+      );
     case 'up':
       return cmdUp(
         ctx,
