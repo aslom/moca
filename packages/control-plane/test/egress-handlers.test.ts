@@ -255,6 +255,48 @@ describe('lookupEgressCredential', () => {
     );
   });
 
+  it('refuses a duplicate (port, prefix) even when a same-length prefix sorts between them', async () => {
+    await d.credentials.put(ALICE, cred('a', 'bearer', ['dup.corp/aa'], { token: 'x' })); // notsecret
+    await d.credentials.put(ALICE, cred('b', 'bearer', ['dup.corp/bb'], { token: 'x' })); // notsecret
+    await d.credentials.put(ALICE, cred('c', 'bearer', ['dup.corp/aa'], { token: 'x' })); // notsecret
+    expect(await codeOf(() => call(d, KVM, { sandbox: sbxA, host: 'dup.corp' }))).toBe(
+      'destination_ambiguous',
+    );
+  });
+
+  it('drops a credential deleted between list and get, keeping the survivor', async () => {
+    await d.credentials.put(ALICE, cred('gone', 'bearer', ['race.corp/x'], { token: 'x' })); // notsecret
+    await d.credentials.put(ALICE, cred('kept', 'bearer', ['race.corp/y'], { token: 'y' })); // notsecret
+    const real = d.credentials.get.bind(d.credentials);
+    vi.spyOn(d.credentials, 'get').mockImplementation(async (o, n) =>
+      n === 'gone' ? null : real(o, n),
+    );
+    const r = await call(d, KVM, { sandbox: sbxA, host: 'race.corp' });
+    expect((r.body as Body).credentials.map((x) => x.name)).toEqual(['kept']);
+  });
+
+  it('answers no_credential, audited, when the only credential vanishes mid-flight', async () => {
+    await d.credentials.put(ALICE, cred('gone', 'bearer', ['race.corp'], { token: 'x' })); // notsecret
+    vi.spyOn(d.credentials, 'get').mockResolvedValue(null);
+    expect(await codeOf(() => call(d, KVM, { sandbox: sbxA, host: 'race.corp' }))).toBe(
+      'no_credential',
+    );
+    expect(d.logLines).toContainEqual(
+      expect.objectContaining({ decision: 'egress_credential_none', destination: 'race.corp' }),
+    );
+  });
+
+  it('decrypts a credential once when two of its entries match the host', async () => {
+    await d.credentials.put(
+      ALICE,
+      cred('two', 'bearer', ['twice.corp/a', 'twice.corp/b'], { token: 'x' }), // notsecret
+    );
+    const spy = vi.spyOn(d.credentials, 'get');
+    const r = await call(d, KVM, { sandbox: sbxA, host: 'twice.corp' });
+    expect((r.body as Body).credentials).toHaveLength(2);
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
   it('caps ttlSeconds at the earliest expiresAt (resolver seam)', async () => {
     seam.stub = async (): Promise<ResolvedHeaders> => ({
       headers: [{ name: 'Authorization', value: 'Bearer z' }],
@@ -281,8 +323,8 @@ describe('lookupEgressCredential', () => {
     );
     const s = (await d.credentials.get(ALICE, 'svc'))!;
     const out = await staticResolver(ALICE, s.descriptor, d);
-    expect(out.expiresAt).toBeNull();
-    expect(out.headers).toEqual([{ name: 'Authorization', value: 'Bearer T3' }]);
+    expect(out!.expiresAt).toBeNull();
+    expect(out!.headers).toEqual([{ name: 'Authorization', value: 'Bearer T3' }]);
   });
 
   it('refuses a bad sandbox id or host before touching the store', async () => {

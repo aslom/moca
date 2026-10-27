@@ -349,6 +349,15 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
   const signer = makeSigner(env.SH_SESSION_TOKEN_PRIVATE_KEY!);
   const client = createClient(redisClientOptions(env.REDIS_URL ?? 'redis://127.0.0.1:6379'));
   const sandboxProfile = config.routeProfile === 'sandbox';
+  if (
+    sandboxProfile &&
+    config.sandbox?.egress &&
+    (!env.SH_CREDENTIAL_STORE || env.SH_CREDENTIAL_STORE === 'kubernetes')
+  ) {
+    throw new Error(
+      'SH_CREDENTIAL_STORE must be file or vault on the sandbox profile with egress credentials (it has no Kubernetes API access)',
+    );
+  }
   // Without a listener an 'error' event is an uncaught exception and the process exits. The message
   // only: node-redis socket errors name host:port, never userinfo, and the error object itself is not
   // logged in case some future one carries the URL (the test checks the password never appears).

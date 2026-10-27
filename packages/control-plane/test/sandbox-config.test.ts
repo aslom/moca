@@ -217,6 +217,51 @@ describe('the sandbox profile deps (SBX0 §4.1)', () => {
     }
   });
 
+  describe('credential store on the sandbox profile with egress', () => {
+    const egressEnv = (over: Record<string, string | undefined>) =>
+      env({
+        REDIS_URL: 'redis://127.0.0.1:1',
+        SH_EGRESS_HOSTS: '[{"id":"kvm","workers":["sbx_default"]}]',
+        SH_CREDENTIAL_KEK: Buffer.alloc(32, 1).toString('base64'), // notsecret
+        SH_EGRESS_TOKEN_KVM: 'a'.repeat(64), // notsecret
+        ...over,
+      });
+    const REFUSAL =
+      'SH_CREDENTIAL_STORE must be file or vault on the sandbox profile with egress credentials (it has no Kubernetes API access)';
+
+    it.each([
+      ['unset', undefined],
+      ['empty', ''],
+      ['kubernetes', 'kubernetes'],
+    ])('refuses at boot when SH_CREDENTIAL_STORE is %s', (_n, value) => {
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        expect(() => depsFromEnv(egressEnv({ SH_CREDENTIAL_STORE: value }))).toThrow(REFUSAL);
+      } finally {
+        errors.mockRestore();
+      }
+    });
+
+    it('accepts file, and vault (only that the refusal does not fire; no vault call is made)', async () => {
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const dir = mkdtempSync(join(tmpdir(), 'egress-cs-'));
+      try {
+        const f = depsFromEnv(egressEnv({ SH_CREDENTIAL_STORE: 'file', SH_CREDENTIAL_DIR: dir }));
+        await f.close?.();
+        const v = depsFromEnv(
+          egressEnv({
+            SH_CREDENTIAL_STORE: 'vault',
+            VAULT_ADDR: 'https://vault:8200',
+            VAULT_TOKEN: 'tok', // notsecret
+          }),
+        );
+        await v.close?.();
+      } finally {
+        errors.mockRestore();
+      }
+    });
+  });
+
   it('fails closed on every credential call, rather than answering "no credentials"', async () => {
     const s: CredentialStore = new UnavailableCredentialStore();
     const calls: (() => Promise<unknown>)[] = [

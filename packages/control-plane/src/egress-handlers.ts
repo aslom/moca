@@ -82,26 +82,38 @@ export const EGRESS_HANDLERS: Record<string, Handler> = {
       }
     }
     if (elements.length === 0) return none();
+    // Order: port asc, prefix length desc, prefix string asc, name asc (fully deterministic).
+    const cmp = (x: string, y: string): number => (x < y ? -1 : x > y ? 1 : 0);
     elements.sort(
       (x, y) =>
         x.port - y.port ||
         y.pathPrefix.length - x.pathPrefix.length ||
-        (x.name < y.name ? -1 : x.name > y.name ? 1 : 0),
+        cmp(x.pathPrefix, y.pathPrefix) ||
+        cmp(x.name, y.name),
     );
-    for (let i = 1; i < elements.length; i++) {
-      if (
-        elements[i]!.port === elements[i - 1]!.port &&
-        elements[i]!.pathPrefix === elements[i - 1]!.pathPrefix
-      ) {
+    // Detection must not depend on sort order: a same-length prefix can sort between duplicates.
+    const seen = new Set<string>();
+    for (const e of elements) {
+      const key = `${e.port} ${e.pathPrefix}`;
+      if (seen.has(key)) {
         throw new CpError('destination_ambiguous', 'two credentials hold the same destination');
       }
+      seen.add(key);
     }
 
     // 4. Resolve and render (the seam).
     let earliest: number | null = null;
     const credentials = [];
+    const resolved = new Map<string, Awaited<ReturnType<ReturnType<typeof resolverFor>>>>();
+    const kept: Element[] = [];
     for (const e of elements) {
-      const r = await resolverFor(e.descriptor)(owner, e.descriptor, deps);
+      // One decrypt per credential per lookup, however many entries of it match the host.
+      if (!resolved.has(e.name)) {
+        resolved.set(e.name, await resolverFor(e.descriptor)(owner, e.descriptor, deps));
+      }
+      const r = resolved.get(e.name);
+      if (!r) continue; // deleted between list and get: omit this element
+      kept.push(e);
       if (r.expiresAt !== null && (earliest === null || r.expiresAt < earliest)) {
         earliest = r.expiresAt;
       }
@@ -113,6 +125,7 @@ export const EGRESS_HANDLERS: Record<string, Handler> = {
         expiresAt: r.expiresAt === null ? null : new Date(r.expiresAt * 1000).toISOString(),
       });
     }
+    if (kept.length === 0) return none();
     const ttlSeconds = Math.max(
       MIN_TTL_S,
       earliest === null
@@ -125,7 +138,7 @@ export const EGRESS_HANDLERS: Record<string, Handler> = {
       subject: owner,
       sandboxId,
       decision: 'egress_credential_issued',
-      credential: [...new Set(elements.map((e) => e.name))].join(','),
+      credential: [...new Set(kept.map((e) => e.name))].join(','),
       destination: requested,
       egressHost: host.id,
     });

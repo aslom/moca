@@ -15,20 +15,20 @@ export interface ResolvedHeaders {
  * nor the handler.
  *
  * CONTRACT: never return a value with less than 5 s left (the ttlSeconds floor). Refresh it, or
- * throw/omit the element. Otherwise the floor would let moca-egress send a header for up to 5 s
+ * throw, or return null to omit the element (the credential vanished between list and get). Otherwise the floor would let moca-egress send a header for up to 5 s
  * after it expired. Refresh material never leaves the control plane.
  */
 export type EgressResolver = (
   owner: string,
   d: CredentialDescriptor,
   deps: CpDeps,
-) => Promise<ResolvedHeaders>;
+) => Promise<ResolvedHeaders | null>;
 
 /** Phase 1's only resolver: decrypt with deps.credentials.get, then renderBindings; expiresAt null. */
 export const staticResolver: EgressResolver = async (owner, d, deps) => {
   const stored = await deps.credentials.get(owner, d.name);
-  // Deleted between the list and this read: the owner has no such credential any more.
-  if (!stored) throw new CpError('no_credential', 'no credential for this destination');
+  // Deleted between the list and this read: omit the element rather than fail the lookup.
+  if (!stored) return null;
   try {
     // A stored binding must still satisfy the write-time rules; never send a malformed header.
     checkEgressBindings(stored.descriptor.binding, kindSpec(stored.descriptor.kind).secretFields);
