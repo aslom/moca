@@ -52,14 +52,15 @@ export const runAgentop: AgentopExec = (args, timeoutMs) =>
 
 /**
  * Why this agentop cannot do what Cortex mode needs, or undefined when it can: `agentop vX.Y.Z` at
- * least AGENTOP_MIN_VERSION, or a development build (`agentop dev`, `agentop dev-<rev>`).
+ * least AGENTOP_MIN_VERSION, a development build (`agentop dev`, `agentop dev-<rev>`), or a build
+ * from Cortex's main channel (`agentop main-<sha7>`, from `install.sh --ref=main`).
  */
 export async function agentopProblem(exec: AgentopExec = runAgentop): Promise<string | undefined> {
   const r = await exec(['--version'], QUICK_TIMEOUT_MS);
   if (r.code === null)
     return `${r.stderr}; Cortex mode needs Cortex v${AGENTOP_MIN_VERSION} or later`;
   const line = r.stdout.trim().split('\n')[0] ?? '';
-  if (/^agentop dev(-\S+)?$/.test(line)) return undefined;
+  if (/^agentop (dev(-\S+)?|main-[0-9a-f]+)$/.test(line)) return undefined;
   const m = /^agentop v(\d+)\.(\d+)\.(\d+)/.exec(line);
   if (!m) return `agentop --version answered ${JSON.stringify(line)}, which is not a version`;
   const have = [Number(m[1]), Number(m[2]), Number(m[3])];

@@ -27,6 +27,8 @@ describe('agentop for Cortex mode', () => {
     ['agentop v1.0.0-rc.1\n', undefined],
     ['agentop dev\n', undefined],
     ['agentop dev-1a2b3c4\n', undefined],
+    // A build from Cortex's main channel (install.sh --ref=main): release-binaries.yaml stamps main-<sha7>.
+    ['agentop main-2aa7c81\n', undefined],
     ['agentop v0.9.2\n', 'v0.9.2; Cortex mode needs v0.9.3 or later'],
     ['agentop v0.8.9\n', 'v0.8.9; Cortex mode needs v0.9.3 or later'],
     ['something else\n', 'which is not a version'],
