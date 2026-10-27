@@ -62,6 +62,7 @@ export function egressConfigFromEnv(
   const known = new Set(templates.map((t) => t.worker));
   const ids = new Set<string>();
   const claimed = new Set<string>();
+  const tokenOwner = new Map<string, string>(); // token -> the host variable that holds it
   const hosts = parsed.map((h: unknown, i): EgressHost => {
     const where = `SH_EGRESS_HOSTS[${i}]`;
     const o = (typeof h === 'object' && h !== null ? h : {}) as Record<string, unknown>;
@@ -89,6 +90,11 @@ export function egressConfigFromEnv(
     if (token === undefined || !TOKEN_RE.test(token)) {
       throw new Error(`${name} is required and must be 64 lowercase hex characters`);
     }
+    const other = tokenOwner.get(token);
+    if (other !== undefined) {
+      throw new Error(`${other} and ${name} hold the same token: each KVM host needs its own`);
+    }
+    tokenOwner.set(token, name);
     return { id: o.id, workers: o.workers as string[], token };
   });
 

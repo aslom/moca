@@ -1,6 +1,5 @@
-import type { CredentialDescriptor } from './credential-store.js';
+import { kindSpec, type CredentialDescriptor } from './credential-store.js';
 import { checkEgressBindings, renderBindings } from './egress-binding.js';
-import { kindSpec } from './credential-store.js';
 import { CpError } from './errors.js';
 import type { CpDeps } from './handlers.js';
 

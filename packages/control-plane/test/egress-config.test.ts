@@ -78,6 +78,26 @@ describe('egressConfigFromEnv (SBX0.2b)', () => {
     expect(msg).not.toContain(T('a'));
   });
 
+  it('refuses two hosts holding the same token, naming both ids and never the token', () => {
+    let msg = '';
+    try {
+      egressConfigFromEnv(
+        {
+          ...on,
+          SH_EGRESS_HOSTS:
+            '[{"id":"a","workers":["sbx_default"]},{"id":"b","workers":["sbx_other"]}]',
+          SH_EGRESS_TOKEN_A: T('c'),
+          SH_EGRESS_TOKEN_B: T('c'),
+        },
+        [...templates, { id: 'o', worker: 'sbx_other', description: '', tools: [] }],
+      );
+    } catch (e) {
+      msg = (e as Error).message;
+    }
+    expect(msg).toMatch(/SH_EGRESS_TOKEN_A and SH_EGRESS_TOKEN_B hold the same token/);
+    expect(msg).not.toContain(T('c'));
+  });
+
   it('maps a host id to its token variable', () =>
     expect(egressTokenEnvName('kvm-1')).toBe('SH_EGRESS_TOKEN_KVM_1'));
 });

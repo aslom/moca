@@ -125,7 +125,7 @@ export const EGRESS_HANDLERS: Record<string, Handler> = {
       subject: owner,
       sandboxId,
       decision: 'egress_credential_issued',
-      credential: elements.map((e) => e.name).join(','),
+      credential: [...new Set(elements.map((e) => e.name))].join(','),
       destination: requested,
       egressHost: host.id,
     });

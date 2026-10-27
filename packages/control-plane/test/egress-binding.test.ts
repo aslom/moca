@@ -46,6 +46,21 @@ describe('renderBindings', () => {
   });
 });
 
+describe('credential_unsafe message', () => {
+  it.each(['a\nb', 'sekret\r'])('never carries the rendered value %j', (bad) => {
+    let msg = '';
+    try {
+      renderBindings({ header: 'X-API-Key', format: '{key}' }, { key: bad });
+    } catch (e) {
+      msg = (e as Error).message;
+    }
+    expect(msg).toMatch(/credential_unsafe/);
+    expect(msg).not.toContain(bad);
+    expect(msg).not.toContain('sekret');
+    expect(msg).not.toContain('a\nb');
+  });
+});
+
 describe('bindingList', () => {
   it('wraps a single binding', () =>
     expect(bindingList({ header: 'A', format: '{t}' })).toEqual([{ header: 'A', format: '{t}' }]));

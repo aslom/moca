@@ -171,6 +171,18 @@ describe('lookupEgressCredential', () => {
     expect(c[1]!.headers).toHaveLength(2);
   });
 
+  it('audits a credential once when two of its entries match the host', async () => {
+    await d.credentials.put(
+      ALICE,
+      cred('twice', 'bearer', ['dup.corp/a', 'dup.corp/b'], { token: 'T4' }), // notsecret
+    );
+    const r = await call(d, KVM, { sandbox: sbxA, host: 'dup.corp' });
+    expect((r.body as Body).credentials.map((x) => x.name)).toEqual(['twice', 'twice']);
+    expect(d.logLines).toContainEqual(
+      expect.objectContaining({ decision: 'egress_credential_issued', credential: 'twice' }),
+    );
+  });
+
   it('carries the port', async () =>
     expect(
       ((await call(d, KVM, { sandbox: sbxA, host: 'svc.corp' })).body as Body).credentials[0]!.port,
@@ -320,7 +332,10 @@ describe('POST /v1/egress/credential through the router', () => {
     const other = await post(base, KVM2.token);
     expect(other.status).toBe(404);
     expect(await other.json()).toMatchObject({ error: 'sandbox_not_found' });
-    expect((await post(base, KVM2.token, sbxB)).status).toBe(404); // bob not enrolled? sbxB owner 9999 enrolled, no creds
+    // KVM2's own sandbox, but its owner is not enrolled: no_credential, not sandbox_not_found.
+    const own = await post(base, KVM2.token, sbxB);
+    expect(own.status).toBe(404);
+    expect(await own.json()).toMatchObject({ error: 'no_credential' });
   });
 
   it('answers 401 unauthorized to no bearer, a wrong bearer, a user API token and the janitor token', async () => {
