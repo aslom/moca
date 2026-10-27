@@ -39,15 +39,15 @@ moca/
 
 ## Key Commands
 
-| Task                | Command                                                            |
-| ------------------- | ------------------------------------------------------------------ |
-| Install deps        | `pnpm install`                                                     |
-| Build pi-fork types | `cd pi-fork && npm ci && npm run build`                            |
-| Lint                | `make lint`                                                        |
-| Format              | `make fmt`                                                         |
-| Test (all)          | `make test`                                                        |
-| Typecheck           | `make typecheck`                                                   |
-| Pre-commit install  | `pre-commit install --hook-type pre-commit --hook-type commit-msg` |
+| Task                | Command                                 |
+| ------------------- | --------------------------------------- |
+| Install deps        | `pnpm install`                          |
+| Build pi-fork types | `cd pi-fork && npm ci && npm run build` |
+| Lint                | `make lint`                             |
+| Format              | `make fmt`                              |
+| Test (all)          | `make test`                             |
+| Typecheck           | `make typecheck`                        |
+| Pre-commit install  | `pre-commit install`                    |
 
 ## Development Setup
 
@@ -63,7 +63,7 @@ cd pi-fork && npm ci && npm run build && cd ..
 pnpm install
 
 # Install pre-commit hooks
-pre-commit install --hook-type pre-commit --hook-type commit-msg
+pre-commit install
 ```
 
 ## Code Style
@@ -107,8 +107,6 @@ Use `Assisted-By` (not `Co-Authored-By`) for AI attribution:
 
 Never add `Co-authored-by`, `Made-with`, or similar trailers that GitHub parses as
 co-authorship. A `commit-msg` hook in `scripts/hooks/commit-msg` enforces this
-automatically (it rewrites AI co-author trailers to `Assisted-By`); install it via:
-
-```sh
-pre-commit install --hook-type pre-commit --hook-type commit-msg
-```
+automatically (it rewrites AI co-author trailers to `Assisted-By`); the standard
+`pre-commit install` sets it up via `default_install_hook_types` in
+`.pre-commit-config.yaml`.
