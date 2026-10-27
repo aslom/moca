@@ -559,6 +559,18 @@ the snapshot (P4 §5.2).
    in time: one guest could hold all 32 of its slots, and an upstream socket each in a process every
    VM shares, for the VM's lifetime. An expiry is an ordinary end of connection — no new audit
    decision value, and the `tunnel` event still carries its byte counts.
+
+   The bound is on the **connection**, not on one socket's one direction: a byte on either leg pushes
+   out both legs' deadlines, because traffic is routinely one-way for long stretches and a per-leg
+   bound would expire mid-transfer on a healthy `git clone`. Which deadlines a byte vouches for is
+   per path — a tunnel is opaque, so any byte keeps the whole of it alive, while the forward path
+   knows the directions apart and keeps them honest: relaying a response proves the guest is
+   _reading_, which must not excuse a request body it promised and never sent.
+   `MOCA_EGRESS_RESPONSE_HEADER_TIMEOUT_S` defaults to the idle bound rather than tighter, since the
+   slot is bounded without it and an upstream legitimately slow to its first header byte — an
+   inference endpoint, a forge packing a repo — would otherwise get a surprise `502`. P4.1 amendment
+   9 carries the full reasoning.
+
 3. **Destination, on the CONNECT target.**
    - The host must be on the operator's allowlist (`MOCA_EGRESS_ALLOW`, Z5 E4), else
      `403 destination_denied` naming the host — never a timeout (P4.1 §8).
@@ -942,7 +954,7 @@ variable until then.
 | `MOCA_EGRESS_MAX_CONNS_PER_VM`          | `moca-egress`                          | `32`                       | per-VM (or per-container) concurrent connections                                                 |
 | `MOCA_EGRESS_MAX_REQUESTS_PER_SESSION`  | `moca-egress`                          | `10000`                    | Z5's hard per-session cap                                                                        |
 | `MOCA_EGRESS_IDLE_TIMEOUT_S`            | `moca-egress`                          | `300`                      | idle bound on an established connection, refreshed per byte (§8.5)                               |
-| `MOCA_EGRESS_RESPONSE_HEADER_TIMEOUT_S` | `moca-egress`                          | `30`                       | how long a forwarded request waits for its response headers (§8.5)                               |
+| `MOCA_EGRESS_RESPONSE_HEADER_TIMEOUT_S` | `moca-egress`                          | the idle bound             | how long a forwarded request waits for its response headers (§8.5)                               |
 | `MOCA_RELAY_EXEC_TOKEN`                 | relay, workers                         | —, required                | worker credential for `SandboxExec` (R5); an environment variable in S1, a file per §6.7 from S2 |
 | `MOCA_RELAY_EXEC_ADDR`                  | relay                                  | unset ⇒ one listener       | binds `SandboxExec` on its own listener, split from attach (R5)                                  |
 | `MOCA_RELAY_EXEC_PORT`                  | compose                                | `9444`                     | exec listener port, brain-side only                                                              |

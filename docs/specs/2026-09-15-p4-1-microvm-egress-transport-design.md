@@ -37,12 +37,38 @@
 > 9. _Added 2026-10-26 (#585, the second #583 review follow-up)._ An established connection is bounded
 >    in time: `MOCA_EGRESS_IDLE_TIMEOUT_S` (default `300`) closes a connection on which no byte has
 >    moved, on the tunnel and the forward path alike and in either direction, and
->    `MOCA_EGRESS_RESPONSE_HEADER_TIMEOUT_S` (default `30`) bounds the wait for a forwarded request's
->    response headers. The idle bound is refreshed per byte, not armed once, so a transfer of any
->    duration survives — a `git clone` of a large repo must not die because it was slow. The default
->    matches squid's `request_timeout` and is a judgement about real upstreams, not a measured result;
->    the knob exists so an operator who disagrees can move it. Zero is rejected rather than read as "no
->    bound".
+>    `MOCA_EGRESS_RESPONSE_HEADER_TIMEOUT_S` (which defaults to the idle bound) bounds the wait for a
+>    forwarded request's response headers. The idle bound is refreshed per byte, not armed once, so a
+>    transfer of any duration survives — a `git clone` of a large repo must not die because it was slow.
+>    The default matches squid's `request_timeout` and is a judgement about real upstreams, not a
+>    measured result; the knob exists so an operator who disagrees can move it. Zero is rejected rather
+>    than read as "no bound".
+>
+>    **The bound is on the connection, not on one socket's one direction.** A socket deadline is per
+>    direction of one socket, so a byte arriving on one leg has to push out the deadlines on both: real
+>    traffic is frequently one-way for long stretches — during a `git clone` the guest sends nothing for
+>    as long as the pack takes to stream down — and a per-leg bound would expire mid-transfer on exactly
+>    the healthy transfer the refresh exists to protect.
+>
+>    Which deadlines one byte vouches for is **per path**, because only the forward path can tell the
+>    directions apart. A tunnel is opaque, so any byte either way keeps the whole thing alive. On the
+>    forward path, relaying a response to a guest proves the guest is _reading_ and must not excuse a
+>    request body the guest promised and never sent, so a response write refreshes the guest's write
+>    deadline only. Request-body reads, by contrast, do carry the upstream conn: `http.Transport` has
+>    its read loop blocked on that conn from the dial, so during a slow upload the guest side is the
+>    only place anything is happening.
+>
+>    No watchdog goroutine enforces this. A socket deadline applies to calls already blocked in
+>    `Read`/`Write`, so writing the clock through to the sockets _is_ the enforcement — which also keeps
+>    every expiry an ordinary timeout error rather than the `ErrClosed` a `Close` would produce, and
+>    adds no per-connection goroutine to a process every VM on the host shares.
+>
+>    `MOCA_EGRESS_RESPONSE_HEADER_TIMEOUT_S` defaults to the idle bound rather than to something
+>    tighter. The slot is already bounded without it — the idle clock covers the upstream conn from the
+>    dial — so a tighter default would buy no safety while turning legitimate slow thinking into a
+>    `502`: a plain-HTTP inference endpoint, or a forge packing a large repo, can take minutes before
+>    its first header byte. An operator who would rather fail fast sets it below the idle bound, and
+>    raising only the idle bound carries this one with it, so no tighter bound is left hiding behind it.
 >
 >    **This is a transport-layer time bound, not a Z5 policy change,** which §3 reserves "budget and
 >    cap" to. It adds no quota, meters nothing and denies nothing a policy would have allowed: a

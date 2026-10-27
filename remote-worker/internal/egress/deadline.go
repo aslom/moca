@@ -12,50 +12,89 @@ import (
 // only after `idle` with no byte moving on it, never because a long transfer
 // ran out of absolute time.
 //
-// All three refresh rather than arm once. That distinction is the whole point:
-// an absolute deadline would kill a slow but healthy `git clone`, and a
+// The bound refreshes rather than arming once. That distinction is the whole
+// point: an absolute deadline would kill a slow but healthy `git clone`, and a
 // refreshed one cannot, because every byte pushes it out.
 //
 // A zero or negative duration is a no-op, so a Config built by hand in a test
 // keeps the old unbounded behaviour. NewProxy never leaves the bound zero.
 
-func extendRead(c net.Conn, idle time.Duration) {
-	if idle > 0 {
-		_ = c.SetReadDeadline(time.Now().Add(idle))
+// idleClock is one kind of activity and the deadlines it keeps alive. A socket
+// deadline is per direction of one socket, so refreshing only the deadline of
+// the socket a wrapper happens to touch does not express a bound on the
+// established *connection* — and it kills a long one-way transfer mid-flight.
+// During a `git clone` the guest sends nothing for as long as the pack takes to
+// stream down, so a guest-only read deadline expires on a perfectly healthy
+// tunnel; a forwarded upload fails mirrored, because http.Transport's readLoop
+// blocks reading the upstream conn from dial time while only the request body
+// is moving. One byte must therefore push out every deadline that byte proves
+// is still live.
+//
+// Which deadlines a given activity proves live is not "all of them", which is
+// why this is a set of targets per kind of activity rather than one clock per
+// connection. Delivering a response to a guest shows the guest is *reading*;
+// it says nothing about the request body it promised and never sent, so it
+// must not excuse that. The call sites name the distinction.
+//
+// No watchdog goroutine is needed: a deadline applies to calls already blocked
+// in Read or Write, not just later ones, so writing the clock through to the
+// sockets *is* the enforcement. That also keeps every expiry a timeout error,
+// which serve's loop and splice's copy-error arm already classify correctly,
+// rather than the ErrClosed a watchdog's Close would produce — and it adds no
+// per-connection goroutine to a process shared by every VM on the host.
+type idleClock struct {
+	read  []net.Conn
+	write []net.Conn
+	idle  time.Duration
+}
+
+// touch pushes every deadline in the clock out by idle. Concurrent callers are
+// safe: a net.Conn may be used from several goroutines, and two touches racing
+// differ only by the microseconds between their time.Now calls, so whichever
+// lands last sets the same deadline either way.
+func (k *idleClock) touch() {
+	if k == nil || k.idle <= 0 {
+		return
+	}
+	t := time.Now().Add(k.idle)
+	for _, c := range k.read {
+		_ = c.SetReadDeadline(t)
+	}
+	for _, c := range k.write {
+		_ = c.SetWriteDeadline(t)
 	}
 }
 
-func extendWrite(c net.Conn, idle time.Duration) {
-	if idle > 0 {
-		_ = c.SetWriteDeadline(time.Now().Add(idle))
-	}
+// bothWays is the clock for a connection whose two conns are interchangeable:
+// any byte in any direction proves the whole thing is live. The tunnel path
+// uses it, because an opaque splice cannot tell a request from a response.
+func bothWays(guest, up net.Conn, idle time.Duration) *idleClock {
+	return &idleClock{read: []net.Conn{guest, up}, write: []net.Conn{guest, up}, idle: idle}
 }
 
-// idleReader refreshes c's read deadline before every read through it. r and c
-// are separate because the two are not always the same object: the guest side
-// of a tunnel is read through a bufio.Reader that already holds whatever came
-// in behind the CONNECT, while the deadline belongs on the conn underneath it.
+// idleReader refreshes the clock before every read through it. The reader and
+// the conns are separate because the two are not always the same object: the
+// guest side of a tunnel is read through a bufio.Reader that already holds
+// whatever came in behind the CONNECT, while the deadlines belong on the conns
+// underneath.
 type idleReader struct {
-	r    io.Reader
-	c    net.Conn
-	idle time.Duration
+	r io.Reader
+	k *idleClock
 }
 
 func (r idleReader) Read(b []byte) (int, error) {
-	extendRead(r.c, r.idle)
+	r.k.touch()
 	return r.r.Read(b)
 }
 
-// idleWriter refreshes c's write deadline before every write to it. It bounds
-// the other half of a stall: a peer that stops reading holds a slot just as
-// effectively as one that stops sending.
+// idleWriter refreshes the clock before every write to c.
 type idleWriter struct {
-	c    net.Conn
-	idle time.Duration
+	c net.Conn
+	k *idleClock
 }
 
 func (w idleWriter) Write(b []byte) (int, error) {
-	extendWrite(w.c, w.idle)
+	w.k.touch()
 	return w.c.Write(b)
 }
 
@@ -70,15 +109,15 @@ func (w idleWriter) Write(b []byte) (int, error) {
 // the Transport's separate ResponseHeaderTimeout timer.
 type idleConn struct {
 	net.Conn
-	idle time.Duration
+	k *idleClock
 }
 
 func (c idleConn) Read(b []byte) (int, error) {
-	extendRead(c.Conn, c.idle)
+	c.k.touch()
 	return c.Conn.Read(b)
 }
 
 func (c idleConn) Write(b []byte) (int, error) {
-	extendWrite(c.Conn, c.idle)
+	c.k.touch()
 	return c.Conn.Write(b)
 }

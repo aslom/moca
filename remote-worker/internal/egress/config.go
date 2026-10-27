@@ -83,7 +83,10 @@ func ConfigFromEnv(get func(string) string) (Config, ControlConfig, error) {
 	if cfg.IdleTimeout, err = positiveSeconds(get, envIdleTimeout, defaultIdleTimeout); err != nil {
 		return cfg, cc, err
 	}
-	if cfg.ResponseHeaderTimeout, err = positiveSeconds(get, envRespHeaderTime, defaultResponseHeaderTimeout); err != nil {
+	// The response-header bound defaults to whatever the idle bound came out
+	// as, including an operator-raised one, so it never sits tighter than the
+	// bound it refines unless an operator asked for that. See the field's doc.
+	if cfg.ResponseHeaderTimeout, err = positiveSeconds(get, envRespHeaderTime, cfg.IdleTimeout); err != nil {
 		return cfg, cc, err
 	}
 

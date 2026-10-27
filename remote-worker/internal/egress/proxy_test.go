@@ -815,6 +815,13 @@ func TestTunnelPropagatesHalfClose(t *testing.T) {
 //
 // idleHarness is a harness whose bounds are short enough to wait on. Both
 // knobs are set: a test that bounds one must not pass because the other fired.
+//
+// Callers use 400ms rather than the tightest bound that works. These tests run
+// under -race on shared CI runners, where a scheduling hiccup between a write
+// and the deadline it was meant to refresh is the difference between pass and
+// fail; the tests that *survive* a bound write at half the interval, so the
+// margin is what absorbs that. The cost is a few seconds of wall clock, which
+// is cheaper than a flake.
 func idleHarness(t *testing.T, allowList string, idle, respHeader time.Duration) *harness {
 	t.Helper()
 	return newHarness(t, allowList, func(c *Config) {
@@ -854,7 +861,7 @@ func TestIdleTunnelIsClosedAndItsSlotFreed(t *testing.T) {
 	// The upstream accepts and then says nothing, which is the whole point:
 	// without a deadline both copy goroutines block in Read indefinitely.
 	up := newTCPUpstream(t, func(c net.Conn) { defer c.Close(); io.ReadAll(c) })
-	h := idleHarness(t, fmt.Sprintf("up.test:%d", up.port), 150*time.Millisecond, 2*time.Second)
+	h := idleHarness(t, fmt.Sprintf("up.test:%d", up.port), 400*time.Millisecond, 2*time.Second)
 	h.res.set("up.test", "127.0.0.1")
 	c := dial(t, h.register("vm-1", "run-a"))
 	connect(t, c, fmt.Sprintf("up.test:%d", up.port))
@@ -874,7 +881,7 @@ func TestIdleTunnelIsClosedAndItsSlotFreed(t *testing.T) {
 // Only a deadline refreshed on every read lets this pass.
 func TestActiveTunnelSurvivesManyIdlePeriods(t *testing.T) {
 	up := newTCPUpstream(t, echo)
-	const idle = 150 * time.Millisecond
+	const idle = 400 * time.Millisecond
 	h := idleHarness(t, fmt.Sprintf("up.test:%d", up.port), idle, 2*time.Second)
 	h.res.set("up.test", "127.0.0.1")
 	c := dial(t, h.register("vm-1", "run-a"))
@@ -898,6 +905,122 @@ func TestActiveTunnelSurvivesManyIdlePeriods(t *testing.T) {
 	}
 }
 
+// TestOneWayTunnelDownloadSurvivesASilentGuest is the case a per-leg bound got
+// wrong. TestActiveTunnelSurvivesManyIdlePeriods echoes, so every read on both
+// legs is refreshed by the guest's own pings and it passes either way. Here the
+// traffic is one-way, which is what a `git clone` actually looks like: the
+// guest says nothing at all for as long as the pack takes to stream down, so
+// the guest→up leg's read has to be kept alive by the *other* leg's bytes or it
+// expires on a perfectly healthy transfer and closeBoth tears it down.
+func TestOneWayTunnelDownloadSurvivesASilentGuest(t *testing.T) {
+	const idle = 400 * time.Millisecond
+	const chunks = 8
+	// A byte every half-interval, 4x the bound in total, and never a word from
+	// the guest.
+	up := newTCPUpstream(t, func(c net.Conn) {
+		defer c.Close()
+		for i := 0; i < chunks; i++ {
+			time.Sleep(idle / 2)
+			if _, err := io.WriteString(c, "x"); err != nil {
+				return
+			}
+		}
+	})
+	h := idleHarness(t, fmt.Sprintf("up.test:%d", up.port), idle, 5*time.Second)
+	h.res.set("up.test", "127.0.0.1")
+	c := dial(t, h.register("vm-1", "run-a"))
+	c.SetDeadline(time.Now().Add(10 * time.Second))
+	connect(t, c, fmt.Sprintf("up.test:%d", up.port))
+
+	if _, err := io.ReadFull(c, make([]byte, chunks)); err != nil {
+		t.Fatalf("one-way download of %d bytes over %v failed: %v", chunks, chunks*idle/2, err)
+	}
+	if n := h.connsInFlight("vm-1"); n != 1 {
+		t.Fatalf("streaming tunnel lost its slot: %d conns in flight, want 1", n)
+	}
+}
+
+// TestOneWayTunnelUploadSurvivesASilentUpstream is the mirror -- a `git push`,
+// where the upstream says nothing until the whole pack is in. The up→client
+// leg's read is the one that would expire.
+func TestOneWayTunnelUploadSurvivesASilentUpstream(t *testing.T) {
+	const idle = 400 * time.Millisecond
+	const chunks = 8
+	up := newTCPUpstream(t, func(c net.Conn) {
+		defer c.Close()
+		if _, err := io.ReadFull(c, make([]byte, chunks)); err != nil {
+			return
+		}
+		io.WriteString(c, "ok") // only now, once the upload is complete
+	})
+	h := idleHarness(t, fmt.Sprintf("up.test:%d", up.port), idle, 5*time.Second)
+	h.res.set("up.test", "127.0.0.1")
+	c := dial(t, h.register("vm-1", "run-a"))
+	c.SetDeadline(time.Now().Add(10 * time.Second))
+	connect(t, c, fmt.Sprintf("up.test:%d", up.port))
+
+	for i := 0; i < chunks; i++ {
+		time.Sleep(idle / 2)
+		if _, err := c.Write([]byte("x")); err != nil {
+			t.Fatalf("upload chunk %d after %v: %v", i, time.Duration(i)*idle/2, err)
+		}
+	}
+	buf := make([]byte, 2)
+	if _, err := io.ReadFull(c, buf); err != nil || string(buf) != "ok" {
+		t.Fatalf("one-way upload over %v got %q, %v; want the upstream's reply", chunks*idle/2, buf, err)
+	}
+}
+
+// TestForwardSlowUploadSurvivesASilentUpstream is the forward path's version: a
+// POST whose body trickles in over several times the bound, with an upstream
+// that says nothing until the body is complete. End to end, the only activity
+// anywhere is on the guest side.
+//
+// Honest note on its strength: this passes even with the upstream conn dropped
+// from the request-body clock, because net/http swallows the readLoop's Peek
+// error while a request is in flight, so the expiry it would cause never
+// reaches the caller. The test pins the behaviour a guest sees; the reason the
+// upstream deadline is in that clock anyway is in forward.go's comment, and it
+// rests on the IdleTimeout invariant rather than on this assertion.
+func TestForwardSlowUploadSurvivesASilentUpstream(t *testing.T) {
+	const idle = 400 * time.Millisecond
+	const chunks = 8
+	up := newTCPUpstream(t, func(c net.Conn) {
+		defer c.Close()
+		r, err := http.ReadRequest(bufio.NewReader(c))
+		if err != nil {
+			return
+		}
+		n, _ := io.Copy(io.Discard, r.Body) // says nothing until the body is in
+		fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s", n, strings.Repeat("y", int(n)))
+	})
+	h := idleHarness(t, fmt.Sprintf("up.test:%d", up.port), idle, 5*time.Second)
+	h.res.set("up.test", "127.0.0.1")
+	c := dial(t, h.register("vm-1", "run-a"))
+	c.SetDeadline(time.Now().Add(10 * time.Second))
+	if _, err := fmt.Fprintf(c, "POST http://up.test:%d/x HTTP/1.1\r\nHost: up.test\r\nContent-Length: %d\r\n\r\n", up.port, chunks); err != nil {
+		t.Fatal(err)
+	}
+	// A byte every half-interval, 4x the bound in total.
+	for i := 0; i < chunks; i++ {
+		time.Sleep(idle / 2)
+		if _, err := c.Write([]byte("x")); err != nil {
+			t.Fatalf("upload chunk %d after %v: %v", i, time.Duration(i)*idle/2, err)
+		}
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+	if err != nil {
+		t.Fatalf("slow upload over %v got no response: %v", chunks*idle/2, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("slow upload got %d, want 200: the bound fired while bytes were moving", resp.StatusCode)
+	}
+	if e := h.sink.waitEvent(t, DecisionForward); e.BytesUp != chunks {
+		t.Fatalf("event %+v, want all %d uploaded bytes", e, chunks)
+	}
+}
+
 // TestHalfClosedIdleTunnelExpires covers the case the issue calls out: after a
 // half-close exactly one leg is still running, so bounding only the guest's
 // reads would leave a client that sent CloseWrite and then waits on a silent
@@ -911,7 +1034,7 @@ func TestHalfClosedIdleTunnelExpires(t *testing.T) {
 		<-done
 	})
 	t.Cleanup(func() { close(done) })
-	h := idleHarness(t, fmt.Sprintf("up.test:%d", up.port), 150*time.Millisecond, 2*time.Second)
+	h := idleHarness(t, fmt.Sprintf("up.test:%d", up.port), 400*time.Millisecond, 2*time.Second)
 	h.res.set("up.test", "127.0.0.1")
 	c := dial(t, h.register("vm-1", "run-a"))
 	connect(t, c, fmt.Sprintf("up.test:%d", up.port))
@@ -933,7 +1056,7 @@ func TestForwardResponseHeaderTimeout(t *testing.T) {
 		<-hold // read the request, answer nothing
 	})
 	t.Cleanup(func() { close(hold) })
-	h := idleHarness(t, fmt.Sprintf("up.test:%d", up.port), 5*time.Second, 150*time.Millisecond)
+	h := idleHarness(t, fmt.Sprintf("up.test:%d", up.port), 5*time.Second, 400*time.Millisecond)
 	h.res.set("up.test", "127.0.0.1")
 	c := dial(t, h.register("vm-1", "run-a"))
 	resp, body := roundTrip(t, c, fmt.Sprintf("GET http://up.test:%d/x HTTP/1.1\r\nHost: up.test\r\n\r\n", up.port))
@@ -955,7 +1078,7 @@ func TestForwardStalledResponseBodyExpires(t *testing.T) {
 		<-hold
 	})
 	t.Cleanup(func() { close(hold) })
-	h := idleHarness(t, fmt.Sprintf("up.test:%d", up.port), 150*time.Millisecond, 5*time.Second)
+	h := idleHarness(t, fmt.Sprintf("up.test:%d", up.port), 400*time.Millisecond, 5*time.Second)
 	h.res.set("up.test", "127.0.0.1")
 	c := dial(t, h.register("vm-1", "run-a"))
 	if _, err := fmt.Fprintf(c, "GET http://up.test:%d/x HTTP/1.1\r\nHost: up.test\r\n\r\n", up.port); err != nil {
@@ -981,7 +1104,7 @@ func TestForwardSlowGuestReaderExpires(t *testing.T) {
 		fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n", size)
 		io.Copy(c, io.LimitReader(zeros{}, size))
 	})
-	h := idleHarness(t, fmt.Sprintf("up.test:%d", up.port), 150*time.Millisecond, 5*time.Second)
+	h := idleHarness(t, fmt.Sprintf("up.test:%d", up.port), 400*time.Millisecond, 5*time.Second)
 	h.res.set("up.test", "127.0.0.1")
 	c := dial(t, h.register("vm-1", "run-a"))
 	c.SetDeadline(time.Now().Add(10 * time.Second))
@@ -1004,7 +1127,7 @@ func TestForwardSlowGuestReaderExpires(t *testing.T) {
 // overlap. A duplex exchange can, so this is the only test that pins the
 // placement.
 func TestForwardStalledGuestBodyExpiresWhileUpstreamTalks(t *testing.T) {
-	const idle = 150 * time.Millisecond
+	const idle = 400 * time.Millisecond
 	const chunks = 8
 	up := newTCPUpstream(t, func(c net.Conn) {
 		defer c.Close()
