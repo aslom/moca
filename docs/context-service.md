@@ -206,11 +206,20 @@ wrong Redis, so on a missing record the provisioner deletes the StatefulSet, Sec
 `kept PVC <wl>: record missing` on every pass. Only a `deleted` or `deleting` record, or one of
 another generation, deletes the PVC. When most records are missing at once (at least two, and more
 than half of those it read) the pass deletes nothing and logs `ORPHAN SWEEP ABORTED`: check Redis and
-`REDIS_URL` first. To remove a kept PVC by hand, once its workspace is known to be unwanted:
+`REDIS_URL` first.
+
+**Kept PVCs count against the quota.** Nothing collects a kept PVC: it stays, and keeps counting
+against `moca-sandbox`'s ResourceQuota (32 PVCs and 320Gi by default), until an operator deletes it.
+Each pass logs a summary, `N PVC(s) kept on missing records`. If kept claims pile up, new mounted
+workloads fail to create their PVC on quota. To list them, and to remove one once its workspace is
+known to be unwanted:
 
 ```bash
+kubectl -n moca-sandbox get pvc -l app=moca-workload-sandbox -L moca.dev/workload
 kubectl -n moca-sandbox delete pvc <wl>
 ```
+
+A kept PVC is the only object left of its workload, so it has no StatefulSet of the same name.
 
 Each Redis read is bounded by `MOCA_PROVISIONER_REDIS_TIMEOUT_MS` (default 2 s); a read that times
 out skips that workload until the next pass.

@@ -522,8 +522,9 @@ Details, as built (2026-10-25):
   `missing` the reconciler frees the sandboxes and the owner's cap (StatefulSet, Secret, Service)
   and logs `kept PVC <wl>: record missing`; the claim is deleted only on an explicit `deleted` or
   `deleting`, or a record of another generation. A kept claim is then the workload's only object,
-  and each later pass logs it again. To remove it by hand, once the workspace is known to be
-  unwanted: `kubectl -n moca-sandbox delete pvc <wl>`.
+  and each later pass logs it again, with a summary of how many are kept (`SweepResult.kept`). It
+  counts against the namespace's ResourceQuota until removed by hand, once the workspace is known
+  to be unwanted: `kubectl -n moca-sandbox delete pvc <wl>`.
 - **An emptied Redis stops the pass.** When the first look finds most records missing, nothing is
   deleted in that pass, and it is logged as `ORPHAN SWEEP ABORTED`: at least 2 workloads and more
   than half of those whose record it read (`MISSING_ABORT_MIN`, `MISSING_ABORT_FRACTION` in
