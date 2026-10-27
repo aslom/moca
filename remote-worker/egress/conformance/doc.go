@@ -38,7 +38,10 @@
 //     destination_private, conn_cap, request_cap, no_binding,
 //     credential_unavailable, upstream_unreachable, bad_request, aborted,
 //     credential_injected, credential_revoked, plaintext_credential,
-//     upstream_unverified, misdirected_request;
+//     upstream_unverified, misdirected_request, leaf_unavailable;
+//     leaf_unavailable is a leaf-certificate mint refused because the
+//     interception CA has expired, so the guest's TLS handshake fails; its
+//     status field records 502 although no HTTP response is sent;
 //     exactly one aborted event per conn ended by Unregister;
 //   - dial_addr: the ip:port actually dialled. It is the evidence for
 //     resolve-once: the suite requires it to equal the first, checked DNS
