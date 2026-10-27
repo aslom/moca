@@ -211,15 +211,18 @@ than half of those it read) the pass deletes nothing and logs `ORPHAN SWEEP ABOR
 **Kept PVCs count against the quota.** Nothing collects a kept PVC: it stays, and keeps counting
 against `moca-sandbox`'s ResourceQuota (32 PVCs and 320Gi by default), until an operator deletes it.
 Each pass logs a summary, `N PVC(s) kept on missing records`. If kept claims pile up, new mounted
-workloads fail to create their PVC on quota. To list them, and to remove one once its workspace is
-known to be unwanted:
+workloads fail to create their PVC on quota. A kept PVC is the only object left of its workload, so
+it has no StatefulSet of the same name. To list the kept ones, and to remove one once its workspace
+is known to be unwanted:
 
 ```bash
-kubectl -n moca-sandbox get pvc -l app=moca-workload-sandbox -L moca.dev/workload
+comm -23 <(kubectl -n moca-sandbox get pvc -l app=moca-workload-sandbox -o name | sed 's|.*/||' | sort) \
+         <(kubectl -n moca-sandbox get sts -l app=moca-workload-sandbox -o name | sed 's|.*/||' | sort)
 kubectl -n moca-sandbox delete pvc <wl>
 ```
 
-A kept PVC is the only object left of its workload, so it has no StatefulSet of the same name.
+A workload still being created can show up briefly too, between its PVC and its StatefulSet: run the
+list again before deleting anything.
 
 Each Redis read is bounded by `MOCA_PROVISIONER_REDIS_TIMEOUT_MS` (default 2 s); a read that times
 out skips that workload until the next pass.
