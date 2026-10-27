@@ -64,6 +64,16 @@ import type { RouteProfile } from './routes.js';
 import { isEnrolled, notEnrolled, type SandboxConfig } from './sandbox-config.js';
 import type { SandboxStore } from './sandbox-store.js';
 import { SANDBOX_HANDLERS } from './sandbox-handlers.js';
+import { formatDestination, parseDestination } from './egress-destination.js';
+
+/** A stored destination in normalized form; a legacy or corrupt entry compares as written. */
+function normalizeStored(h: string): string {
+  try {
+    return formatDestination(parseDestination(h));
+  } catch {
+    return h;
+  }
+}
 
 /** The `iss` this control plane mints API tokens under and accepts on API routes. */
 export function apiIssuer(config: Pick<CpConfig, 'routeProfile'>): string {
@@ -814,6 +824,19 @@ export const HANDLERS: Record<string, Handler> = {
         'invalid_request',
         'the sandbox service stores only consumer: sandbox-egress credentials',
       );
+    }
+    if (sandbox) {
+      const mine = new Set(cred.descriptor.destination.hosts);
+      for (const other of await deps.credentials.list(p.sub)) {
+        if (other.consumer !== 'sandbox-egress' || other.name === name) continue;
+        const hit = other.destination.hosts.find((h) => mine.has(normalizeStored(h)));
+        if (hit !== undefined) {
+          throw new CpError(
+            'destination_conflict',
+            `destination '${hit}' is already held by credential '${other.name}'`,
+          );
+        }
+      }
     }
     await deps.credentials.put(p.sub, cred);
     await auditBestEffort(deps, 'putCredential', `credential=${name}`, {

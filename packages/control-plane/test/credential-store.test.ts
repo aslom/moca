@@ -96,6 +96,7 @@ describe('the kind registry', () => {
       parseCredentialBody('aws', {
         ...bearerBody(),
         kind: 'sigv4',
+        binding: { header: 'Authorization', format: 'AWS4-HMAC-SHA256 {accessKeyId}' },
         secret: { accessKeyId: 'AKIAFAKE', secretAccessKey: 'fake' }, // notsecret
       }).descriptor.kind,
     ).toBe('sigv4');

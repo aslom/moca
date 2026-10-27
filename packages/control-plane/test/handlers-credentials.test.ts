@@ -287,4 +287,63 @@ describe('sandbox profile', () => {
       'gh',
     ]);
   });
+
+  describe('destination conflicts', () => {
+    const put = (d: CpDeps, name: string, hosts: string[]) =>
+      HANDLERS.putCredential!(
+        ctx({ principal: alice, params: { name }, body: body({ destination: { hosts } }) }),
+        d,
+      );
+
+    it('refuses an identical normalized destination under another name, naming the holder', async () => {
+      const d = egressDeps();
+      await put(d, 'gh', ['github.com']);
+      let err: CpError | undefined;
+      try {
+        await put(d, 'gh2', ['GitHub.com']);
+      } catch (e) {
+        err = e as CpError;
+      }
+      expect(err?.code).toBe('destination_conflict');
+      expect(err?.message).toContain('gh');
+      expect(await d.credentials.get('github:1234', 'gh2')).toBeNull();
+    });
+
+    it('allows sibling and nested prefixes', async () => {
+      const d = egressDeps();
+      await put(d, 'mcp-a', ['mcp.corp/github']);
+      await put(d, 'mcp-b', ['mcp.corp/jira']);
+      await put(d, 'mcp-root', ['mcp.corp']);
+      expect((await d.credentials.list('github:1234')).length).toBe(3);
+    });
+
+    it('allows re-PUT of the same name', async () => {
+      const d = egressDeps();
+      await put(d, 'gh', ['github.com']);
+      const res = await put(d, 'gh', ['github.com']);
+      expect(res.status).toBe(204);
+    });
+
+    it('stores a multi-header binding and lists it as an array', async () => {
+      const d = egressDeps();
+      await HANDLERS.putCredential!(
+        ctx({
+          principal: alice,
+          params: { name: 'multi' },
+          body: body({
+            kind: 'api-key',
+            secret: { key: 'k' }, // notsecret
+            binding: [
+              { header: 'X-API-Key', format: '{key}' },
+              { header: 'X-Org', format: 'acme-{key}' },
+            ],
+          }),
+        }),
+        d,
+      );
+      const r = await HANDLERS.listCredentials!(ctx({ principal: alice }), d);
+      const list = (r.body as { credentials: { binding: unknown }[] }).credentials;
+      expect(Array.isArray(list[0]!.binding)).toBe(true);
+    });
+  });
 });

@@ -38,6 +38,8 @@ export const CP_ERROR_CODES = [
   'credential_ambiguous',
   'credential_not_found',
   'credential_unavailable',
+  'credential_unsafe',
+  'destination_conflict',
   'endpoint_unresolved',
   'model_unavailable',
   'model_catalog_unavailable',
@@ -86,6 +88,10 @@ const STATUS: Record<CpErrorCode, number> = {
   credential_ambiguous: 400,
   credential_not_found: 404,
   credential_unavailable: 503,
+  // 500: a stored egress secret renders to a header value with CR/LF/NUL; never forwarded.
+  credential_unsafe: 500,
+  // 409: another credential of the owner already holds the identical normalized destination.
+  destination_conflict: 409,
   endpoint_unresolved: 400,
   // 400: the credential's endpoint does not offer that model id (per-session model spec §4.2).
   model_unavailable: 400,

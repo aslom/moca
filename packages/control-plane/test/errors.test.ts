@@ -40,6 +40,8 @@ const EXPECTED: Record<CpErrorCode, number> = {
   credential_ambiguous: 400,
   credential_not_found: 404,
   credential_unavailable: 503,
+  credential_unsafe: 500,
+  destination_conflict: 409,
   endpoint_unresolved: 400,
   // 400: the credential's endpoint does not offer that model id (per-session model spec §4.2).
   model_unavailable: 400,

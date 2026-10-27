@@ -90,6 +90,8 @@ components:
             - sandbox_not_found
             - sandbox_terminated
             - name_conflict
+            - credential_unsafe
+            - destination_conflict
             - quota_exceeded
             - unknown_template
             - digest_mismatch
@@ -165,11 +167,21 @@ components:
               items: { type: string }
               description: host allow-list, not a base URL
         binding:
-          type: object
-          required: [header, format]
-          properties:
-            header: { type: string }
-            format: { type: string }
+          oneOf:
+            - type: object
+              required: [header, format]
+              properties:
+                header: { type: string }
+                format: { type: string }
+            - type: array
+              minItems: 1
+              maxItems: 4
+              items:
+                type: object
+                required: [header, format]
+                properties:
+                  header: { type: string }
+                  format: { type: string }
         endpoint:
           type: [string, 'null']
           maxLength: 2048
