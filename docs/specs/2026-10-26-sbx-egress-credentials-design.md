@@ -1,6 +1,6 @@
 # SBX0.2b — User-scoped egress credentials for `mocactl sbx` microVMs — Design
 
-Version: 1.1 — October 27, 2026 (review of rossoctl/moca#624: destinations, headers, resolver seam, presets, MCP)
+Version: 1.2 — October 27, 2026 (#624 review rounds 1–2: destinations, headers, resolver seam, presets, MCP; revocation per connection, path-confusion rule)
 Status: Proposed
 Milestone: **SBX0.2b**, increment 2b of [SBX0](2026-10-15-sbx0-internal-sandbox-service-design.md)
 (§11), registered in [the milestone registry](README.md).
@@ -164,7 +164,7 @@ Authorization: Bearer <egress token of KVM host H>
           "expiresAt": null } ] }
 404 { "error": "no_credential" }        -- sandbox live and on H, owner has none for host
 404 { "error": "sandbox_not_found" }    -- unknown, terminated, or not on H (one code: no oracle)
-400 { "error": "credential_ambiguous" } -- two identical destinations (a write race only, see E10)
+500 { "error": "destination_ambiguous" } -- two identical destinations: server-side state from a write race (E10)
 401                                      -- bad or absent egress token
 ```
 
@@ -183,8 +183,10 @@ Checks, in order. Each one fails closed:
    (E10) whose host matches `host` exactly and case-insensitively (no wildcards), emit one element
    `(credential, port, pathPrefix)`. A credential with two entries for this host (two ports, or two
    prefixes) yields two elements. None returns `404 no_credential`. Two elements with the same
-   `(port, pathPrefix)` return `400 credential_ambiguous`, never resolved by order (MI1 §6.3 item
-   4). `PUT` refuses that state, so only a write race can reach it.
+   `(port, pathPrefix)` return `500 destination_ambiguous`, never resolved by order (MI1 §6.3 item
+   4). It is a 5xx because the request is well formed and the fault is stored state. `PUT` refuses
+   that state, so only a write race can reach it. `moca-egress` maps it, like any other unexpected
+   answer, to `503 credential_unavailable`.
 4. **Resolve and render: the resolver seam (E11).** For each element, the credential's resolver
    produces its header values and an `expiresAt`. The contract above is resolver-neutral. Phase 1
    has one resolver, `static`, which decrypts with `get(owner, name)`, renders, and returns
@@ -195,7 +197,7 @@ Checks, in order. Each one fails closed:
    `{field}` substitution and `{base64(a:b)}`. `PUT` today accepts any `{header, format}` for a
    non-inference consumer (`credential-store.ts:270-274`), so for `sandbox-egress` it is narrowed at
    **write time** to formats built only from those two forms over the kind's declared fields, and to
-   a header that is not hop-by-hop, `Host`, `Proxy-*` or `X-Moca-*`. A stored credential therefore
+   a header that is not hop-by-hop, `Host`, `Cookie`, `Set-Cookie`, `Proxy-*` or `X-Moca-*`. A stored credential therefore
    always renders. A `sandbox-egress` credential's `binding` may be **one binding or a list of one
    to four**, with header names unique case-insensitively. Each renders to one `headers[]` entry, and
    the write-time rules apply to every entry. The result is ready header values, so the Go proxy has
@@ -208,7 +210,10 @@ Checks, in order. Each one fails closed:
 
 `ttlSeconds` is the smaller of `SH_EGRESS_CREDENTIAL_TTL_SECONDS` (default 60, range 5–300) and the
 seconds left until the earliest non-null `expiresAt`, floored at 5. Rotating or deleting a credential
-takes effect within it. `subject` is for the proxy's audit line only. Identity on the host still
+takes effect within it. **A resolver must never return a value with less than that floor (5 s)
+left.** It refreshes it, or omits the element. Otherwise the floor would let `moca-egress` send a
+header for up to 5 s after it expired. `static` values never expire, so this binds only later
+resolvers. `subject` is for the proxy's audit line only. Identity on the host still
 comes from the listener.
 
 **Destination entries (E10), parsed at `PUT` for `sandbox-egress` only.** `host[:port][/prefix]`:
@@ -268,7 +273,7 @@ cover both hosts with no schema change.
 x-access-token:$PAT https://api.github.com/user` returns the PAT owner's login, and `git ls-remote`
 of a private repository works with the same header. A0 also checks the `github-mcp` preset: GitHub's
 remote MCP server at `api.githubcopilot.com` answers an MCP `initialize` POST sent with
-`Authorization: Bearer <PAT>`. If A0 fails for `api.github.com`, the `github` preset entry writes two
+`Authorization: Bearer <PAT>`, over `curl --http1.1`, because interception offers HTTP/1.1 only. If A0 fails for `api.github.com`, the `github` preset entry writes two
 credentials from the one PAT: `github` (`github.com`, Basic) and `github-api` (`api.github.com`,
 `Bearer {password}`). That is a change to the catalog, not to any schema. If the MCP check fails,
 `github-mcp` does not ship.
@@ -325,22 +330,34 @@ MI1 §8.5 items 4–5 and §8.7, restated only where a choice is made here:
 - Each request is read with Go's `http.ReadRequest`. `Host` must equal the CONNECT host, else `421`.
 - **Selection (E10).** Among the elements with the CONNECT port, take the one with the longest
   `pathPrefix` that matches the request path on a `/` boundary (`/github` matches `/github` and
-  `/github/x`, not `/githubx`). When **any** element for this host has a prefix other than `/`, a
-  request path with a dot-segment, a backslash, or a percent-encoded `.`, `/` or `\` (any case) is
-  refused `400 bad_request`. Otherwise an upstream that normalizes paths could route a credential
+  `/github/x`, not `/githubx`).
+- **Path confusion.** When **any** element for this host has a prefix other than `/`, a request is
+  refused `400 bad_request` with nothing sent upstream if its raw path contains any of: a `.` or
+  `..` segment, a `\`, a `;` (matrix or path parameters, which Tomcat, Jetty and Spring strip,
+  so `/github/..;/jira` routes to `/jira`), or **any** `%`-escape. That last one covers single
+  and double encoding (`%2e`, `%252e`), and is consistent with the prefix syntax, which already
+  bans `%` (§4.2). Without the rule, an upstream that normalizes paths could route a credential
   past its prefix: `/github/../jira` would carry the GitHub token to the Jira server behind the same
-  gateway. A request no element matches is forwarded **without injection**: still intercepted, with
-  the guest's own headers scrubbed as on any other request.
+  gateway. `git`, `gh` and MCP clients do not send these to a gateway. A host whose only prefix is
+  `/` has nothing to escape, so the rule does not apply to it. GitHub is that case.
+- **No match.** A request that no element matches, on a connection that has never injected for a
+  prefix covering it, is forwarded **without injection**. It is still intercepted, with the guest's
+  own headers scrubbed as on any other request.
 - The selected element's headers are each **set**, replacing any value the guest sent and adding
   any it did not send. So the placeholder never reaches the upstream, and a client that sends no
   `Authorization` at all (an MCP client that would otherwise start OAuth discovery on a `401`) is
   authenticated anyway. `Proxy-*` and `X-Moca-*` are stripped by the existing `forward.go` logic, and
   bodies are streamed. Keep-alive is supported. **Each request re-reads the credential through the
-  cache** (no network call while the entry is fresh). When the set no longer contains the element
-  this request selects (the credential was deleted, the owner was removed, or the sandbox ended),
-  the request is answered `401 credential_revoked` and the connection is closed. A long-lived `git`
-  or `gh` connection therefore stops injecting within one TTL of a delete, which acceptance item 6
-  tests. _(Builder's call.)_
+  cache** (no network call while the entry is fresh).
+- **Revocation is decided per connection.** A connection remembers every `(pathPrefix, name)` it
+  has injected. On each request, every remembered pair whose prefix covers the request path must
+  still be in the fresh set. If any is missing, the request is answered `401 credential_revoked`,
+  nothing is sent upstream, and the connection is closed. That holds whatever the fresh selection
+  would now pick: no element, a shorter prefix, or another name on the same prefix. So a deleted
+  `/a` never silently falls back to `/`'s token on a connection that used `/a`. A request path no
+  remembered prefix covers is selected afresh (no match means forwarded without injection, as
+  above). A long-lived `git` or `gh` connection therefore stops injecting within one TTL of a
+  delete, which acceptance item 6 tests. Conformance cases 9 and 10 pin the boundary (§10.2).
 - **A response already streaming is not cut on revocation.** Revocation stops the credential being
   _sent_, and an in-flight response sends nothing. A long-lived response, such as the SSE `GET`
   stream of MCP's Streamable HTTP transport, ends on its own schedule, and the next request on that
@@ -423,8 +440,9 @@ transport is HTTP/1.1 `POST` plus an SSE response or `GET` stream, which §5.2 c
   GitHub's (`github-mcp` preset). The seam is in the contract, so adding the resolver changes
   neither the wire nor `moca-egress`.
 - **HTTP/2:** interception offers ALPN `http/1.1` only (§5.2). A hosted MCP server that negotiates
-  HTTP/2 still works as long as it accepts HTTP/1.1, which every Streamable HTTP server must for
-  its SSE stream today. See §11.
+  HTTP/2 still works as long as it still accepts HTTP/1.1, which A0 checks for
+  `api.githubcopilot.com` with `curl --http1.1`. The Streamable HTTP transport does not require
+  HTTP/1.1, and SSE works over HTTP/2. See §11.
 
 ## 7. `mocactl sbx credentials`
 
@@ -530,10 +548,35 @@ own sessions, which have a semi-trusted multi-tenant worker that SBX lacks (§12
 - Route membership: the four routes on `sandbox` only when enabled. `route-profile.test.ts` and
   the authz enumeration cover both shapes.
 - `PUT` on `sandbox` refuses the `inference` and `control-plane` consumers.
-- §4.2's matrix: wrong or absent bearer; a token valid for host A asking about a sandbox on host B
-  (`404`, the same body as an unknown id); a terminated sandbox; a deleted sandbox; no match;
-  ambiguous; case-insensitive host match; `basic` and `bearer` rendering; CR/LF refusal; both audit
-  decisions; no secret value in any log line (spy on stdout).
+- **Destinations (E10):**
+  - Parsing and normalization: `HOST.` and mixed case become `host`, `host:443` becomes `host`,
+    `host:443/` becomes `host`, and `host:8443/a/b` is kept.
+  - Refused: each forbidden prefix character or form (`?`, `#`, `%`, `\`, `//`, dot-segments, a
+    trailing `/`), a port outside 1–65535 or with a leading zero, an IPv6 literal, and more than 16
+    entries.
+  - Other consumers still accept bare hosts only.
+  - `409 destination_conflict` for an identical normalized destination under another name, naming
+    it. Nested prefixes are allowed, and re-`PUT` of the same name is allowed.
+- **Bindings:** one binding or a list of 1–4. Refused: an empty list, more than 4, and duplicate
+  header names (case-insensitive). The narrowing applies to every entry, including `Cookie` and
+  `Set-Cookie`. A list renders to `headers[]` in order. A single binding is stored as an object, so
+  existing documents compare equal.
+- §4.2's matrix:
+  - a wrong or absent bearer;
+  - a token valid for host A asking about a sandbox on host B (`404`, the same body as an unknown
+    id);
+  - a terminated sandbox and a deleted sandbox;
+  - no match;
+  - one host yielding several elements (two ports, or two prefixes), sorted by port, then prefix
+    length descending;
+  - `500 destination_ambiguous` from a write race (seeded straight into the store);
+  - a case-insensitive host match;
+  - `basic`, `bearer` and two-header rendering, and the CR/LF refusal;
+  - both audit decisions;
+  - no secret value in any log line (spy on stdout).
+- **`ttlSeconds`:** a stub resolver returning `expiresAt = now + 20` yields `20`, and
+  `expiresAt: null` yields the configured TTL. `staticResolver` always returns `expiresAt: null`. The
+  floor is asserted on the clamp alone: an input of 2 s left yields 5.
 - Config: the profile is unchanged when neither setting is present; it refuses `SH_EGRESS_HOSTS`
   without a KEK; it refuses malformed `SH_EGRESS_HOSTS`.
 
@@ -559,13 +602,17 @@ New conformance cases (thirteen), mutation-checked like the existing 13:
 7. Two VMs of different sessions to the same host get different credentials; the cache is keyed by
    sid.
 8. Cache: one lookup for N parallel connections; a re-lookup after the TTL; no caching of errors.
-9. Revocation mid-connection: after the fake control plane starts answering `none`, the next request
-   on an open intercepted connection gets `401 credential_revoked`, zero upstream requests, and a
-   closed connection.
-10. Path selection: with `/` and `/a` credentials on one host, `/a/x` carries `/a`'s headers, `/b`
-    carries `/`'s, and with only `/a`, `/b` is forwarded with nothing injected.
-11. Dot-segment refusal: with a path-scoped credential on the host, `/a/../b` and `/a/%2e%2e/b` get
-    `400` and zero upstream requests.
+9. Revocation mid-connection, per connection (§5.2):
+   (a) a connection injects `/a`; the fake drops `/a`, leaving no set at all; the next `/a/x` gets
+   `401 credential_revoked`, zero upstream requests, and a closed connection;
+   (b) the same, but `/` remains: the next `/a/x` still gets `401`, never `/`'s headers.
+10. Path selection and the no-match boundary: with `/` and `/a` credentials on one host, `/a/x`
+    carries `/a`'s headers and `/b` carries `/`'s. On a **fresh** connection with only `/a`, `/b` is
+    forwarded with nothing injected. On a connection that has injected `/a`, `/b` (not covered by
+    `/a`) is forwarded with nothing injected too.
+11. Path-confusion refusal: with a path-scoped credential on the host, `/a/../b`, `/a/%2e%2e/b`,
+    `/a/%252e%252e/b`, `/a/..;/b`, `/a;x/../b` and `/a\b` each get `400` and zero upstream
+    requests. With only a `/` credential, `/a/../b` is forwarded.
 12. Several headers: a two-header credential sets both, overwriting the guest's values.
 13. Port: a credential for `:8443` does not intercept a CONNECT to `:443`, which is tunnelled.
 

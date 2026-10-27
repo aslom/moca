@@ -34,7 +34,8 @@ the `FileCredentialStore` on a PVC (Vault later, configuration only).
 **Phase 1 (this decision's first implementation):** `moca-egress` resolves the credential by sending
 `(sandbox id, host)` to the control plane, authenticated with a **per-KVM-host** egress token. The
 control plane answers only for live sandboxes running on that host's workers and returns the owner's
-matching credential. The proxy caches it for at most 60 s.
+matching credentials. The proxy caches them for at most the configured TTL (default 60 s; capped
+by any credential's expiry).
 
 **Phase 2 (owed, the more secure approach):** the user's sandbox token rides each `Exec` (the
 `Exec.grant` field MI1 reserves) through the relay and worker to `moca-egress` (`Register`/`Rebind`),
