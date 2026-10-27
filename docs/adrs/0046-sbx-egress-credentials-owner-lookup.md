@@ -26,7 +26,8 @@ worker: the relay already verifies the user's sandbox token, and the worker is h
 ## Decision
 
 We will swap the placeholder at `moca-egress`: TLS interception with a per-host CA, **only** for
-hosts the sandbox owner has a `sandbox-egress` credential for, with the binding's header overwritten.
+destinations the sandbox owner has a `sandbox-egress` credential for, with the credential's headers set
+(overwriting whatever the guest sent).
 Users manage these credentials with `mocactl sbx credentials` on the sandbox control plane, stored in
 the `FileCredentialStore` on a PVC (Vault later, configuration only).
 
@@ -41,8 +42,17 @@ and the control plane releases a credential only against a valid token for that 
 to the host token. Phase 2 does not change what users see, and it is the SBX path's version of MI1's
 sandbox grant.
 
-The proxy enforces no repository- or path-level policy. Users scope their tokens, for example with a
-fine-grained PAT.
+The lookup does not depend on the credential's type. A credential is selected by `(owner,
+destination)`, where a destination is `host[:port][/path-prefix]`. It renders to one or more
+headers. How its value is produced is a control-plane **resolver** behind the same contract:
+static in phase 1, refreshed (OAuth 2.1) or exchanged (RFC 8693) later. Adding a resolver changes
+neither the lookup wire nor `moca-egress`. GitHub is the first preset, and presets are reviewed data
+(a catalog `mocactl` reads), so MCP servers and internal APIs are data additions.
+
+The proxy enforces no repository- or path-level **policy**: users scope their tokens, for example
+with a fine-grained PAT. Path-scoped credential **selection** (which credential a request carries,
+for example one token per MCP server behind a single gateway host) is part of the destination above,
+and is not ruled out by that.
 
 ### Alternatives considered
 
@@ -59,8 +69,8 @@ fine-grained PAT.
 
 ## Consequences
 
-- Positive: `git`, `gh` and `curl` work unmodified in a sandbox as the user, while the token stays out
-  of the guest. Delivering it needs no proto, relay or worker change. MI1's interception design
+- Positive: `git`, `gh`, `curl` and Streamable-HTTP MCP clients work unmodified in a sandbox as the
+  user, while the token stays out of the guest. Delivering it needs no proto, relay or worker change. MI1's interception design
   (§8.5, §8.7) gets its first implementation, which the harness's own microVM sessions can reuse.
 - Negative / accepted cost (phase 1): **a stolen host egress token yields the `sandbox-egress`
   credentials of every owner with a live sandbox on that host, usable from off the host, without
@@ -70,7 +80,8 @@ fine-grained PAT.
   CA rotation means a snapshot rebuild). A one-replica control plane with `Recreate` until Vault.
   A control-plane round trip per `(sandbox, host)` per TTL, failing closed (`503`) when the control
   plane is unreachable. Clients are offered HTTP/1.1 only.
-- Follow-up owed: phase 2 (spec §9); Vault as the store, with a one-off migration from the file
+- Follow-up owed: phase 2 (spec §9); an `oauth2-refresh` resolver for MCP servers with short-lived
+  tokens (spec E11, §6.3); Vault as the store, with a one-off migration from the file
   store; egress wiring in `deploy/sbx/install-host.sh` (#623), a prerequisite. MI1's decision record
   must not use the number 0037, which ADR-0037 already holds.
 

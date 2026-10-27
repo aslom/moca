@@ -1,6 +1,6 @@
 # SBX0.2b — User-scoped egress credentials for `mocactl sbx` microVMs — Design
 
-Version: 1.0 — October 26, 2026
+Version: 1.1 — October 27, 2026 (review of rossoctl/moca#624: destinations, headers, resolver seam, presets, MCP)
 Status: Proposed
 Milestone: **SBX0.2b**, increment 2b of [SBX0](2026-10-15-sbx0-internal-sandbox-service-design.md)
 (§11), registered in [the milestone registry](README.md).
@@ -78,7 +78,8 @@ On an SBX host installed from `main` (#623), by a cohort user who has run only t
    every file under `/` and from `/proc/*/mem` (P4.1 §10's gate, run as a scan for the token's value).
 5. Sent **directly** to `api.github.com` from outside, the placeholder `moca-placeholder` gets `401`
    (P4.1 §10, "the placeholder is inert").
-6. Deleting the credential stops injection within `SH_EGRESS_CREDENTIAL_TTL_SECONDS` (default 60 s).
+6. Deleting the credential stops injection within `SH_EGRESS_CREDENTIAL_TTL_SECONDS` (default 60 s):
+   no request sent after that carries it. A response already in flight is not cut (§5.2).
 7. `moca-egress` audits each injected request with the credential's **name**, never its value. The
    control plane writes one `egress_credential_issued` audit entry per lookup.
 8. The egress-conformance suite (`remote-worker/egress/conformance`) passes with the new
@@ -86,17 +87,20 @@ On an SBX host installed from `main` (#623), by a cohort user who has run only t
 
 ## 2. Decision summary
 
-| #      | Decision                                | Choice                                                                                                                                                                                                                                                                                                                                                               |
-| ------ | --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **E1** | Where the token lives at use time       | **Only in `moca-egress` memory**, cached for at most `SH_EGRESS_CREDENTIAL_TTL_SECONDS`. The guest keeps the image-shipped placeholder (MI1 D7, P4.1 T5).                                                                                                                                                                                                            |
-| **E2** | How it reaches the wire                 | **TLS interception in `moca-egress`, only for hosts the caller's owner has a credential for**, then the binding's header is **overwritten** (MI1 §8.5 items 4–5). All other allowlisted hosts stay opaque CONNECT tunnels.                                                                                                                                           |
-| **E3** | How the proxy learns whose credential   | **Phase 1: owner lookup.** `moca-egress` sends `(sandbox id, host)` to the control plane, authenticated as its KVM host. The control plane maps the sandbox to its owner and returns that owner's matching credential. **Phase 2 (owed, §9):** the user's sandbox token rides each `Exec` to the proxy, and the control plane releases a credential only against it. |
-| **E4** | Bounding the phase-1 lookup             | Each KVM host has its **own** egress token. The control plane answers only for sandboxes whose `worker` is one of that host's workers. A stolen token reaches only the live sandboxes **on that host**.                                                                                                                                                              |
-| **E5** | Store                                   | **`FileCredentialStore`** on a PVC in the SBX namespace, sealed under a new `SH_CREDENTIAL_KEK`. **Vault is a follow-up** with no code change (`SH_CREDENTIAL_STORE=vault`). The Kubernetes store is not used, because the sandbox control plane has no Kubernetes API access, and that absence is a tested property.                                                |
-| **E6** | Who manages credentials                 | The user, with **`mocactl sbx credentials`** on the sandbox control plane, which now mounts `/v1/credentials` for the `sandbox-egress` consumer only.                                                                                                                                                                                                                |
-| **E7** | GitHub's two auth shapes                | **One stored credential.** `basic` kind, `username=x-access-token`, `password=<PAT>`, hosts `github.com` and `api.github.com`, behind a `--preset github`. Pending acceptance check A0 (§4.4).                                                                                                                                                                       |
-| **E8** | Repo- or path-level policy in the proxy | **None.** The user scopes the token, for example a fine-grained PAT limited to chosen repositories. This was the user's decision in design review.                                                                                                                                                                                                                   |
-| **E9** | Interception CA                         | **One CA per KVM host**, generated by `install-host.sh`. The private key goes to `moca-egress` only (`LoadCredential=`). The public certificate is baked into that host's golden snapshot (MI1 §8.7, P4.1 T6). Snapshots are already per host, because restore needs identical hardware.                                                                             |
+| #       | Decision                                | Choice                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ------- | --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **E1**  | Where the token lives at use time       | **Only in `moca-egress` memory**, cached for at most `SH_EGRESS_CREDENTIAL_TTL_SECONDS`. The guest keeps the image-shipped placeholder (MI1 D7, P4.1 T5).                                                                                                                                                                                                                                                                                                                                                                                 |
+| **E2**  | How it reaches the wire                 | **TLS interception in `moca-egress`, only for host:port pairs the caller's owner has a credential for**, then the credential's headers (one or more) are **set**, overwriting whatever the guest sent (MI1 §8.5 items 4–5). All other allowlisted hosts stay opaque CONNECT tunnels.                                                                                                                                                                                                                                                      |
+| **E3**  | How the proxy learns whose credential   | **Phase 1: owner lookup.** `moca-egress` sends `(sandbox id, host)` to the control plane, authenticated as its KVM host. The control plane maps the sandbox to its owner and returns that owner's matching credential. **Phase 2 (owed, §9):** the user's sandbox token rides each `Exec` to the proxy, and the control plane releases a credential only against it.                                                                                                                                                                      |
+| **E4**  | Bounding the phase-1 lookup             | Each KVM host has its **own** egress token. The control plane answers only for sandboxes whose `worker` is one of that host's workers. A stolen token reaches only the live sandboxes **on that host**.                                                                                                                                                                                                                                                                                                                                   |
+| **E5**  | Store                                   | **`FileCredentialStore`** on a PVC in the SBX namespace, sealed under a new `SH_CREDENTIAL_KEK`. **Vault is a follow-up** with no code change (`SH_CREDENTIAL_STORE=vault`). The Kubernetes store is not used, because the sandbox control plane has no Kubernetes API access, and that absence is a tested property.                                                                                                                                                                                                                     |
+| **E6**  | Who manages credentials                 | The user, with **`mocactl sbx credentials`** on the sandbox control plane, which now mounts `/v1/credentials` for the `sandbox-egress` consumer only.                                                                                                                                                                                                                                                                                                                                                                                     |
+| **E7**  | GitHub's two auth shapes                | **One stored credential**, written by the `github` preset (E12): `basic` kind, `username=x-access-token`, `password=<PAT>`, destinations `github.com` and `api.github.com`. Pending check A0 (§4.4). If A0 fails, the preset writes two credentials from the one PAT. That is a data change, not a schema change.                                                                                                                                                                                                                         |
+| **E8**  | Repo- or path-level policy in the proxy | **None.** The user scopes the token, for example a fine-grained PAT limited to chosen repositories. This was the user's decision in design review. Path-scoped credential **selection** (E10) is a different thing: it picks _which_ credential a request carries, never _whether_ the request may go.                                                                                                                                                                                                                                    |
+| **E9**  | Interception CA                         | **One CA per KVM host**, generated by `install-host.sh`. The private key goes to `moca-egress` only (`LoadCredential=`). The public certificate is baked into that host's golden snapshot (MI1 §8.7, P4.1 T6). Snapshots are already per host, because restore needs identical hardware.                                                                                                                                                                                                                                                  |
+| **E10** | Destination shape                       | **`host[:port][/path-prefix]` entries**, stored as strings in the existing `destination.hosts`, so a bare host is today's entry and no store changes shape. Port defaults to 443 and the prefix to `/`. The lookup answers per `(sandbox, host)` with the owner's **set** of matching entries. `moca-egress` picks per request: same port, then the longest prefix on a `/` boundary. Two of one owner's credentials with an identical destination are refused at `PUT` (`409 destination_conflict`), so ambiguity is a write-time error. |
+| **E11** | How a value is produced                 | **A resolver seam** at §4.2 step 4. Phase 1 has one resolver, `static` (decrypt + render). `oauth2-refresh` and `token-exchange` (Z5 E6, §4.1's mint) are later additions behind the **same** lookup contract. Refresh material never leaves the control plane, each returned credential carries `expiresAt`, and `ttlSeconds` is capped by the earliest one. Adding a resolver changes neither the wire nor this ADR.                                                                                                                    |
+| **E12** | Presets                                 | **Data, not code.** A reviewed catalog in the repo (`packages/mocactl/src/sbx/presets.ts`, a data-only module) of `{id, description, credentials: [{suffix, kind, destinations, binding, fixed, stdinField}], hint}`, which `--preset` reads and `mocactl sbx credentials presets` lists. `github` and `github-mcp` ship first. An internal MCP gateway or Jira is a data addition.                                                                                                                                                       |
 
 ## 3. Request path
 
@@ -115,12 +119,13 @@ GUEST                                   │ KVM HOST                            
                                         │       Bearer <this host's egress token>   │  sandbox sid: live?
                                         │                                           │  worker ∈ this host's?
                                         │                                           │  owner → sandbox-egress
-                                        │  ◀── {name, header, value, ttl} ──────────│  cred matching host
-                                        │  4 found → intercept TLS (host CA leaf),  │  audit egress_credential_issued
-                                        │    verify upstream first                  │
+                                        │  ◀── {credentials:[…], ttl} ──────────────│  creds for host
+                                        │  4 any on this port → intercept TLS       │  audit egress_credential_issued
+                                        │    (host CA leaf), verify upstream first  │
                                         │    none  → opaque tunnel (as v0.8.0)      │
                                         │  5 per request: Host == CONNECT host,     │
-                                        │    overwrite Authorization, strip         │
+                                        │    pick by longest path prefix, set its   │
+                                        │    headers, strip                         │
                                         │    Proxy-*/X-Moca-*, stream bodies        │
                                         │  6 audit line + credential name           │
                                         │      │                                    │
@@ -152,12 +157,15 @@ cluster-internal service.
 Authorization: Bearer <egress token of KVM host H>
 { "sandbox": "sbx-0f3a…", "host": "api.github.com" }
 
-200 { "name": "github", "header": "Authorization", "value": "Basic eC1h…",
-      "subject": "github:123", "ttlSeconds": 60 }
-404 { "error": "no_credential" }     -- sandbox live and on H, owner has none for host
-404 { "error": "sandbox_not_found" } -- unknown, terminated, or not on H (one code: no oracle)
-409 { "error": "credential_ambiguous" }
-401 / 403                             -- bad egress token / token not configured
+200 { "subject": "github:123", "ttlSeconds": 60,
+      "credentials": [
+        { "name": "github", "port": 443, "pathPrefix": "/",
+          "headers": [ { "name": "Authorization", "value": "Basic eC1h…" } ],
+          "expiresAt": null } ] }
+404 { "error": "no_credential" }        -- sandbox live and on H, owner has none for host
+404 { "error": "sandbox_not_found" }    -- unknown, terminated, or not on H (one code: no oracle)
+400 { "error": "credential_ambiguous" } -- two identical destinations (a write race only, see E10)
+401                                      -- bad or absent egress token
 ```
 
 Checks, in order. Each one fails closed:
@@ -171,24 +179,46 @@ Checks, in order. Each one fails closed:
    The owner must still be enrolled (`SH_ALLOWED_SUBJECTS` or an admin, the gate the refresh path
    applies at `handlers.ts:495`). A removed user's sandbox gets `404 no_credential`, so injection
    stops within one TTL of the removal rather than at the sandbox's expiry. _(Builder's call.)_
-3. **Credential.** List the owner's descriptors and keep those with `consumer: sandbox-egress` and an
-   exact, case-insensitive `destination.hosts` match for `host`, with no wildcards in phase 1. None
-   returns `404 no_credential`. More than one returns `409 credential_ambiguous`, never resolved by
-   order (MI1 §6.3 item 4).
-4. **Render.** `get(owner, name)` decrypts. The binding's `format` is rendered server-side: the
+3. **Credentials.** List the owner's `sandbox-egress` descriptors and, for each destination entry
+   (E10) whose host matches `host` exactly and case-insensitively (no wildcards), emit one element
+   `(credential, port, pathPrefix)`. A credential with two entries for this host (two ports, or two
+   prefixes) yields two elements. None returns `404 no_credential`. Two elements with the same
+   `(port, pathPrefix)` return `400 credential_ambiguous`, never resolved by order (MI1 §6.3 item
+   4). `PUT` refuses that state, so only a write race can reach it.
+4. **Resolve and render: the resolver seam (E11).** For each element, the credential's resolver
+   produces its header values and an `expiresAt`. The contract above is resolver-neutral. Phase 1
+   has one resolver, `static`, which decrypts with `get(owner, name)`, renders, and returns
+   `expiresAt: null`. A later `oauth2-refresh` resolver would hold the refresh material in the
+   store, refresh on lookup, persist a rotated refresh token, and return the access token's expiry.
+   It would never put refresh material on the wire. A `token-exchange` resolver would mint per
+   lookup (Z5 §4.1). The `static` resolver renders each binding's `format` server-side: the
    `{field}` substitution and `{base64(a:b)}`. `PUT` today accepts any `{header, format}` for a
    non-inference consumer (`credential-store.ts:270-274`), so for `sandbox-egress` it is narrowed at
    **write time** to formats built only from those two forms over the kind's declared fields, and to
    a header that is not hop-by-hop, `Host`, `Proxy-*` or `X-Moca-*`. A stored credential therefore
-   always renders. The result is a ready header value, so the Go proxy has no template engine. A value containing CR, LF or NUL
-   is refused (`500 credential_unsafe`, CWE-113, as ADR-0026's plugin does).
+   always renders. A `sandbox-egress` credential's `binding` may be **one binding or a list of one
+   to four**, with header names unique case-insensitively. Each renders to one `headers[]` entry, and
+   the write-time rules apply to every entry. The result is ready header values, so the Go proxy has
+   no template engine. A value containing CR, LF or NUL is refused (`500 credential_unsafe`,
+   CWE-113, as ADR-0026's plugin does).
 5. **Audit.** `egress_credential_issued` to `sh:cp:audit` and the stdout mirror (ADR-0044), with
    subject, sandbox id, credential **name**, destination host and egress host `H`. A `no_credential`
    answer is audited as `egress_credential_none`, which is cheap and makes "why was this
    unauthenticated" answerable.
 
-`ttlSeconds` is `SH_EGRESS_CREDENTIAL_TTL_SECONDS` (default 60, range 5–300). Rotating or deleting a
-credential takes effect within it.
+`ttlSeconds` is the smaller of `SH_EGRESS_CREDENTIAL_TTL_SECONDS` (default 60, range 5–300) and the
+seconds left until the earliest non-null `expiresAt`, floored at 5. Rotating or deleting a credential
+takes effect within it. `subject` is for the proxy's audit line only. Identity on the host still
+comes from the listener.
+
+**Destination entries (E10), parsed at `PUT` for `sandbox-egress` only.** `host[:port][/prefix]`:
+the host as today, a port of 1–65535 (default 443), and a prefix that starts with `/`, contains no
+`?`, `#`, `%`, `\`, `//` or dot-segment, and has no trailing `/` except the root (default `/`). The
+stored string is normalized: lower-case host, `:443` and a root prefix dropped. Other consumers keep
+bare hosts only, exactly as `validateHost` enforces today. A `PUT` whose normalized entry equals an
+entry of **another** of the owner's `sandbox-egress` credentials is refused with `409
+destination_conflict`, naming the other credential. Nested prefixes (`/` and `/github`) are not a
+conflict: the longest wins in `moca-egress`.
 
 The response carries a decrypted secret, so the route answers **only** over the TLS-terminated API
 Route and the handler never logs the body. The router's existing body cap applies. The request is two
@@ -236,11 +266,12 @@ cover both hosts with no schema change.
 
 **A0, the first task of the plan, before any other code:** with a fine-grained PAT, `curl -u
 x-access-token:$PAT https://api.github.com/user` returns the PAT owner's login, and `git ls-remote`
-of a private repository works with the same header. If A0 fails for the API, the plan's next task is
-a **host-dependent binding** before anything else. That is an optional `bindings: {host: binding}` on
-a credential, chosen in §4.2 step 4 by the matched host, with `--preset github` writing
-`api.github.com → Bearer {password}`. The stored shape is a superset, so nothing already stored
-migrates.
+of a private repository works with the same header. A0 also checks the `github-mcp` preset: GitHub's
+remote MCP server at `api.githubcopilot.com` answers an MCP `initialize` POST sent with
+`Authorization: Bearer <PAT>`. If A0 fails for `api.github.com`, the `github` preset entry writes two
+credentials from the one PAT: `github` (`github.com`, Basic) and `github-api` (`api.github.com`,
+`Bearer {password}`). That is a change to the catalog, not to any schema. If the MCP check fails,
+`github-mcp` does not ship.
 
 ## 5. `moca-egress`
 
@@ -249,11 +280,18 @@ migrates.
 `CredentialPolicy` (`internal/egress/credpolicy.go`) changes from a predicate to a lookup:
 
 ```go
-type CredentialPolicy interface {
-	// Lookup reports the credential for c's session at host: found, none, or an error.
-	Lookup(ctx context.Context, c Caller, host string) (Credential, LookupResult, error)
+type Header struct{ Name, Value string }
+type Credential struct {
+	Name, PathPrefix, Subject string
+	Port                      int
+	Headers                   []Header
+	ExpiresAt                 time.Time // zero for the static resolver
 }
-type Credential struct{ Name, Header, Value, Subject string }
+type CredentialPolicy interface {
+	// Lookup reports the owner's credential set for c's session at host. Empty means none; an
+	// error means unknown, and the caller refuses rather than tunnels.
+	Lookup(ctx context.Context, c Caller, host string) ([]Credential, error)
+}
 ```
 
 - `NoCredentials` stays, returning `none`, and is the default. `MOCA_EGRESS_CREDENTIALS_URL` unset
@@ -261,12 +299,13 @@ type Credential struct{ Name, Header, Value, Subject string }
 - `controlPlaneCredentials` calls §4.2, with a cache keyed by `(sid, host)` holding found **and**
   none results for `ttlSeconds`, and single-flight per key so a burst of parallel `git` connections
   makes one call. Errors are not cached.
-- `handler.go:202` becomes: `none` → dial and tunnel (unchanged path); `found` → intercept (§5.2);
+- `handler.go:202` becomes: no element with the CONNECT port → dial and tunnel (unchanged path); one
+  or more → intercept (§5.2);
   error or timeout (`MOCA_EGRESS_CREDENTIALS_TIMEOUT`, default 3 s) → `503 credential_unavailable`,
   as today. **An unreachable control plane never degrades to an unauthenticated tunnel for a host
   that might have a credential.** That is I5, and it is the existing code's behaviour.
-- On a **plain-HTTP** (absolute-form) request, a `found` result is refused with `403
-plaintext_credential` (MI1 §8.5 item 3). It is never sent in the clear.
+- On a **plain-HTTP** (absolute-form) request, any element for the request's port refuses it with
+  `403 plaintext_credential` (MI1 §8.5 item 3). A credential is never sent in the clear.
 - The lookup happens **after** the allowlist and address checks. Off-allowlist and private
   destinations are refused before the control plane is ever asked.
 
@@ -284,13 +323,28 @@ MI1 §8.5 items 4–5 and §8.7, restated only where a choice is made here:
 - **ALPN `http/1.1` only**, toward the guest and toward the upstream. `git`, `gh` and `curl` all speak
   it. HTTP/2 interception is out of scope for phase 1 (§11).
 - Each request is read with Go's `http.ReadRequest`. `Host` must equal the CONNECT host, else `421`.
-  The credential's header is **set**, replacing any value the guest sent, so the placeholder never
-  reaches the upstream. `Proxy-*` and `X-Moca-*` are stripped by the existing `forward.go` logic, and
+- **Selection (E10).** Among the elements with the CONNECT port, take the one with the longest
+  `pathPrefix` that matches the request path on a `/` boundary (`/github` matches `/github` and
+  `/github/x`, not `/githubx`). When **any** element for this host has a prefix other than `/`, a
+  request path with a dot-segment, a backslash, or a percent-encoded `.`, `/` or `\` (any case) is
+  refused `400 bad_request`. Otherwise an upstream that normalizes paths could route a credential
+  past its prefix: `/github/../jira` would carry the GitHub token to the Jira server behind the same
+  gateway. A request no element matches is forwarded **without injection**: still intercepted, with
+  the guest's own headers scrubbed as on any other request.
+- The selected element's headers are each **set**, replacing any value the guest sent and adding
+  any it did not send. So the placeholder never reaches the upstream, and a client that sends no
+  `Authorization` at all (an MCP client that would otherwise start OAuth discovery on a `401`) is
+  authenticated anyway. `Proxy-*` and `X-Moca-*` are stripped by the existing `forward.go` logic, and
   bodies are streamed. Keep-alive is supported. **Each request re-reads the credential through the
-  cache** (no network call while the entry is fresh). When the lookup now answers `none` (the
-  credential was deleted, the owner was removed, or the sandbox ended), the request is answered `401
-credential_revoked` and the connection is closed. A long-lived `git` or `gh` connection therefore
-  stops injecting within one TTL of a delete, which acceptance item 6 tests. _(Builder's call.)_
+  cache** (no network call while the entry is fresh). When the set no longer contains the element
+  this request selects (the credential was deleted, the owner was removed, or the sandbox ended),
+  the request is answered `401 credential_revoked` and the connection is closed. A long-lived `git`
+  or `gh` connection therefore stops injecting within one TTL of a delete, which acceptance item 6
+  tests. _(Builder's call.)_
+- **A response already streaming is not cut on revocation.** Revocation stops the credential being
+  _sent_, and an in-flight response sends nothing. A long-lived response, such as the SSE `GET`
+  stream of MCP's Streamable HTTP transport, ends on its own schedule, and the next request on that
+  connection is refused as above. _(Review of #624; chosen over a watcher that closes streams.)_
 - One audit line per request: the existing fields plus `decision: credential_injected`, `credential`
   (the name), `sub` (from the lookup response, for the audit only; identity still comes from the
   listener), and the path with the query stripped (`RedactPath`).
@@ -348,20 +402,37 @@ the host and is a trust anchor, not a secret (P4 §5.2, Z5 E3).
   `install-host.sh BUNDLE --snapshot …`. `RUNBOOK.md` and the `sbx:install`/`sbx:upgrade` procedures
   carry it.
 
-### 6.3 Internal services
+### 6.3 Internal services and MCP servers
 
 Nothing in the design is specific to GitHub. For an internal REST service, the operator does three
 things: allowlist its host, add its range to `MOCA_EGRESS_PERMIT_CIDRS` (P4.1 amendment item 5), and
 add its CA to `MOCA_EGRESS_UPSTREAM_CA`. The user then stores a `bearer` or `api-key` credential with
-`--host` set to it. A wildcard host (`*.corp.example`) is not supported in phase 1. Each host is
-listed.
+`--host` set to it, or to `host:port/prefix` (E10). A wildcard host (`*.corp.example`) is not
+supported in phase 1. Each host is listed.
+
+**An MCP server reached over Streamable HTTP is such a service**, and the main non-GitHub case. Its
+transport is HTTP/1.1 `POST` plus an SSE response or `GET` stream, which §5.2 carries unchanged.
+
+- **Several servers behind one gateway** (`mcp.corp.example/github`, `/jira`, `/docs`, each with
+  its own token) are path-prefixed destinations: one credential each, selected per request (E10).
+- **No placeholder is needed in `.mcp.json`.** The headers are set even when the client sends
+  none, so a guest MCP client never sees the `401` that would start OAuth discovery.
+- **Two headers** (a key plus a tenant or org header) are a `binding` list (§4.2 step 4).
+- **Hour-long OAuth 2.1 access tokens** need the `oauth2-refresh` resolver (E11), which is not
+  built in phase 1. Until it is, an MCP server is usable when it accepts a long-lived token, such as
+  GitHub's (`github-mcp` preset). The seam is in the contract, so adding the resolver changes
+  neither the wire nor `moca-egress`.
+- **HTTP/2:** interception offers ALPN `http/1.1` only (§5.2). A hosted MCP server that negotiates
+  HTTP/2 still works as long as it accepts HTTP/1.1, which every Streamable HTTP server must for
+  its SSE stream today. See §11.
 
 ## 7. `mocactl sbx credentials`
 
 ```
 mocactl sbx credentials [--json]
-mocactl sbx credentials add NAME --host HOST [--host HOST …] [--kind KIND]    # secret on stdin
-mocactl sbx credentials add NAME --preset github                                # PAT on stdin
+mocactl sbx credentials presets [--json]                                         # the catalog (E12)
+mocactl sbx credentials add NAME --host DEST [--host DEST …] [--kind KIND]       # secret on stdin
+mocactl sbx credentials add NAME --preset ID                                     # token on stdin
 mocactl sbx credentials delete NAME
 ```
 
@@ -371,13 +442,22 @@ mocactl sbx credentials delete NAME
   `rt.harness` (`headless.ts:249`). Their bodies are factored to take a `cp`-only readiness check (the
   login and API-token validity half of `ready()`), and the `mocactl credentials` commands keep calling
   them through `ready()`. `--consumer` is not offered: the client always sends `sandbox-egress`.
-- `--preset github` sets kind `basic`, hosts `github.com` and `api.github.com`, and `username =
-x-access-token`. It reads **only the token** from stdin, using the single-line checks
-  `secretFromStdin` applies to a one-field kind (`core/credential-checks.ts:159-172`), and builds
-  `{username, password}` itself. The two-field `field=value` form (`:174-186`) is not asked of the
-  user. (If A0 fails, it also writes the
-  `api.github.com` Bearer binding, per §4.4.) It prints a reminder to use a **fine-grained PAT scoped
-  to the repositories the sandbox needs**, because nothing in MOCA narrows it (E8).
+- `DEST` is `host[:port][/prefix]` (E10). The control plane validates and normalizes it.
+- **`--preset ID` reads the catalog (E12)**, `packages/mocactl/src/sbx/presets.ts`, a data-only module (no JSON imports exist in mocactl's bundle today), which is
+  bundled into `mocactl.mjs` and checked by a schema test. An entry lists one or more credentials,
+  each with `kind`, `destinations`, an optional `binding` (one or a list), `fixed` secret fields and
+  the one `stdinField`. The preset reads **only that field** from stdin, using the single-line checks
+  `secretFromStdin` applies to a one-field kind (`core/credential-checks.ts:159-172`), and fills in
+  `fixed` itself. A multi-credential entry writes `NAME` and `NAME-<suffix>` from the one input. The
+  first entries are:
+  - `github`: `basic`, `github.com` and `api.github.com`, `fixed: {username: x-access-token}`,
+    `stdinField: password` (or two credentials if A0 fails, §4.4);
+  - `github-mcp`: `bearer` at `api.githubcopilot.com`, `stdinField: token` (ships only if A0's MCP
+    check passes).
+
+  Each prints its `hint`. For GitHub that is the reminder to use a **fine-grained PAT scoped to the
+  repositories the sandbox needs**, because nothing in MOCA narrows it (E8).
+
 - Against a sandbox control plane that has not enabled credentials (routes unmounted, `404`),
   `mocactl` says that the deployment does not offer egress credentials, rather than "not found".
 - The allowlist stays a **host** setting (`moca-egress.env`, written only when absent, #623), and
@@ -468,7 +548,7 @@ where a host that had a credential no longer has one. `doc.go`'s "`sub` absent (
 slice)" becomes "present on `credential_injected` events". MI1 §12.3's case list gains a pointer to
 this section. _(Builder's call.)_
 
-New conformance cases, mutation-checked like the existing 13:
+New conformance cases (thirteen), mutation-checked like the existing 13:
 
 1. Credentialed host: the upstream sees the injected header, and never the guest's placeholder.
 2. Non-credentialed host: an opaque tunnel, with the upstream seeing the guest's own TLS handshake.
@@ -482,6 +562,12 @@ New conformance cases, mutation-checked like the existing 13:
 9. Revocation mid-connection: after the fake control plane starts answering `none`, the next request
    on an open intercepted connection gets `401 credential_revoked`, zero upstream requests, and a
    closed connection.
+10. Path selection: with `/` and `/a` credentials on one host, `/a/x` carries `/a`'s headers, `/b`
+    carries `/`'s, and with only `/a`, `/b` is forwarded with nothing injected.
+11. Dot-segment refusal: with a path-scoped credential on the host, `/a/../b` and `/a/%2e%2e/b` get
+    `400` and zero upstream requests.
+12. Several headers: a two-header credential sets both, overwriting the guest's values.
+13. Port: a credential for `:8443` does not intercept a CONNECT to `:443`, which is tunnelled.
 
 The test control plane is a fake HTTP server in the harness, so the suite needs no cluster.
 
@@ -506,11 +592,19 @@ store env, the unchanged NetworkPolicy, and no service-account token.
 - **Repo-, path- or method-level policy** in the proxy (E8).
 - **A single owner for the egress allowlist** (cluster-side, shipped to hosts), and the `sbx doctor`
   check that would need it (§7).
-- **HTTP/2 or WebSocket interception.** Clients are offered `http/1.1`.
+- **HTTP/2 or WebSocket interception.** Clients are offered `http/1.1`. If an upstream (a hosted MCP
+  server, say) stops accepting HTTP/1.1, that is the trigger to add HTTP/2 interception.
+- **Resolvers other than `static`** (`oauth2-refresh`, `token-exchange`). The seam is designed
+  (E11), not built.
+- **Named placeholders** (`moca-cred:<name>`, OpenShell-style), so a guest can choose between two
+  credentials on one destination without holding either. Destination selection (E10) still bounds
+  where each can go. A later addition, with no wire change.
+- **Query, path or body placement, and request re-signing.** Credentials go in headers only.
 - **Wildcard destination hosts.**
 - **SSH** (`git@github.com:`). The tier has no raw sockets (P4.1 §7). `sbx up` already pushes over
   the relay, and users clone over HTTPS.
 - **OAuth flows, token minting or GitHub App installation tokens.** The user brings a static token.
+  OAuth 2.1 _discovery_ for MCP is not needed, because the headers are set unconditionally (§6.3).
 - **Request-signing schemes** (SigV4).
 - **The harness's own microVM sessions and the container tier.** These remain MI1 S2, S4 and S5.
 - **A cert-pinning escape hatch** (P4.1 §7, unchanged).
@@ -533,6 +627,17 @@ store env, the unchanged NetworkPolicy, and no service-account token.
   host whose compromise phase 2 is designed to contain, and needs a second write path from `mocactl`.
 - **Cortex/AuthBridge instead of `moca-egress`:** MI1 D4 keeps `moca-egress` until Cortex passes
   the conformance suite (#241).
+- **A structured `destination: [{host, port, pathPrefix}]` field** (the #624 review's first shape):
+  it would change the stored descriptor in all three stores, the harness profile and `mocactl`'s
+  types. The string form `host[:port][/prefix]` in the existing `hosts` array encodes the same
+  triple, a bare host parses as `{host}`, and the **wire** to `moca-egress` carries the structured
+  form.
+- **Per-destination binding overrides on one credential** (`bindings: {host: binding}`): a preset
+  can write one credential per destination shape from a single input (§4.4, E12), so the
+  descriptor stays one binding or one list.
+- **Provider profiles as imported YAML with no compiled registry** (NVIDIA OpenShell): the kind
+  registry stays the place for field and validation rules, and the preset catalog (E12) is the data
+  layer above it. That is enough while presets are reviewed in this repository.
 
 ## 13. Documents amended
 
@@ -551,12 +656,12 @@ store env, the unchanged NetworkPolicy, and no service-account token.
 
 ## 14. Implementation order (for the plan)
 
-1. A0 (§4.4), a curl check. If it fails, the host-dependent binding comes before anything else.
+1. A0 (§4.4), a curl check. Its result decides the `github` and `github-mcp` catalog entries.
 2. #623: egress on `install-host.sh`.
 3. Control plane: profile config, routes, §4.2, tests (§10.1).
 4. `moca-egress`: lookup, cache, interception, conformance (§10.2).
 5. Snapshot `--egress-ca`, host CA, egress bundle, fingerprint check (§6, §10.3).
-6. `mocactl sbx credentials`, `--preset github`, doctor, steering (§7).
+6. `mocactl sbx credentials`, the preset catalog, steering (§7).
 7. `setup.sh` and the overlay: PVC, KEK, host tokens (§4.3).
 8. Live smoke and the KVM gate (§10.4), then the user guide and security review rows.
 
