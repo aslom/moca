@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1055,21 +1056,33 @@ func lastReq(u *httpUpstream, path string) (seenRequest, bool) {
 }
 
 // wantAuth checks that the upstream saw exactly one Authorization, equal to
-// want ("" means none), for its last request at path.
+// want ("" means none), for its last request at path. A failure names the
+// header and counts, never a value: the suite runs against real deployments.
 func wantAuth(u *httpUpstream, path, want string) error {
+	return wantHeader(u, path, "Authorization", want)
+}
+
+// wantHeader is wantAuth for any header name. Messages say matched, not
+// matched or absent, with counts, and carry no header value.
+func wantHeader(u *httpUpstream, path, name, want string) error {
 	rq, ok := lastReq(u, path)
 	if !ok {
 		return fmt.Errorf("upstream saw no request for %s", path)
 	}
-	got := rq.values("Authorization")
+	got := rq.values(name)
 	if want == "" {
 		if len(got) != 0 {
-			return fmt.Errorf("%s reached the upstream with Authorization %q, want none", path, got)
+			return fmt.Errorf("%s reached the upstream with %d %s header(s), want none", path, len(got), name)
 		}
 		return nil
 	}
-	if len(got) != 1 || got[0] != want {
-		return fmt.Errorf("%s reached the upstream with Authorization %q, want exactly [%q]", path, got, want)
+	switch {
+	case len(got) == 0:
+		return fmt.Errorf("%s reached the upstream with %s absent, want it set", path, name)
+	case len(got) != 1:
+		return fmt.Errorf("%s reached the upstream with %d %s headers, want exactly 1", path, len(got), name)
+	case got[0] != want:
+		return fmt.Errorf("%s reached the upstream with one %s header that is not the expected value (not matched)", path, name)
 	}
 	return nil
 }
@@ -1081,7 +1094,7 @@ func (g *guest) getOK(target string, hp string, extra ...string) error {
 		return fmt.Errorf("GET %s: %w", target, err)
 	}
 	if r.status != 200 {
-		return fmt.Errorf("GET %s: status %d %q, want 200", target, r.status, r.body)
+		return fmt.Errorf("GET %s: status %d (body %d bytes), want 200", target, r.status, len(r.body))
 	}
 	return nil
 }
@@ -1124,7 +1137,7 @@ func credentialInjectedPlaceholderOverwritten(ctx context.Context, t Target) err
 			for k, vs := range rq.header {
 				for _, val := range vs {
 					if strings.Contains(val, "moca-placeholder") {
-						return fmt.Errorf("the placeholder reached the upstream in %s: %s", k, val)
+						return fmt.Errorf("the placeholder reached the upstream in header %s", k)
 					}
 				}
 			}
@@ -1324,12 +1337,20 @@ func innerHostMismatch421(ctx context.Context, t Target) error {
 		cfg := trusting(w.icCA.pool)
 		cfg.ServerName = "evil.test"
 		cfg.InsecureSkipVerify = true // whatever the server offers; only its refusal is under test
-		if g, err := h.tlsGuest(v, w.hp, cfg); err == nil {
-			g.close()
+		sg, err := h.dial(v)
+		if err != nil {
+			return err
+		}
+		defer sg.close()
+		if cr, err := sg.connect(w.hp); err != nil || cr.status != 200 {
+			return fmt.Errorf("CONNECT %s before the SNI attempt: status %d, err %v, want 200", w.hp, cr.status, err)
+		}
+		tc := tls.Client(connConn{sg.c, sg.br}, cfg)
+		if err := tc.Handshake(); err == nil {
 			return fmt.Errorf("a TLS handshake with SNI evil.test inside a tunnel to %s succeeded", w.hp)
 		}
-		if n := h.count(event{"decision": "misdirected_request"}); n < 1 {
-			return fmt.Errorf("no misdirected_request event")
+		if _, err := h.wait(event{"decision": "misdirected_request", "status": 421, "method": "CONNECT"}); err != nil {
+			return fmt.Errorf("after the SNI attempt: %w", err)
 		}
 		if n := len(w.up.requests()); n != 0 {
 			return fmt.Errorf("upstream served %d requests, want 0", n)
@@ -1700,6 +1721,9 @@ func credentialSelectedByPathPrefix(ctx context.Context, t Target) error {
 		if err := gc.getOK("/a/x", w.hp); err != nil {
 			return err
 		}
+		if err := wantAuth(w.up, "/a/x", "Bearer a-tok"); err != nil {
+			return fmt.Errorf("premise (this conn injected /a): %w", err)
+		}
 		if err := gc.getOK("/other2", w.hp); err != nil {
 			return err
 		}
@@ -1818,11 +1842,7 @@ func credentialSetsEveryHeader(ctx context.Context, t Target) error {
 		if err := wantAuth(w.up, "/x", "Bearer two-tok"); err != nil {
 			return err
 		}
-		rq, _ := lastReq(w.up, "/x")
-		if got := rq.values("X-Api-Key"); len(got) != 1 || got[0] != "key-1" {
-			return fmt.Errorf("X-Api-Key reached the upstream as %q, want exactly [\"key-1\"]", got)
-		}
-		return nil
+		return wantHeader(w.up, "/x", "X-Api-Key", "key-1")
 	})
 }
 
@@ -1904,7 +1924,8 @@ func traceRefusedOnInterceptedConn(ctx context.Context, t Target) error {
 				return fmt.Errorf("%s: %w", m, err)
 			}
 			if r.status != 405 {
-				return fmt.Errorf("%s: status %d %q, want 405", m, r.status, r.body)
+				return fmt.Errorf("%s: status %d (body %d bytes, Authorization line in body: %v), want 405",
+					m, r.status, len(r.body), strings.Contains(strings.ToLower(r.body), "authorization:"))
 			}
 			if strings.Contains(r.body, "real-token-1") || strings.Contains(fmt.Sprint(r.header), "real-token-1") {
 				return fmt.Errorf("%s: the response carries the credential", m)

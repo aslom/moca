@@ -47,6 +47,8 @@
 //     upstream→guest, as numbers. They refine MI1 section 8.5's single bytes
 //     field (P4.1 amendment of 2026-10-21, item 8).
 //
+// An intercepted request that no credential covers emits decision=forward with
+// its path and status. A credential_revoked event carries credential and sid.
 // credential, the name of the credential injected or revoked (never its
 // value), is read on credential_injected and credential_revoked events. Other
 // fields, such as time, are not read.

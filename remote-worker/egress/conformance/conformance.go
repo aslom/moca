@@ -514,7 +514,7 @@ func (h *harness) count(want event) int {
 func (h *harness) seenText() string {
 	var b strings.Builder
 	for _, m := range h.seen {
-		j, _ := json.Marshal(m)
+		j, _ := json.Marshal(redactEvent(m))
 		b.Write(j)
 		b.WriteByte('\n')
 	}
@@ -522,6 +522,27 @@ func (h *harness) seenText() string {
 		return "(no events)"
 	}
 	return "\n" + b.String()
+}
+
+// redactEvent copies m with every value that could carry a secret replaced:
+// those under a key such as authorization, cookie, x-api-key or value, and
+// any string that looks like a Bearer or Basic credential. Failure messages
+// of a public suite must not print a credential.
+func redactEvent(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		switch lk := strings.ToLower(k); {
+		case lk == "authorization" || lk == "cookie" || lk == "x-api-key" || lk == "value" || lk == "token":
+			out[k] = "<redacted>"
+		default:
+			if s, ok := v.(string); ok && (strings.Contains(s, "Bearer ") || strings.Contains(s, "Basic ")) {
+				out[k] = "<redacted>"
+			} else {
+				out[k] = v
+			}
+		}
+	}
+	return out
 }
 
 // ---- fake upstreams ----
