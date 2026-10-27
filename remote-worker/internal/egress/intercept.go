@@ -20,6 +20,9 @@ import (
 // §10.1.1: a client does not wait forever for a server that never answers).
 const expectContinueWait = time.Second
 
+// maxInterim bounds the 1xx responses (other than 100) discarded per request.
+const maxInterim = 10
+
 var errExpectDenied = errors.New("egress: upstream answered an Expect: 100-continue with a final status")
 
 // tlsInterceptor is the interceptor: it terminates the guest's TLS with a
@@ -202,7 +205,7 @@ func rawPathUnsafe(requestURI string) bool {
 	if i := strings.IndexByte(raw, '?'); i >= 0 {
 		raw = raw[:i]
 	}
-	if strings.ContainsAny(raw, `\;%`) {
+	if strings.ContainsAny(raw, `\;%#`) || strings.Contains(raw, "//") {
 		return true
 	}
 	for _, seg := range strings.Split(raw, "/") {
@@ -240,6 +243,11 @@ func (c *icConn) next() bool {
 	}
 	if !c.hostMatches(req.Host) {
 		return bad(http.StatusMisdirectedRequest, DecisionMisdirected)
+	}
+	// TRACE and TRACK reflect the request, injected credential included, back
+	// to the guest. Refused before revocation and selection, nothing upstream.
+	if m := strings.ToUpper(req.Method); m == "TRACE" || m == "TRACK" {
+		return bad(http.StatusMethodNotAllowed, DecisionBadRequest)
 	}
 	// Re-read the credential: a cache hit while the entry is fresh.
 	all, err := pc.p.cfg.Credentials.Lookup(pc.ctx, pc.caller, c.t.host)
@@ -356,6 +364,7 @@ func (c *icConn) exchange(req *http.Request, ev Event) bool {
 		}
 	}
 	var resp *http.Response
+	interim := 0
 	if early != nil {
 		resp = early
 		stop()
@@ -377,9 +386,15 @@ func (c *icConn) exchange(req *http.Request, ev Event) bool {
 				ur.start(req)
 				continue
 			}
+			if sc := r.resp.StatusCode; sc >= 102 && sc < 200 && interim < maxInterim {
+				// 103 Early Hints and the like: not relayed, the wait goes on.
+				interim++
+				ur.start(req)
+				continue
+			}
 			if r.resp.StatusCode >= 100 && r.resp.StatusCode < 200 {
-				// Upgrade was stripped: an upstream switching protocols unasked
-				// is never relayed.
+				// Upgrade was stripped: an upstream switching protocols (101)
+				// unasked, or past the interim bound, is never relayed.
 				stop()
 				ev.BytesUp = bytesUp.Load()
 				return c.refuse(Event{Status: http.StatusBadGateway, Decision: DecisionUpstreamUnreachable}, ev)

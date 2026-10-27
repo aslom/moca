@@ -404,6 +404,7 @@ func TestInterceptRefusesTraversalWhenPathScoped(t *testing.T) {
 	for _, target := range []string{
 		"/github/../jira", "/github/%2e%2e/jira", "/github/%252e%252e/jira", "/github%2Fjira",
 		"/github/..;/jira", "/github;x/../jira", `/github\jira`, "/github/./x",
+		"//jira/x", "/github//x", "/github#/x",
 	} {
 		g := e.open()
 		g.raw(strings.Replace(e.reqLine("GET", "X"), "X", target, 1))
@@ -422,10 +423,46 @@ func TestInterceptRefusesTraversalWhenPathScoped(t *testing.T) {
 	}
 }
 
+func TestInterceptRefusesTrace(t *testing.T) {
+	e := newICEnv(t, icOpts{})
+	e.up.custom = func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, r.Header) }
+	e.pol.Set(e.cred("gh", "/github", authHdr("Bearer s3cr3t-trace")))
+	for _, m := range []string{"TRACE", "track"} {
+		g := e.open()
+		g.raw(e.reqLine(m, "/github/x"))
+		resp, body := g.readResp()
+		if resp.StatusCode != 405 || strings.Contains(body, "s3cr3t-trace") {
+			t.Errorf("%s: %d %q", m, resp.StatusCode, body)
+		}
+		g.expectClosed()
+	}
+	if e.up.count() != 0 {
+		t.Fatalf("%d TRACE requests reached upstream", e.up.count())
+	}
+}
+
+func TestInterceptSkipsEarlyHints(t *testing.T) {
+	e := newICEnv(t, icOpts{})
+	e.up.custom = func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Link", "</a.css>; rel=preload")
+		w.WriteHeader(http.StatusEarlyHints)
+		io.WriteString(w, "fin")
+	}
+	e.pol.Set(e.cred("gh", "/", authHdr("Bearer R")))
+	g := e.open()
+	resp, body := e.get(g, "/x")
+	if resp.StatusCode != 200 || body != "fin" {
+		t.Fatalf("%d %q", resp.StatusCode, body)
+	}
+	if e.up.last(t).Header.Get("Authorization") != "Bearer R" {
+		t.Fatal("credential not injected")
+	}
+}
+
 func TestInterceptRootOnlyForwardsDotSegments(t *testing.T) {
 	e := newICEnv(t, icOpts{})
 	e.pol.Set(e.cred("gh", "/", authHdr("Bearer R")))
-	for _, target := range []string{"/a/../b", "/a;x"} {
+	for _, target := range []string{"/a/../b", "/a;x", "/a//b"} {
 		g := e.open()
 		if resp, _ := e.get(g, target); resp.StatusCode != 200 {
 			t.Errorf("%q: %d", target, resp.StatusCode)
