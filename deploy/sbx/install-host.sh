@@ -84,17 +84,53 @@ valid_id() { [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ && "$1" != DIR ]]; }
 
 record() { mkdir -p "$SBX_ENV_DIR"; touch "$SBX_ENV_DIR/manifest"; grep -qxF "$1" "$SBX_ENV_DIR/manifest" || echo "$1" >>"$SBX_ENV_DIR/manifest"; }
 
+sha256_of() { # sha256_of FILE -> its hex digest
+  if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
+
+# The moca-egress.service this script installs: the P4 unit with this host's env file and without its
+# comments (they name the P6 paths).
+egress_unit_text() {
+  sed -e '/^#/d' -e "s#^EnvironmentFile=.*#EnvironmentFile=$SBX_ENV_DIR/moca-egress.env#" "$SCRIPT_DIR/../microvm/moca-egress.service"
+}
+
+# egress_unit_is_ours UNIT [RECORDED_SHA256]: a unit counts as this script's only while its content is
+# what the script wrote. deploy/microvm/setup-microvm.sh (the P6 installer) overwrites the same path
+# with its own copy, which must then be left alone. With a recorded digest the unit is ours iff it still
+# hashes to it; a manifest from before digests were recorded falls back to the text we generate now.
+egress_unit_is_ours() {
+  [[ -f "$1" ]] || return 1
+  if [[ -n "${2:-}" ]]; then [[ "$(sha256_of "$1")" == "$2" ]]; else egress_unit_text | cmp -s - "$1"; fi
+}
+
+# egress_claimed KIND PATH: the manifest has an `egress KIND PATH [SHA256]` line for it.
+egress_claimed() {
+  [[ -f "$SBX_ENV_DIR/manifest" ]] &&
+    awk -v k="$1" -v p="$2" '$1 == "egress" && $2 == k && $3 == p { f = 1 } END { exit !f }' "$SBX_ENV_DIR/manifest"
+}
+# egress_recorded_hash KIND PATH -> the SHA256 on that line, or nothing (a manifest from before digests).
+egress_recorded_hash() {
+  [[ -f "$SBX_ENV_DIR/manifest" ]] || return 0
+  awk -v k="$1" -v p="$2" '$1 == "egress" && $2 == k && $3 == p { print $4; exit }' "$SBX_ENV_DIR/manifest"
+}
+# egress_forget KIND PATH: drop that line, whatever digest it carries.
+egress_forget() {
+  [[ -f "$SBX_ENV_DIR/manifest" ]] || return 0
+  awk -v k="$1" -v p="$2" '!($1 == "egress" && $2 == k && $3 == p)' "$SBX_ENV_DIR/manifest" >"$SBX_ENV_DIR/manifest.new"
+  mv "$SBX_ENV_DIR/manifest.new" "$SBX_ENV_DIR/manifest"
+}
+
 egress_seed() { printf 'MOCA_EGRESS_ALLOW=%s\n' "${MOCA_EGRESS_ALLOW:-$DEFAULT_EGRESS_ALLOW}"; }
 
 # wait_egress_ready: the worker's startup probe Registers over moca-egress's control socket, so a
 # moca-egress that exits at boot (a bad moca-egress.env) would otherwise surface much later, as the
 # worker failing to attach. The unit is Type=notify, so a successful start already means the socket is
 # bound; this wait is the belt to that, and it is what names moca-egress when it did not come up.
-wait_egress_ready() {
-  local deadline=$((SECONDS + MOCA_EGRESS_READY_TIMEOUT))
+wait_egress_ready() { # wait_egress_ready ENV_FILE: the env file the ACTIVE unit reads, for the hint
+  local envfile="$1" deadline=$((SECONDS + MOCA_EGRESS_READY_TIMEOUT))
   until [[ -S "$MOCA_EGRESS_SOCKET" ]]; do
     if ((SECONDS >= deadline)); then
-      die "moca-egress did not bind $MOCA_EGRESS_SOCKET within ${MOCA_EGRESS_READY_TIMEOUT}s; the reason is in: journalctl -u moca-egress (often a bad $SBX_ENV_DIR/moca-egress.env). Fix it and re-run"
+      die "moca-egress did not bind $MOCA_EGRESS_SOCKET within ${MOCA_EGRESS_READY_TIMEOUT}s; the reason is in: journalctl -u moca-egress (often a bad $envfile). Fix it and re-run"
     fi
     sleep 1
   done
@@ -102,31 +138,52 @@ wait_egress_ready() {
 
 # install_egress: see the header for the rules. Runs before install_units and before any systemctl.
 install_egress() {
-  local unit="$SBX_UNIT_DIR/moca-egress.service" env="$SBX_ENV_DIR/moca-egress.env" tmp changed=0 hint
+  local unit="$SBX_UNIT_DIR/moca-egress.service" env="$SBX_ENV_DIR/moca-egress.env" tmp changed=0 hint reuse=1
   [[ -x "$SBX_BIN_DIR/moca-egress" ]] ||
     die "no $SBX_BIN_DIR/moca-egress: build it with CGO_ENABLED=0 go build -o /usr/local/bin/moca-egress ./remote-worker/cmd/moca-egress (or pass --no-egress to install the worker without guest egress)"
-  if [[ -e "$unit" ]] && ! grep -qxF "egress unit $unit" "$SBX_ENV_DIR/manifest" 2>/dev/null; then
+  if [[ -e "$unit" ]]; then
+    if egress_claimed unit "$unit"; then
+      if egress_unit_is_ours "$unit" "$(egress_recorded_hash unit "$unit")"; then
+        reuse=0
+      else
+        log "moca-egress.service was changed by another install; reusing it"
+        egress_forget unit "$unit"
+      fi
+    fi
+  else
+    reuse=0
+  fi
+  if ((reuse)); then
+    local foreign_env
     log "reusing the existing moca-egress.service (not installed by this script)"
-    wait_egress_ready
+    systemctl is-active --quiet moca-egress.service ||
+      die "the existing moca-egress.service (not installed by this script) is not running: start it or fix the install that owns it (journalctl -u moca-egress)"
+    foreign_env="$(sed -n 's/^EnvironmentFile=-\{0,1\}//p' "$unit" | head -1)"
+    wait_egress_ready "${foreign_env:-its EnvironmentFile}"
     return 0
   fi
   install -d -m 0755 "$SBX_UNIT_DIR"
   install -d -m 0700 "$SBX_ENV_DIR"
-  # The unit is the P4 one with this host's env file and without its comments (they name the P6 paths).
   tmp="$(mktemp)"
-  sed -e '/^#/d' -e "s#^EnvironmentFile=.*#EnvironmentFile=$env#" "$SCRIPT_DIR/../microvm/moca-egress.service" >"$tmp"
+  egress_unit_text >"$tmp"
   if ! cmp -s "$tmp" "$unit" 2>/dev/null; then
     install -m 0644 "$tmp" "$unit"
     changed=1
   fi
   rm -f "$tmp"
+  egress_forget unit "$unit"
+  record "egress unit $unit $(sha256_of "$unit")"
   if [[ ! -e "$env" ]]; then
     (umask 022 && egress_seed >"$env")
     chmod 0644 "$env"
     changed=1
+    egress_forget file "$env"
+    record "egress file $env $(sha256_of "$env")"
+  else
+    # An env file already there is recorded only if nothing is: with no digest, uninstall falls back to
+    # comparing it with the seed.
+    egress_claimed file "$env" || record "egress file $env"
   fi
-  record "egress unit $unit"
-  record "egress file $env"
   systemctl daemon-reload
   systemctl enable moca-egress.service
   # A Type=notify start that exits or times out before READY=1 -- a bad moca-egress.env -- makes
@@ -139,7 +196,7 @@ install_egress() {
     systemctl reset-failed moca-egress.service || true
     systemctl start moca-egress.service || die "moca-egress failed to start; $hint"
   fi
-  wait_egress_ready
+  wait_egress_ready "$env"
 }
 
 install_units() {
@@ -287,27 +344,41 @@ remove_shared_units() {
   remove_egress
 }
 
-# The moca-egress this script installed goes with the last worker: stopped, then its unit removed. Its
-# env file is the operator's allowlist, so an edited one stays (kept, and said so). A moca-egress.service
-# the manifest does not list was never ours and is not touched.
+# The moca-egress this script installed goes with the last worker: stopped, then its unit removed, but
+# only while the unit still has the content this script wrote (another install, such as the P6
+# setup-microvm.sh, may have replaced it and its worker depends on it). The env file is the operator's
+# allowlist: it goes only if it still hashes to what was seeded (a manifest without a digest falls back
+# to comparing with the seed). A moca-egress.service the manifest does not list was never ours.
+# An `egress <kind>` this script does not know (a later version's) is left alone, line and file.
 remove_egress() {
-  local kind path
-  if grep -q '^egress unit ' "$SBX_ENV_DIR/manifest"; then
-    systemctl disable --now moca-egress.service || true
-  fi
-  while read -r kind path; do
+  local kind path sha
+  [[ -f "$SBX_ENV_DIR/manifest" ]] || return 0
+  while read -r kind path sha; do
+    [[ -n "$path" ]] || continue
     case "$kind" in
-    unit) rm -f "$path"; log "removed $path (no SBX0 worker left on this host)" ;;
+    unit)
+      if egress_unit_is_ours "$path" "$sha"; then
+        systemctl disable --now moca-egress.service || true
+        rm -f "$path"
+        log "removed $path (no SBX0 worker left on this host)"
+      elif [[ -e "$path" ]]; then
+        log "kept $path (changed by another install)"
+      fi
+      ;;
     file)
-      if [[ -f "$path" && "$(cat "$path")" != "$(egress_seed)" ]]; then
+      if [[ ! -f "$path" ]]; then
+        :
+      elif [[ -n "$sha" && "$(sha256_of "$path")" != "$sha" ]] ||
+        [[ -z "$sha" && "$(cat "$path")" != "$(egress_seed)" ]]; then
         log "kept $path (edited)"
       else
         rm -f "$path"
         log "removed $path"
       fi
       ;;
+    *) continue ;;
     esac
-    drop_manifest_lines -x -e "egress $kind $path"
+    egress_forget "$kind" "$path"
   done < <(sed -n 's/^egress //p' "$SBX_ENV_DIR/manifest")
 }
 

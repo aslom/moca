@@ -350,6 +350,9 @@ never a timeout. No credential is involved.
   `build-snapshot.sh` for egress to work ([P4-ON-P6](../microvm/P4-ON-P6.md#guest-egress-p41-277)).
 - **If it fails to start,** the install names `journalctl -u moca-egress` (often a bad
   `/etc/sbx/moca-egress.env`). Fix it and re-run `install-host.sh`.
+- **Ownership is by content.** The manifest records a digest of the unit it installed. If another
+  install (`setup-microvm.sh`) later replaces `moca-egress.service`, a re-run logs
+  `changed by another install; reusing it` and leaves it alone, and the last uninstall keeps it.
 - **Uninstalling** the last worker also stops and removes the `moca-egress.service` this script
   installed; an allowlist you edited stays (`kept ... (edited)`).
 
