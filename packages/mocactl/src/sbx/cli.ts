@@ -548,7 +548,7 @@ export async function sbxMain(
       return unbind(ctx, bindingRoot!);
     }
     case 'doctor':
-      return cmdDoctor(ctx, root, id, deps.execFactory, deps.claudeVersion);
+      return cmdDoctor(ctx, root, id, deps.execFactory, deps.claudeVersion, deps.agentop);
     case 'token':
       return cmdToken(ctx, id!);
     case 'run':
