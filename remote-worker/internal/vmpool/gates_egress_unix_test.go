@@ -19,6 +19,7 @@ import (
 
 	"github.com/rossoctl/moca/remote-worker/internal/egress"
 	"github.com/rossoctl/moca/remote-worker/internal/egress/control"
+	"github.com/rossoctl/moca/remote-worker/internal/shortdir"
 )
 
 // mapResolver resolves only the names it holds; anything else is NXDOMAIN-shaped.
@@ -86,10 +87,7 @@ func TestGateEgressThroughVsock(t *testing.T) {
 	defer proxy.Close()
 
 	// Short path: the control socket and the jail's v.sock_1025 both live under sun_path's limit.
-	sockDir, err := os.MkdirTemp("/tmp", "egk")
-	if err != nil {
-		t.Fatal(err)
-	}
+	sockDir := shortdir.New(t, "egk")
 	defer os.RemoveAll(sockDir)
 	sock := filepath.Join(sockDir, "c.sock")
 	srv, err := control.NewServer(sock, []int{os.Getuid()}, proxy)

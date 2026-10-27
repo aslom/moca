@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/moca/remote-worker/internal/egress/control"
+	"github.com/rossoctl/moca/remote-worker/internal/shortdir"
 )
 
 func TestBinaryServesAndShutsDown(t *testing.T) {
@@ -46,10 +47,7 @@ func TestBinaryServesAndShutsDown(t *testing.T) {
 		c.Write(buf)
 	}()
 
-	dir, err := os.MkdirTemp("/tmp", "meg")
-	if err != nil {
-		t.Fatal(err)
-	}
+	dir := shortdir.New(t, "meg")
 	defer os.RemoveAll(dir)
 	sock := filepath.Join(dir, "c.sock")
 

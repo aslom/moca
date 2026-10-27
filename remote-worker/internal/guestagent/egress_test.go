@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/moca/remote-worker/internal/shortdir"
 )
 
 // startForwarder serves a forwarder on tcp 127.0.0.1:0 using the given Dial and
@@ -29,10 +31,7 @@ func startForwarder(t *testing.T, dial func() (net.Conn, error)) (addr string, d
 
 func unixUpstream(t *testing.T) (net.Listener, func() (net.Conn, error)) {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "gfwd")
-	if err != nil {
-		t.Fatal(err)
-	}
+	dir := shortdir.New(t, "gfwd")
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	path := filepath.Join(dir, "u.sock")
 	ul, err := net.Listen("unix", path)

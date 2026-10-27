@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/rossoctl/moca/remote-worker/internal/shortdir"
 )
 
 // shortUnixSocketDir returns a short-lived directory suitable for AF_UNIX socket
@@ -21,11 +23,7 @@ import (
 // directly keeps every path well under that limit on every platform this runs on.
 func shortUnixSocketDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "vmpool-")
-	if err != nil {
-		t.Fatalf("shortUnixSocketDir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	dir := shortdir.New(t, "vmpool-")
 	return dir
 }
 

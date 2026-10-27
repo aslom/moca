@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/moca/remote-worker/internal/egress/control"
+	"github.com/rossoctl/moca/remote-worker/internal/shortdir"
 )
 
 // recordingBinder is an EgressBinder that logs its calls in order and runs optional hooks
@@ -70,10 +71,7 @@ func (b *recordingBinder) log() []string {
 // jailer's argv is "--id <id> ...", so the script derives the jail from $2.
 func egressLauncher(t *testing.T, b EgressBinder) (Launcher, string, string) {
 	t.Helper()
-	base, err := os.MkdirTemp("/tmp", "fceg")
-	if err != nil {
-		t.Fatal(err)
-	}
+	base := shortdir.New(t, "fceg")
 	t.Cleanup(func() { _ = os.RemoveAll(base) })
 	marker := filepath.Join(base, "jailer-marker")
 	jailer := filepath.Join(base, "jailer")
@@ -195,10 +193,7 @@ func TestEgressRegisterIsDetachedFromTheCallersCancel(t *testing.T) {
 }
 
 func TestGateEgressTeardownOrdering(t *testing.T) {
-	base, err := os.MkdirTemp("/tmp", "fcto")
-	if err != nil {
-		t.Fatal(err)
-	}
+	base := shortdir.New(t, "fcto")
 	t.Cleanup(func() { _ = os.RemoveAll(base) })
 	jail := filepath.Join(base, "root")
 	if err := os.MkdirAll(filepath.Join(jail, "run"), 0o700); err != nil {
@@ -244,10 +239,7 @@ func TestGateEgressTeardownOrdering(t *testing.T) {
 }
 
 func TestEgressUnregisterFailureDoesNotFailDestroy(t *testing.T) {
-	base, err := os.MkdirTemp("/tmp", "fcuf")
-	if err != nil {
-		t.Fatal(err)
-	}
+	base := shortdir.New(t, "fcuf")
 	t.Cleanup(func() { _ = os.RemoveAll(base) })
 	jail := filepath.Join(base, "root")
 	if err := os.MkdirAll(filepath.Join(jail, "run"), 0o700); err != nil {

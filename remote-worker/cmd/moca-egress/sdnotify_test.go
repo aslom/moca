@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/moca/remote-worker/internal/shortdir"
 )
 
 func TestSdNotifyIsANoOpWithoutNotifySocket(t *testing.T) {
@@ -18,10 +20,7 @@ func TestSdNotifyIsANoOpWithoutNotifySocket(t *testing.T) {
 }
 
 func TestSdNotifySendsTheStateDatagram(t *testing.T) {
-	dir, err := os.MkdirTemp("/tmp", "sdn")
-	if err != nil {
-		t.Fatal(err)
-	}
+	dir := shortdir.New(t, "sdn")
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	path := filepath.Join(dir, "notify")
 	ln, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: path, Net: "unixgram"})

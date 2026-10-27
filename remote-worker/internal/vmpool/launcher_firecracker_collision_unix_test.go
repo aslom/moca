@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/moca/remote-worker/internal/shortdir"
 )
 
 // collisionLauncher builds a Firecracker launcher whose JailerBin is a script that
@@ -25,11 +27,7 @@ import (
 // this test fail on path length rather than on the property under test.
 func collisionLauncher(t *testing.T) (Launcher, string, string) {
 	t.Helper()
-	base, err := os.MkdirTemp("/tmp", "fcguard")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	base := shortdir.New(t, "fcguard")
 
 	marker := filepath.Join(base, "jailer-was-spawned")
 	jailer := filepath.Join(base, "jailer")
@@ -165,11 +163,7 @@ func TestFirecrackerProceedsPastTheCollisionGuardWhenTheJailIsFree(t *testing.T)
 // its 5 s timeout. opts.cgroupRoot points the pool at a temp tree because Cgroup2Root names the
 // host's real cgroupfs.
 func TestRestoreCleanupReturnsThePooledCgroupOnAFailedRestore(t *testing.T) {
-	base, err := os.MkdirTemp("/tmp", "fccg")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	base := shortdir.New(t, "fccg")
 
 	jailer := filepath.Join(base, "jailer")
 	if err := os.WriteFile(jailer, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
