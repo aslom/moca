@@ -71,6 +71,9 @@ describe('mocactl sbx doctor in Cortex mode', () => {
     expect(out).toContain(line);
     if (fix) expect(out).toContain(fix);
     expect(out).not.toContain('not denied');
+    // The agent-config line must not claim denies that Cortex mode does not write.
+    expect(out).not.toContain('every local tool denied');
+    expect(out).toContain('local tools left to Cortex');
   });
 
   it('outside Cortex mode, doctor asks agentop nothing', async () => {

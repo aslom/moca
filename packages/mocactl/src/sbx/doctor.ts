@@ -239,9 +239,11 @@ function configCheck(root: string): DoctorCheck {
     : {
         name: 'agent config',
         ok: true,
-        detail:
-          'Claude Code and OpenCode use the sandbox MCP server, with every local tool denied ' +
-          "in this repository's project config; user-level and managed settings are not checked",
+        detail: cortexMode(root)
+          ? "Claude Code and OpenCode use the sandbox MCP server; Claude Code's local tools left " +
+            "to Cortex, OpenCode's disabled in this repository's project config"
+          : 'Claude Code and OpenCode use the sandbox MCP server, with every local tool denied ' +
+            "in this repository's project config; user-level and managed settings are not checked",
       };
 }
 
