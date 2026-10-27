@@ -35,6 +35,14 @@
 >    resolve-once. The conformance suite (`remote-worker/egress/conformance`) pins both, so MI1 §8.5 owes
 >    a matching amendment.
 
+> **Amendment, 2026-10-26 — the interception slice, on the SBX path.**
+> [SBX0.2b](2026-10-26-sbx-egress-credentials-design.md) ([ADR-0046](../adrs/0046-sbx-egress-credentials-owner-lookup.md))
+> is the interception slice item 2 above defers: TLS interception, a per-host CA baked into the
+> snapshot (T6), and the placeholder swap (T5). It covers `mocactl sbx` microVMs, with credentials
+> resolved by sandbox owner (phase 1) and then by the user's sandbox token (phase 2). #277's CA and
+> swap acceptance items are discharged there for that path. For the harness's own microVM sessions
+> they remain with MI1 S2/S4.
+
 ## 1. What this is, and what it is not
 
 **It is not a new egress design.** Z5 settled credentialed egress in June: forward proxy, baked CA, TLS

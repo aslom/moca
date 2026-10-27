@@ -18,9 +18,20 @@ Builds on: [P6](2026-09-08-p6-vm-process-manager-design.md) ·
 [RA1](2026-09-24-ra1-density-cutover-and-repo-rearchitecture-design.md).
 Amends: P4.1 §12.2 (proxy choice), P5 §3.2 (subject-derived placeholder), MU1 §5.3 (credential
 exchange), the promotion design §4.4–§4.5 (harness-side unpack, shared sandbox cache). See §14.
-Decision record: ADR-0037 (to be written with the S2 slice, §14).
+Decision record: to be written with the S2 slice (§14), at the next free number. _ADR-0037 is taken (P6 on Kubernetes); see the 2026-10-26 amendment._
 Naming: new components and settings use the **MOCA** name from day one (`moca-egress`,
 `MOCA_*`); existing `SH_*` names are left for RA1 Phase 1's rename.
+
+> **Amendment, 2026-10-26 — the SBX path takes a different route to S4's credentials.** For
+> `mocactl sbx` microVMs, [SBX0.2b](2026-10-26-sbx-egress-credentials-design.md)
+> ([ADR-0046](../adrs/0046-sbx-egress-credentials-owner-lookup.md)) delivers `sandbox-egress`
+> credentials without S2's grants. Phase 1 resolves them by sandbox owner with a per-host bearer.
+> Phase 2 carries SBX0's existing sandbox token on `Exec.grant` (§8.2) and on `Register`/`Rebind`
+> (§8.3), so it plays the sandbox grant's role on that path. It implements §8.5 items 4–5 and §8.7
+> (interception, the CA), which S4 reuses for the harness's own sessions. S2 still governs harness
+> sessions, which are unchanged. Separately, the "ADR-0037" this spec names for its decision
+> record is taken (ADR-0037 is P6 on Kubernetes), so MI1's record takes the next free number when
+> S2 is written. §14's heading and the registry are read accordingly.
 
 > **Amendment, 2026-09-28 — S1 planned against the code.** Seven requirements were sharpened, none
 > reversed: R1 filters at `createPodBashOps`, the one point both bash paths cross; R2 seeds a constant

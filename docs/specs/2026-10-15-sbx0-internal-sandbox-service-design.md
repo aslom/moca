@@ -5,6 +5,15 @@ Status: Accepted (2026-10-20; live acceptance recorded in [docs/sbx/security-rev
 Milestone: **SBX0**, registered in [the milestone registry](README.md) (new `SBX` track).
 Decision record: [ADR-0042](../adrs/0042-sbx0-sandbox-service-on-sandbox-v1.md).
 
+> **Amendment, 2026-10-26 — increment 2b, user-scoped egress credentials.** The
+> [SBX0.2b spec](2026-10-26-sbx-egress-credentials-design.md) ([ADR-0046](../adrs/0046-sbx-egress-credentials-owner-lookup.md))
+> refines two statements here, and only when a deployment enables it (`SH_CREDENTIAL_KEK` and
+> `SH_EGRESS_HOSTS` set). Without those settings, nothing below changes. (1) §4.1: the `sandbox`
+> profile then mounts `/v1/credentials` for the `sandbox-egress` consumer only, needs a credential
+> store (the file store on a PVC) and a KEK, and mounts a new `POST /v1/egress/credential` for
+> KVM-host bearers. It still has no Kubernetes API access. (2) §11: a row 2b follows row 2. The
+> guest egress of row 2 ships in v0.8.0. Its wiring in `deploy/sbx/install-host.sh` is #623.
+
 Builds on these; it reuses them and redesigns nothing:
 
 - [P4](2026-09-09-p4-microvm-sandbox-design.md) and ADR-0035: `microvm-worker`, golden snapshots, a
