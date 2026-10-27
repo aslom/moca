@@ -22,9 +22,31 @@ func startForwarder(t *testing.T, dial func() (net.Conn, error)) (addr string, d
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &EgressForwarder{Dial: dial, Logf: t.Logf}
+	// `t.Logf` must not be called once the test has returned: the race detector flags it as a
+	// write/read on testing.common, and the testing package itself panics on it. Closing the
+	// listener stops Serve, but an in-flight `handle` goroutine can still be mid-request and log
+	// after that. So the logger is gated -- Cleanup flips it off under the mutex before the test
+	// ends, and a later line is dropped rather than written to a finished *testing.T.
+	var mu sync.Mutex
+	live := true
+	t.Cleanup(func() {
+		mu.Lock()
+		live = false
+		mu.Unlock()
+	})
+	logf := func(format string, a ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		if !live {
+			return
+		}
+		t.Logf(format, a...)
+	}
+	f := &EgressForwarder{Dial: dial, Logf: logf}
 	done = make(chan error, 1)
 	go func() { done <- f.Serve(ln) }()
+	// Registered after the gate above, so it runs BEFORE it (Cleanup is LIFO): the listener closes
+	// and Serve returns first, and only then does logging stop.
 	t.Cleanup(func() { ln.Close() })
 	return ln.Addr().String(), done
 }
