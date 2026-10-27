@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tests for deploy/sbx/install-host.sh with systemctl and journalctl mocked: what it writes, that
-# two workers never share a slice, jail or workspace root (SBX0 §8.2), and that --uninstall leaves
-# workspace data alone.
+# two workers never share a slice, jail or workspace root (SBX0 §8.2), that --uninstall leaves
+# workspace data alone, and that moca-egress is installed and wired beside the worker (#623).
 set -euo pipefail
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 TMP="$(mktemp -d)"
@@ -15,6 +15,8 @@ cat >"$TMP/bin/systemctl" <<'MOCK'
 #!/usr/bin/env bash
 printf 'systemctl %s\n' "$*" >>"$MOCK_LOG"
 [[ "$1" == show ]] && { echo "InvocationID=abc123"; exit 0; }
+# MOCK_ACTIVE_RC is every unit's is-active answer; MOCK_EGRESS_ACTIVE_RC overrides moca-egress's.
+[[ "$1" == is-active ]] && { [[ "$3" == moca-egress.service ]] && exit "${MOCK_EGRESS_ACTIVE_RC:-${MOCK_ACTIVE_RC:-0}}"; exit "${MOCK_ACTIVE_RC:-0}"; }
 exit 0
 MOCK
 # journalctl: MOCK_JOURNAL_DIR holds the whole journal as the Nth look sees it (files 1, 2, ...;
@@ -36,6 +38,14 @@ export PATH="$TMP/bin:$PATH" SBX_UNIT_DIR="$TMP/units" SBX_ENV_DIR="$TMP/etc" SB
 export SBX_SKIP_ROOT_CHECK=1 SBX_ATTACH_TIMEOUT=2 SBX_ATTACH_SETTLE=1
 INSTALL="$SRC/deploy/sbx/install-host.sh"
 mkdir -p "$SBX_SRV/snapshots/default" "$SBX_SRV/snapshots/py312"
+# moca-egress is the operator's binary, and the worker waits for its control socket: fake both, so
+# every install below passes the binary check and the socket wait. A socket FILE is all `-S` tests.
+export SBX_BIN_DIR="$TMP/usrbin" MOCA_EGRESS_SOCKET="$TMP/run/control.sock" MOCA_EGRESS_READY_TIMEOUT=2
+mkdir -p "$SBX_BIN_DIR" "$TMP/run"
+fake_egress() { : >"$SBX_BIN_DIR/moca-egress"; chmod +x "$SBX_BIN_DIR/moca-egress"; }
+fake_socket() { rm -f "$MOCA_EGRESS_SOCKET"; python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' "$MOCA_EGRESS_SOCKET"; }
+fake_egress
+fake_socket
 
 bundle() { # bundle ID [EXTRA_LINES]: a worker bundle as setup.sh writes it, plus EXTRA_LINES
   local d="$TMP/bundles/$1"
@@ -297,3 +307,153 @@ bash "$INSTALL" --uninstall sbx_py312 >"$TMP/out" 2>&1 || fail 'uninstall sbx_py
 [[ ! -s "$M" ]] || fail "the manifest is not empty once the janitor and every worker are gone: $(cat "$M")"
 ! bash "$INSTALL" --janitor "$(jbundle)" --uninstall sbx_py312 >"$TMP/out" 2>&1 || fail 'accepted --janitor with --uninstall'
 pass 'the last worker uninstall leaves the janitor; --uninstall-janitor removes exactly its files and lines, never a worker'
+
+# Egress (#623): one moca-egress per host, a seeded allowlist, the worker wired to its socket. The
+# state is clean here (no worker, no janitor, an empty manifest), so the first install installs the unit.
+EM="$SBX_ENV_DIR/manifest"
+sha_of() { shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1 || sha256sum "$1" | cut -d' ' -f1; }
+U="$SBX_UNIT_DIR/moca-egress.service" E="$SBX_ENV_DIR/moca-egress.env"
+[[ ! -e "$U" && ! -s "$EM" ]] || fail 'the egress block does not start from a clean host'
+: >"$MOCK_LOG"
+bash "$INSTALL" "$(bundle sbx_eg)" --snapshot default >"$TMP/out" 2>&1 || fail 'install with egress'
+grep -qx "EnvironmentFile=$E" "$U" || fail 'egress unit does not read this host env file'
+! grep -q '^#' "$U" || fail 'egress unit kept source comments'
+grep -qx 'ExecStart=/usr/local/bin/moca-egress' "$U" || fail 'egress unit lost its ExecStart'
+[[ "$(mode "$E")" == 644 ]] || fail "the egress env file is not 0644 ($(mode "$E"))"
+grep -qx 'MOCA_EGRESS_ALLOW=api.github.com,github.com,codeload.github.com,objects.githubusercontent.com' "$E" || fail 'allowlist not seeded'
+grep -qx 'MOCA_EGRESS_CONTROL_SOCK=/run/moca-egress/control.sock' "$SBX_ENV_DIR/workers/sbx_eg.env" || fail 'worker not wired to the egress socket'
+grep '^After=' "$SBX_UNIT_DIR/sbx-worker@.service" | grep -q 'moca-egress.service' || fail 'worker not ordered after moca-egress'
+grep '^Wants=' "$SBX_UNIT_DIR/sbx-worker@.service" | grep -q 'moca-egress.service' || fail 'worker does not want moca-egress'
+grep -qx 'systemctl enable moca-egress.service' "$MOCK_LOG" || fail 'moca-egress not enabled'
+e="$(grep -nx 'systemctl restart moca-egress.service\|systemctl start moca-egress.service' "$MOCK_LOG" | head -1 | cut -d: -f1)"
+w="$(grep -nx 'systemctl restart sbx-worker@sbx_eg.service' "$MOCK_LOG" | cut -d: -f1)"
+[[ -n "$e" && -n "$w" ]] && ((e < w)) || fail "moca-egress not started before the worker (egress line '$e', worker line '$w')"
+grep -qx "egress unit $U $(sha_of "$U")" "$EM" && grep -qx "egress file $E $(sha_of "$E")" "$EM" || fail "egress files and their digests not in the manifest: $(cat "$EM")"
+pass 'installs moca-egress before the worker, seeds the allowlist, wires the socket, records it'
+
+# A second worker shares the one moca-egress: nothing to restart, and the unit stays when one worker goes.
+: >"$MOCK_LOG"
+bash "$INSTALL" "$(bundle sbx_eg2)" --snapshot default >"$TMP/out" 2>&1 || fail 'install a second worker with egress'
+! grep -q 'systemctl \(re\)\{0,1\}start moca-egress' "$MOCK_LOG" || fail 'an unchanged moca-egress was restarted'
+grep -qx 'systemctl enable moca-egress.service' "$MOCK_LOG" || fail 'the second install did not keep moca-egress enabled'
+bash "$INSTALL" --uninstall sbx_eg2 >"$TMP/out" 2>&1 || fail 'uninstall the second worker'
+[[ -f "$U" && -f "$E" ]] || fail 'uninstalling one of two workers removed the shared moca-egress'
+pass 'a second worker shares moca-egress without restarting it; one uninstall leaves it'
+
+# A moca-egress that is not running is started (after clearing a failed state), not just enabled.
+: >"$MOCK_LOG"
+MOCK_ACTIVE_RC=3 bash "$INSTALL" "$(bundle sbx_eg)" --snapshot default >"$TMP/out" 2>&1 || fail 're-install with moca-egress inactive'
+grep -A1 -x 'systemctl reset-failed moca-egress.service' "$MOCK_LOG" | grep -qx 'systemctl start moca-egress.service' ||
+  fail 'an inactive moca-egress was not reset and started'
+pass 'starts an inactive moca-egress (reset-failed first)'
+
+# An operator's edit survives a re-run.
+echo 'MOCA_EGRESS_ALLOW=pypi.org' >"$E"
+bash "$INSTALL" "$(bundle sbx_eg)" --snapshot default >"$TMP/out" 2>&1 || fail 're-install with egress'
+grep -qx 'MOCA_EGRESS_ALLOW=pypi.org' "$E" || fail 'a re-run overwrote the allowlist'
+pass 'a re-run keeps an edited allowlist'
+
+# The last uninstall removes the unit it installed, and keeps an env file the operator edited.
+bash "$INSTALL" --uninstall sbx_eg >"$TMP/out" 2>&1 || fail 'uninstall sbx_eg'
+[[ ! -e "$U" ]] || fail 'the last uninstall kept the egress unit it installed'
+grep -qx 'systemctl disable --now moca-egress.service' "$MOCK_LOG" || fail 'moca-egress was not stopped before its unit was removed'
+[[ "$(cat "$E")" == 'MOCA_EGRESS_ALLOW=pypi.org' ]] && grep -q "kept $E (edited)" "$TMP/out" || fail 'the last uninstall dropped an edited allowlist'
+! grep -q '^egress' "$EM" || fail "egress lines left in the manifest: $(cat "$EM")"
+rm -f "$E"
+bash "$INSTALL" "$(bundle sbx_eg)" --snapshot default >"$TMP/out" 2>&1 || fail 're-install sbx_eg'
+bash "$INSTALL" --uninstall sbx_eg >"$TMP/out" 2>&1 || fail 'uninstall sbx_eg again'
+[[ ! -e "$U" && ! -e "$E" ]] || fail 'the last uninstall kept an unedited egress env file'
+pass 'the last uninstall removes the egress unit, and the env file unless it was edited'
+
+# A unit this script did not install is reused, not overwritten.
+echo '# P6-owned' >"$U"
+: >"$MOCK_LOG"
+bash "$INSTALL" "$(bundle sbx_eg)" --snapshot default >"$TMP/out" 2>&1 || fail 'install beside a P6 moca-egress'
+[[ "$(cat "$U")" == '# P6-owned' ]] || fail 'overwrote a moca-egress.service it did not install'
+grep -q 'reusing the existing moca-egress.service' "$TMP/out" || fail 'did not say it reused the unit'
+! grep -q '^egress' "$EM" || fail 'recorded a unit it does not own'
+[[ ! -e "$E" ]] || fail 'wrote an allowlist beside a unit it does not own'
+! grep -v 'is-active' "$MOCK_LOG" | grep -q 'moca-egress.service' || fail 'changed a moca-egress.service it does not own'
+grep -qx 'MOCA_EGRESS_CONTROL_SOCK=/run/moca-egress/control.sock' "$SBX_ENV_DIR/workers/sbx_eg.env" || fail 'worker not wired to the reused moca-egress'
+bash "$INSTALL" --uninstall sbx_eg >"$TMP/out" 2>&1 || fail 'uninstall beside P6'
+[[ "$(cat "$U")" == '# P6-owned' ]] || fail 'uninstall removed a unit it did not install'
+rm -f "$U"
+pass 'reuses (and never removes) a moca-egress.service it did not install'
+
+# Refusals and the opt-out.
+rm "$SBX_BIN_DIR/moca-egress"; : >"$MOCK_LOG"
+! bash "$INSTALL" "$(bundle sbx_eg)" --snapshot default >"$TMP/out" 2>&1 || fail 'installed with no moca-egress binary'
+grep -q 'go build -o /usr/local/bin/moca-egress' "$TMP/out" || fail 'missing-binary refusal does not name the build'
+! grep -q 'systemctl' "$MOCK_LOG" || fail 'touched systemd before refusing a missing binary'
+[[ ! -e "$U" ]] || fail 'wrote the egress unit before refusing a missing binary'
+bash "$INSTALL" "$(bundle sbx_ne)" --snapshot default --no-egress >"$TMP/out" 2>&1 || fail '--no-egress install'
+! grep -q MOCA_EGRESS_CONTROL_SOCK "$SBX_ENV_DIR/workers/sbx_ne.env" || fail '--no-egress still wired the socket'
+[[ ! -e "$U" ]] || fail '--no-egress installed the egress unit'
+bash "$INSTALL" --uninstall sbx_ne >"$TMP/out" 2>&1 || fail 'uninstall sbx_ne'
+pass 'refuses a missing binary before touching systemd; --no-egress installs a worker without egress'
+
+# A socket that never appears fails, naming moca-egress's journal.
+fake_egress; rm -f "$MOCA_EGRESS_SOCKET"
+! bash "$INSTALL" "$(bundle sbx_eg)" --snapshot default >"$TMP/out" 2>&1 || fail 'succeeded with no control socket'
+grep -q 'journalctl -u moca-egress' "$TMP/out" || fail 'socket timeout does not name the journal'
+fake_socket
+bash "$INSTALL" --uninstall sbx_eg >"$TMP/out" 2>&1 || fail 'uninstall after the socket timeout'
+rm -f "$E"
+[[ ! -s "$EM" ]] || fail "the manifest is not empty after the egress block: $(cat "$EM")"
+pass 'fails naming journalctl -u moca-egress when the control socket never appears'
+
+# Ownership is by content (review of #627). setup-microvm.sh (P6) overwrites moca-egress.service at the
+# same path with its own copy; after that this script must reuse it, never rewrite or remove it.
+bash "$INSTALL" "$(bundle sbx_eg)" --snapshot default >"$TMP/out" 2>&1 || fail 'install before the P6 overwrite'
+printf '[Service]\nEnvironmentFile=/etc/serverless-harness/moca-egress.env\nExecStart=/usr/local/bin/moca-egress\n' >"$U"
+P6="$(cat "$U")"
+: >"$MOCK_LOG"
+bash "$INSTALL" "$(bundle sbx_eg)" --snapshot default >"$TMP/out" 2>&1 || fail 're-run after the P6 overwrite'
+[[ "$(cat "$U")" == "$P6" ]] || fail 'a re-run overwrote a unit another install had replaced'
+grep -q 'changed by another install; reusing it' "$TMP/out" || fail 'did not say the unit was changed by another install'
+! grep -q "^egress unit" "$EM" || fail 'kept its claim on a unit another install replaced'
+! grep -q 'moca-egress.service' <(grep -v 'is-active' "$MOCK_LOG") || fail 'touched a unit another install replaced'
+bash "$INSTALL" --uninstall sbx_eg >"$TMP/out" 2>&1 || fail 'uninstall after the P6 overwrite'
+[[ "$(cat "$U")" == "$P6" ]] || fail 'the last uninstall removed a unit another install had replaced'
+! grep -q 'disable --now moca-egress' "$MOCK_LOG" || fail 'the last uninstall stopped a moca-egress it no longer owns'
+rm -f "$U" "$E"
+pass 'a unit replaced by another install is reused on a re-run and kept on the last uninstall'
+
+# Reusing a unit that is not running dies with its own message, before any worker restart.
+echo '# P6-owned' >"$U"
+: >"$MOCK_LOG"
+! MOCK_EGRESS_ACTIVE_RC=3 bash "$INSTALL" "$(bundle sbx_eg)" --snapshot default >"$TMP/out" 2>&1 || fail 'reused an inactive moca-egress'
+grep -q 'not installed by this script) is not running: start it or fix the install that owns it' "$TMP/out" || fail 'no inactive-reuse message'
+! grep -q 'restart sbx-worker' "$MOCK_LOG" || fail 'restarted the worker beside an inactive moca-egress'
+rm -f "$U"
+# And a socket that never appears beside a reused unit names the env file THAT unit reads.
+printf '[Service]\nEnvironmentFile=/etc/serverless-harness/moca-egress.env\n' >"$U"
+rm -f "$MOCA_EGRESS_SOCKET"
+! bash "$INSTALL" "$(bundle sbx_eg)" --snapshot default >"$TMP/out" 2>&1 || fail 'succeeded with no control socket beside a reused unit'
+grep -q 'bad /etc/serverless-harness/moca-egress.env' "$TMP/out" || fail "the hint does not name the reused unit's env file"
+fake_socket; rm -f "$U"
+pass 'reusing a stopped unit fails before the worker restart; the socket hint names the reused unit'"'"'s env file'
+
+# The env file is judged unedited by its recorded digest, not by the uninstaller's MOCA_EGRESS_ALLOW.
+MOCA_EGRESS_ALLOW=pypi.org bash "$INSTALL" "$(bundle sbx_eg)" --snapshot default >"$TMP/out" 2>&1 || fail 'install with a custom allowlist'
+grep -qx 'MOCA_EGRESS_ALLOW=pypi.org' "$E" || fail 'custom allowlist not seeded'
+bash "$INSTALL" --uninstall sbx_eg >"$TMP/out" 2>&1 || fail 'uninstall without MOCA_EGRESS_ALLOW'
+[[ ! -e "$E" && ! -e "$U" ]] || fail 'an unedited custom-seeded env file (or the unit) survived the uninstall'
+MOCA_EGRESS_ALLOW=pypi.org bash "$INSTALL" "$(bundle sbx_eg)" --snapshot default >"$TMP/out" 2>&1 || fail 'install again'
+echo 'MOCA_EGRESS_ALLOW=pypi.org,example.org' >"$E"
+bash "$INSTALL" --uninstall sbx_eg >"$TMP/out" 2>&1 || fail 'uninstall with an edited env'
+[[ -f "$E" ]] && grep -q "kept $E (edited)" "$TMP/out" || fail 'an edited env file was not kept'
+rm -f "$E"
+pass 'an env seeded from a custom allowlist is removed by its digest; an edited one is kept'
+
+# A manifest from before digests (two fields) still uninstalls cleanly, and an unknown kind survives.
+bash "$INSTALL" "$(bundle sbx_eg)" --snapshot default >"$TMP/out" 2>&1 || fail 'install for the old-manifest case'
+sed -i.bak 's/^\(egress [a-z]* [^ ]*\) [0-9a-f]\{64\}$/\1/' "$EM"; rm -f "$EM.bak"
+! grep -Eq '^egress .* [0-9a-f]{64}$' "$EM" && grep -q '^egress unit ' "$EM" || fail "could not build a two-field manifest: $(cat "$EM")"
+echo "egress foo $TMP/foo.file" >>"$EM"; echo keep >"$TMP/foo.file"
+bash "$INSTALL" --uninstall sbx_eg >"$TMP/out" 2>&1 || fail 'uninstall with a two-field manifest'
+[[ ! -e "$U" && ! -e "$E" ]] || fail 'a two-field manifest did not uninstall the unit and env file'
+grep -qx "egress foo $TMP/foo.file" "$EM" && [[ -f "$TMP/foo.file" ]] || fail 'an unknown egress kind was dropped'
+sed -i.bak '/^egress foo /d' "$EM"; rm -f "$EM.bak"
+[[ ! -s "$EM" ]] || fail "manifest not empty at the end: $(cat "$EM")"
+pass 'a two-field manifest uninstalls cleanly; an unknown egress kind is left alone'
