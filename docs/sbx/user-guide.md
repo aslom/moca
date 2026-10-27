@@ -116,6 +116,32 @@ claude -p "Fix the failing test and run the suite" --mcp-config .mcp.json --stri
 opencode run "Fix the failing test and run the suite"
 ```
 
+### Codex CLI
+
+`up` cannot configure Codex as it does the other two: Codex reads no project-local configuration,
+so there is no file in your repository to put the server in. Start it through `mocactl` instead,
+which passes the server for that one run and writes nothing:
+
+```bash
+mocactl sbx codex                                      # the TUI
+mocactl sbx codex -- "Fix the failing test and run the suite"   # one-shot
+```
+
+Anything after `--` goes to Codex, so its own flags still work
+(`mocactl sbx codex -- --sandbox-mode read-only`). To run it yourself, that is:
+
+```bash
+codex -c 'mcp_servers.sandbox={command="mocactl",args=["sbx","mcp"]}' --disable shell_tool
+```
+
+**Codex's local tools are restricted, not denied.** `--disable shell_tool` (which
+`mocactl sbx codex` passes) turns off its shell tool, but `unified_exec` also runs local commands
+and cannot be disabled: both `--disable unified_exec` and `-c features.unified_exec=false` are
+ignored. In practice a session with `shell_tool` off uses the sandbox's tools, but that is the
+model's choice rather than a guarantee, so unlike Claude Code and OpenCode there is no deny list
+behind it. Codex's own sandbox is the protection that remains: add `-c sandbox_mode="read-only"`
+if you want its filesystem confinement as well.
+
 **Take the work back** when the agent is done:
 
 ```bash
