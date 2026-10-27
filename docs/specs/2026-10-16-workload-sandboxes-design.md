@@ -371,7 +371,11 @@ ceiling) across all workloads waiting to seed, and at most half of it per owner.
 reserves its `Content-Length` (required) before its body is read, so held bundles and hand-offs in
 flight together stay within the budget; one that would exceed it answers `503 seed_budget_full`
 with `Retry-After`, and the worker's activate answers the same, so a burst of activations queues on
-the client instead of growing the provisioner's memory. A bundle is held for
+the client instead of growing the provisioner's memory. A resend counts alongside the copy it
+replaces until it has fully arrived, and a copy a seed GET is still sending counts until that GET
+ends, so a resend can need up to three times the bundle's size; with the defaults, a 256 MiB
+bundle can be resent only while its owner holds nothing else. Size the budget at four times
+`MOCA_CONTEXT_BUNDLE_MAX_BYTES` or more for resends to go through. A bundle is held for
 `MOCA_PROVISIONER_SEED_HOLD_S` (default 600 s) at most, seeded or not, so a workload whose pod 0
 never initializes (a Pending claim, a crash-looping seed) does not keep its share; each activate
 resends it and restarts the hold. The init container
