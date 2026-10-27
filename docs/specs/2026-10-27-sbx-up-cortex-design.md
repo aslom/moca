@@ -83,13 +83,13 @@ In a repository whose record has `cortex: true`:
 - **The deny check is skipped.** Every other agent-configuration check stays: the server, the allow rule, the enablement, OpenCode, the rules block.
 - **New check, `cortex`.** Run `agentop script list --json`, and find `moca-sandbox` in its `scripts` array.
 
-| Finding | Result |
-|---|---|
-| agentop missing or older than v0.9.3 | FAIL, fix: the install one-liner |
-| `state` not `installed` | FAIL, the state named; fix: `agentop script install moca-sandbox` |
-| no `loaded` field (Cortex not running) | FAIL: nothing blocks local tools; fix: start Cortex (`agentop service start`) |
-| `loaded` below `scripts`, or `notStarted` above 0 | FAIL: the script did not start; fix: see Cortex's log |
-| `installed`, `loaded == scripts`, `notStarted == 0` | ok |
+| Finding                                             | Result                                                                        |
+| --------------------------------------------------- | ----------------------------------------------------------------------------- |
+| agentop missing or older than v0.9.3                | FAIL, fix: the install one-liner                                              |
+| `state` not `installed`                             | FAIL, the state named; fix: `agentop script install moca-sandbox`             |
+| no `loaded` field (Cortex not running)              | FAIL: nothing blocks local tools; fix: start Cortex (`agentop service start`) |
+| `loaded` below `scripts`, or `notStarted` above 0   | FAIL: the script did not start; fix: see Cortex's log                         |
+| `installed`, `loaded == scripts`, `notStarted == 0` | ok                                                                            |
 
 Outside Cortex mode, doctor is unchanged.
 
