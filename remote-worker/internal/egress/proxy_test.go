@@ -181,9 +181,23 @@ func (u *httpUpstream) last(t *testing.T) *http.Request {
 	return u.reqs[len(u.reqs)-1]
 }
 
-type stubCreds map[string]bool
+type fakePolicy struct {
+	res   []Credential
+	err   error
+	calls atomic.Int32
+}
 
-func (s stubCreds) Intercept(_ Caller, host string) bool { return s[host] }
+func (f *fakePolicy) Lookup(context.Context, Caller, string) ([]Credential, error) {
+	f.calls.Add(1)
+	return f.res, f.err
+}
+
+type fakeInterceptor struct{ calls atomic.Int32 }
+
+func (f *fakeInterceptor) serve(pc *proxyConn, _ target, _ []netip.Addr, _ *bufio.Reader, _ Event) {
+	f.calls.Add(1)
+	pc.c.Close()
+}
 
 type harness struct {
 	t    *testing.T
@@ -766,20 +780,140 @@ func TestPlainHTTPForwardsWithoutCredentialsAndRedactsQuery(t *testing.T) {
 	}
 }
 
-func TestHostThatNeedsACredentialFailsClosed(t *testing.T) {
-	up := newHTTPUpstream(t)
-	tcp := newTCPUpstream(t, echo)
-	h := newHarness(t, fmt.Sprintf("up.test:%d,up.test:%d", up.port, tcp.port), func(c *Config) {
-		c.Credentials = stubCreds{"up.test": true}
+func credHarness(t *testing.T, allowList string, fp *fakePolicy, fi *fakeInterceptor) *harness {
+	t.Helper()
+	h := newHarness(t, allowList, func(c *Config) {
+		c.Credentials = fp
+		c.interceptor = fi
 	})
 	h.res.set("up.test", "127.0.0.1")
-	path := h.register("vm-1", "run-a")
-	resp, body := roundTrip(t, dial(t, path), fmt.Sprintf("CONNECT up.test:%d HTTP/1.1\r\n\r\n", tcp.port))
+	return h
+}
+
+func TestLookupErrorRefuses503NoDial(t *testing.T) {
+	tcp := newTCPUpstream(t, echo)
+	fp := &fakePolicy{err: errors.New("unknown")}
+	h := credHarness(t, fmt.Sprintf("up.test:%d", tcp.port), fp, &fakeInterceptor{})
+	resp, body := roundTrip(t, dial(t, h.register("vm-1", "run-a")), fmt.Sprintf("CONNECT up.test:%d HTTP/1.1\r\n\r\n", tcp.port))
 	assertRefusal(t, resp, body, 503, DecisionCredentialUnavailable, "up.test")
-	resp, body = roundTrip(t, dial(t, path), fmt.Sprintf("GET http://up.test:%d/ HTTP/1.1\r\nHost: up.test\r\n\r\n", up.port))
-	assertRefusal(t, resp, body, 503, DecisionCredentialUnavailable, "up.test")
-	if up.accepts.Load() != 0 || tcp.accepts.Load() != 0 {
-		t.Fatal("a credentialed host was dialed")
+	h.sink.waitEvent(t, DecisionCredentialUnavailable)
+	if tcp.accepts.Load() != 0 {
+		t.Fatal("dialed after a lookup error")
+	}
+}
+
+func TestLookupNoneTunnelsAsBefore(t *testing.T) {
+	up := newTCPUpstream(t, echo)
+	fi := &fakeInterceptor{}
+	h := credHarness(t, fmt.Sprintf("up.test:%d", up.port), &fakePolicy{}, fi)
+	c := dial(t, h.register("vm-1", "run-a"))
+	connect(t, c, fmt.Sprintf("up.test:%d", up.port))
+	c.Write([]byte("ping"))
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(c, buf); err != nil || string(buf) != "ping" {
+		t.Fatalf("echo %q, %v", buf, err)
+	}
+	c.Close()
+	h.sink.waitEvent(t, DecisionTunnel)
+	if fi.calls.Load() != 0 {
+		t.Fatal("interceptor called")
+	}
+}
+
+func TestLookupOtherPortTunnels(t *testing.T) {
+	up := newTCPUpstream(t, echo)
+	fi := &fakeInterceptor{}
+	fp := &fakePolicy{res: []Credential{{Name: "x", PathPrefix: "/", Port: up.port + 1}}}
+	h := credHarness(t, fmt.Sprintf("up.test:%d", up.port), fp, fi)
+	c := dial(t, h.register("vm-1", "run-a"))
+	connect(t, c, fmt.Sprintf("up.test:%d", up.port))
+	c.Write([]byte("ping"))
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(c, buf); err != nil || string(buf) != "ping" {
+		t.Fatalf("echo %q, %v", buf, err)
+	}
+	c.Close()
+	h.sink.waitEvent(t, DecisionTunnel)
+	if fi.calls.Load() != 0 {
+		t.Fatal("interceptor called for another port")
+	}
+}
+
+func TestLookupFoundPlainHTTP403(t *testing.T) {
+	up := newHTTPUpstream(t)
+	fi := &fakeInterceptor{}
+	fp := &fakePolicy{res: []Credential{{Name: "x", PathPrefix: "/", Port: up.port}}}
+	h := credHarness(t, fmt.Sprintf("up.test:%d", up.port), fp, fi)
+	resp, body := roundTrip(t, dial(t, h.register("vm-1", "run-a")), fmt.Sprintf("GET http://up.test:%d/ HTTP/1.1\r\nHost: up.test\r\n\r\n", up.port))
+	assertRefusal(t, resp, body, 403, DecisionPlaintextCredential, "up.test")
+	h.sink.waitEvent(t, DecisionPlaintextCredential)
+	if up.accepts.Load() != 0 || fi.calls.Load() != 0 {
+		t.Fatal("plain HTTP with a credential reached upstream or the interceptor")
+	}
+}
+
+func TestLookupFoundHandsToInterceptor(t *testing.T) {
+	tcp := newTCPUpstream(t, echo)
+	fi := &fakeInterceptor{}
+	fp := &fakePolicy{res: []Credential{{Name: "x", PathPrefix: "/", Port: tcp.port}}}
+	h := credHarness(t, fmt.Sprintf("up.test:%d", tcp.port), fp, fi)
+	c := dial(t, h.register("vm-1", "run-a"))
+	io.WriteString(c, fmt.Sprintf("CONNECT up.test:%d HTTP/1.1\r\n\r\n", tcp.port))
+	io.Copy(io.Discard, c) // the fake closes the conn
+	if n := fi.calls.Load(); n != 1 {
+		t.Fatalf("interceptor called %d times", n)
+	}
+	if tcp.accepts.Load() != 0 {
+		t.Fatal("dialed before the interceptor")
+	}
+}
+
+func TestSelectFor(t *testing.T) {
+	mk := func(ps ...string) []Credential {
+		var s []Credential
+		for _, p := range ps {
+			s = append(s, Credential{Name: p, PathPrefix: p})
+		}
+		return s
+	}
+	all := mk("/", "/a", "/a/b")
+	for path, want := range map[string]string{"/a/b/c": "/a/b", "/a/bc": "/a", "/x": "/", "/a": "/a"} {
+		if c, ok := selectFor(all, path); !ok || c.PathPrefix != want {
+			t.Errorf("%s -> %q, %v; want %q", path, c.PathPrefix, ok, want)
+		}
+	}
+	only := mk("/a")
+	if _, ok := selectFor(only, "/b"); ok {
+		t.Error("/b matched /a")
+	}
+	if c, ok := selectFor(only, "/a"); !ok || c.PathPrefix != "/a" {
+		t.Error("/a did not match /a")
+	}
+	if pathScoped(mk("/")) || !pathScoped(all) {
+		t.Error("pathScoped wrong")
+	}
+	if got := forPort([]Credential{{Port: 1}, {Port: 2}}, 2); len(got) != 1 || got[0].Port != 2 {
+		t.Errorf("forPort %+v", got)
+	}
+}
+
+func TestLookupAfterAllowlist(t *testing.T) {
+	fp := &fakePolicy{}
+	h := credHarness(t, "other.test", fp, &fakeInterceptor{})
+	resp, body := roundTrip(t, dial(t, h.register("vm-1", "run-a")), "CONNECT up.test:443 HTTP/1.1\r\n\r\n")
+	assertRefusal(t, resp, body, 403, DecisionDestinationDenied, "up.test")
+	if fp.calls.Load() != 0 {
+		t.Fatal("Lookup called for an off-allowlist host")
+	}
+}
+
+func TestNewProxyRefusesPolicyWithoutInterceptor(t *testing.T) {
+	_, err := NewProxy(Config{
+		Allow: allow(t, "up.test"), MaxConnsPerVM: 1, MaxRequestsPerSession: 1,
+		Resolver: newResolver(), Credentials: &fakePolicy{}, Audit: &recSink{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "needs an interceptor") {
+		t.Fatalf("err = %v", err)
 	}
 }
 

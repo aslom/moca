@@ -31,6 +31,9 @@ type Config struct {
 	LocalAddrs func() ([]netip.Addr, error)
 
 	Credentials CredentialPolicy
+	// interceptor serves hosts that have credentials. nil is allowed only
+	// while Credentials is NoCredentials.
+	interceptor interceptor
 	Audit       AuditSink
 
 	DialTimeout time.Duration // default 10s
@@ -124,6 +127,8 @@ func NewProxy(cfg Config) (*Proxy, error) {
 		return nil, errors.New("egress: nil Audit")
 	case cfg.Credentials == nil:
 		return nil, errors.New("egress: nil Credentials")
+	case cfg.interceptor == nil && !isNoCredentials(cfg.Credentials):
+		return nil, errors.New("egress: a credential policy needs an interceptor")
 	case cfg.MaxConnsPerVM <= 0:
 		return nil, fmt.Errorf("egress: MaxConnsPerVM %d must be positive", cfg.MaxConnsPerVM)
 	case cfg.MaxRequestsPerSession <= 0:
@@ -452,4 +457,9 @@ func (pc *proxyConn) finish() {
 	if up != nil {
 		_ = up.Close()
 	}
+}
+
+func isNoCredentials(p CredentialPolicy) bool {
+	_, ok := p.(NoCredentials)
+	return ok
 }

@@ -199,10 +199,18 @@ func (pc *proxyConn) handle(r *http.Request, br *bufio.Reader) bool {
 	case DecisionUpstreamUnreachable:
 		return refuse(http.StatusBadGateway, decision)
 	}
-	if pc.p.cfg.Credentials.Intercept(pc.caller, t.host) {
-		// I5: a host that needs a credential is never tunnelled or forwarded
-		// without one, and this slice has none.
+	set, err := pc.p.cfg.Credentials.Lookup(pc.ctx, pc.caller, t.host)
+	if err != nil {
+		// I5: an unknown credential state is never a tunnel.
 		return refuse(http.StatusServiceUnavailable, DecisionCredentialUnavailable)
+	}
+	if len(forPort(set, int(t.port))) > 0 {
+		if !t.connect {
+			// Plain HTTP cannot carry a credential without exposing it.
+			return refuse(http.StatusForbidden, DecisionPlaintextCredential)
+		}
+		pc.p.cfg.interceptor.serve(pc, t, addrs, br, ev)
+		return false
 	}
 	up, err := pc.dial(addrs, t.port)
 	if err != nil {
