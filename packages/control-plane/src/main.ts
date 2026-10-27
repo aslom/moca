@@ -383,7 +383,11 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
       undefined,
       defaultAuditLog,
     ),
-    credentials: sandboxProfile ? new UnavailableCredentialStore() : credentialStoreFromEnv(env),
+    // The sandbox profile stores credentials only when egress is configured (SBX0.2b).
+    credentials:
+      sandboxProfile && !config.sandbox?.egress
+        ? new UnavailableCredentialStore()
+        : credentialStoreFromEnv(env),
     ...(sandboxProfile
       ? { sandboxes: new RedisSandboxStore(client as unknown as SandboxRedisLike) }
       : {}),

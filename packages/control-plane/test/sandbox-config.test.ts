@@ -1,4 +1,8 @@
 import { generateKeyPairSync } from 'node:crypto';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { FileCredentialStore } from '../src/file-store.js';
 import { describe, expect, it, vi } from 'vitest';
 import { UnavailableCredentialStore, type CredentialStore } from '../src/credential-store.js';
 import { configFromEnv, depsFromEnv } from '../src/main.js';
@@ -187,6 +191,26 @@ describe('the sandbox profile deps (SBX0 §4.1)', () => {
     try {
       expect(deps.credentials).toBeInstanceOf(UnavailableCredentialStore);
       expect(deps.sandboxes).toBeInstanceOf(RedisSandboxStore);
+    } finally {
+      await deps.close?.();
+      errors.mockRestore();
+    }
+  });
+
+  it('wires the real credential store when egress is configured (SBX0.2b)', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const deps = depsFromEnv(
+      env({
+        REDIS_URL: 'redis://127.0.0.1:1',
+        SH_EGRESS_HOSTS: '[{"id":"kvm","workers":["sbx_default"]}]',
+        SH_CREDENTIAL_KEK: Buffer.alloc(32, 1).toString('base64'), // notsecret
+        SH_EGRESS_TOKEN_KVM: 'a'.repeat(64), // notsecret
+        SH_CREDENTIAL_STORE: 'file',
+        SH_CREDENTIAL_DIR: mkdtempSync(join(tmpdir(), 'egress-cs-')),
+      }),
+    );
+    try {
+      expect(deps.credentials).toBeInstanceOf(FileCredentialStore);
     } finally {
       await deps.close?.();
       errors.mockRestore();
