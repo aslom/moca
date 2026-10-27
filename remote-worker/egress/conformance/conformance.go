@@ -36,6 +36,15 @@ const (
 	// had no time bound at all once its request headers were read.
 	EnvIdleTimeout    = "MOCA_EGRESS_IDLE_TIMEOUT_S"
 	EnvRespHeaderTime = "MOCA_EGRESS_RESPONSE_HEADER_TIMEOUT_S"
+	// Credential injection (SBX0.2b). With the URL unset, setting any of the
+	// others is a boot failure.
+	EnvCredentialsURL       = "MOCA_EGRESS_CREDENTIALS_URL"
+	EnvCredentialsTokenFile = "MOCA_EGRESS_CREDENTIALS_TOKEN_FILE"
+	EnvCredentialsCA        = "MOCA_EGRESS_CREDENTIALS_CA"
+	EnvCredentialsTimeout   = "MOCA_EGRESS_CREDENTIALS_TIMEOUT"
+	EnvCACertFile           = "MOCA_EGRESS_CA_CERT_FILE"
+	EnvCAKeyFile            = "MOCA_EGRESS_CA_KEY_FILE"
+	EnvUpstreamCA           = "MOCA_EGRESS_UPSTREAM_CA"
 )
 
 // Instance is one running implementation.

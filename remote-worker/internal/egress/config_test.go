@@ -1,6 +1,8 @@
 package egress
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -130,5 +132,103 @@ func TestConfigRejectsBadCIDRAndBadUID(t *testing.T) {
 	m["MOCA_EGRESS_CONTROL_UIDS"] = "x"
 	if _, _, err := ConfigFromEnv(envMap(m)); err == nil {
 		t.Error("non-numeric uid accepted")
+	}
+}
+
+func credEnv(t *testing.T, extra map[string]string) func(string) string {
+	dir := t.TempDir()
+	for name, content := range map[string]string{"tok": "secret-token\n", "ca.crt": testCACert, "ca.key": "KEYPEM"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := map[string]string{
+		"MOCA_EGRESS_ALLOW":                  "a.example:443",
+		"MOCA_EGRESS_CREDENTIALS_URL":        "https://cp.example",
+		"MOCA_EGRESS_CREDENTIALS_TOKEN_FILE": filepath.Join(dir, "tok"),
+		"MOCA_EGRESS_CA_CERT_FILE":           filepath.Join(dir, "ca.crt"),
+		"MOCA_EGRESS_CA_KEY_FILE":            filepath.Join(dir, "ca.key"),
+	}
+	for k, v := range extra {
+		if v == "" {
+			delete(m, k)
+		} else {
+			m[k] = v
+		}
+	}
+	return envMap(m)
+}
+
+const testCACert = "-----BEGIN CERTIFICATE-----\nnot parsed here\n-----END CERTIFICATE-----\n"
+
+func TestConfigCredentialsLoaded(t *testing.T) {
+	cfg, _, err := ConfigFromEnv(credEnv(t, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cfg.Credentials.(*CPCredentials); !ok {
+		t.Fatalf("credentials = %T", cfg.Credentials)
+	}
+	if string(cfg.InterceptCACertPEM) != testCACert || string(cfg.InterceptCAKeyPEM) != "KEYPEM" {
+		t.Fatal("CA not exposed")
+	}
+}
+
+func TestConfigCredentialsDirectoryDefaults(t *testing.T) {
+	dir := t.TempDir()
+	for name, content := range map[string]string{"egress-token": "tok", "egress-ca.crt": testCACert, "egress-ca.key": "K"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, _, err := ConfigFromEnv(envMap(map[string]string{
+		"MOCA_EGRESS_ALLOW": "a.example:443", "MOCA_EGRESS_CREDENTIALS_URL": "https://cp.example", "CREDENTIALS_DIRECTORY": dir,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConfigCredentialsFailures(t *testing.T) {
+	for _, name := range []string{"MOCA_EGRESS_CREDENTIALS_TOKEN_FILE", "MOCA_EGRESS_CA_CERT_FILE", "MOCA_EGRESS_CA_KEY_FILE"} {
+		get := credEnv(t, map[string]string{name: "/nonexistent/file"})
+		if _, _, err := ConfigFromEnv(get); err == nil || !strings.Contains(err.Error(), name) {
+			t.Errorf("%s: err = %v", name, err)
+		}
+		if _, _, err := ConfigFromEnv(credEnv(t, map[string]string{name: ""})); err == nil || !strings.Contains(err.Error(), name) {
+			t.Errorf("%s unset: err = %v", name, err)
+		}
+	}
+	if _, _, err := ConfigFromEnv(credEnv(t, map[string]string{"MOCA_EGRESS_CREDENTIALS_TIMEOUT": "soon"})); err == nil ||
+		!strings.Contains(err.Error(), "MOCA_EGRESS_CREDENTIALS_TIMEOUT") {
+		t.Errorf("timeout: %v", err)
+	}
+	if _, _, err := ConfigFromEnv(credEnv(t, map[string]string{"MOCA_EGRESS_UPSTREAM_CA": "/nonexistent"})); err == nil ||
+		!strings.Contains(err.Error(), "MOCA_EGRESS_UPSTREAM_CA") {
+		t.Errorf("upstream: %v", err)
+	}
+	if _, _, err := ConfigFromEnv(credEnv(t, map[string]string{"MOCA_EGRESS_CREDENTIALS_URL": "http://cp.example"})); err == nil ||
+		!strings.Contains(err.Error(), "MOCA_EGRESS_CREDENTIALS_URL") {
+		t.Errorf("url: %v", err)
+	}
+}
+
+func TestConfigHalfConfiguredFails(t *testing.T) {
+	for _, name := range []string{"MOCA_EGRESS_CA_KEY_FILE", "MOCA_EGRESS_CA_CERT_FILE", "MOCA_EGRESS_CREDENTIALS_TOKEN_FILE",
+		"MOCA_EGRESS_CREDENTIALS_CA", "MOCA_EGRESS_CREDENTIALS_TIMEOUT", "MOCA_EGRESS_UPSTREAM_CA"} {
+		_, _, err := ConfigFromEnv(envMap(map[string]string{"MOCA_EGRESS_ALLOW": "a.example:443", name: "x"}))
+		if err == nil || !strings.Contains(err.Error(), name) {
+			t.Errorf("%s: err = %v", name, err)
+		}
+	}
+}
+
+func TestConfigNoCredentialsByDefault(t *testing.T) {
+	cfg, _, err := ConfigFromEnv(envMap(map[string]string{"MOCA_EGRESS_ALLOW": "a.example:443"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cfg.Credentials.(NoCredentials); !ok {
+		t.Fatalf("credentials = %T", cfg.Credentials)
 	}
 }

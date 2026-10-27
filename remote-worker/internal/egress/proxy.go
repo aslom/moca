@@ -2,6 +2,7 @@ package egress
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log"
@@ -31,6 +32,12 @@ type Config struct {
 	LocalAddrs func() ([]netip.Addr, error)
 
 	Credentials CredentialPolicy
+	// InterceptCACertPEM and InterceptCAKeyPEM are the loaded interception CA
+	// (set by ConfigFromEnv when credentials are configured; Task 9 builds the
+	// interceptor from them). UpstreamRoots verifies upstream servers; nil
+	// means the system roots.
+	InterceptCACertPEM, InterceptCAKeyPEM []byte
+	UpstreamRoots                         *x509.CertPool
 	// interceptor serves hosts that have credentials. nil is allowed only
 	// while Credentials is NoCredentials.
 	interceptor interceptor
