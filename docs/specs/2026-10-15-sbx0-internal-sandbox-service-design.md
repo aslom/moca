@@ -504,7 +504,9 @@ Every curated template ships `tar` and `git` (§8.2).
     `enabledMcpjsonServers` gets `sandbox`. The list names only tools current Claude Code knows,
     since it warns at every start about a deny rule naming an unknown tool (#568). The pre-2.0
     tools (`MultiEdit`, `LS`, `NotebookRead`) are therefore not denied. `sbx doctor` fails when
-    the Claude Code on `PATH` is older than 2.0.0.
+    the Claude Code on `PATH` is older than 2.0.0. A repository configured before those three were
+    dropped still lists them, so `sbx up` takes back the ones its own record says it added, and
+    leaves one the developer wrote (#574).
 - **OpenCode:** `opencode.json` gets `mcp.sandbox = { "type": "local", "command": ["mocactl", "sbx", "mcp"], "enabled": true }`,
   and `tools` set to `false` for `bash`, `read`, `edit`, `write`, `patch`, `apply_patch`
   (`patch`'s newer name), `glob`, `grep`, `list`, `lsp`, `webfetch`, `websearch`, `task`, and

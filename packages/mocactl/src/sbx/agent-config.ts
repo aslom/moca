@@ -70,6 +70,13 @@ export const CLAUDE_DENY: readonly string[] = Object.freeze([
   // here; `sbx doctor` fails a Claude Code older than CLAUDE_MIN_VERSION instead.
 ]);
 /**
+ * The names `CLAUDE_DENY` held until #572: the pre-2.0 tools. A repository configured before they
+ * were dropped still lists all three, and each one costs a warning at every Claude Code start, so
+ * `sbx up` takes back the ones it added itself (#574). They are not denies to add, only denies to
+ * recognise, which is why they are a list of their own rather than a comment.
+ */
+export const CLAUDE_RETIRED: readonly string[] = Object.freeze(['MultiEdit', 'LS', 'NotebookRead']);
+/**
  * The oldest Claude Code CLAUDE_DENY covers: older ones also have `MultiEdit`, `LS` and
  * `NotebookRead`. The unknown-name warning came in 2.1.166, and every name in the list is a
  * known tool there and since (2.1.304 checked: no warning, `PowerShell` included on macOS).
@@ -591,6 +598,47 @@ function addItems(doc: Doc, path: JsonPath, values: unknown[], recs: JsonRec[]):
   for (const v of values) recs.push({ file: doc.rel, op: 'item', path, value: v });
 }
 
+/**
+ * Takes back the `permissions.deny` items an earlier `up` recorded whose value `wanted` picks, and
+ * returns their records so the merged record drops them. One the developer wrote is not recorded,
+ * so it is never touched; one already gone by hand loses its record and nothing else.
+ *
+ * `soft` keeps a refused removal from failing the run: a `dropAt` guard refuses when taking the
+ * member out would change text around it, and for a take-back that is a tidy-up rather than a
+ * correctness fix (#574) the entry and its record are better left alone than the whole `up` failed.
+ */
+function dropDenies(
+  doc: Doc,
+  prev: Manifest | undefined,
+  wanted: (value: unknown) => boolean,
+  soft = false,
+): JsonRec[] {
+  const dropped = (prev?.json ?? []).filter(
+    (r) =>
+      r.op === 'item' &&
+      r.file === doc.rel &&
+      same(r.path, ['permissions', 'deny']) &&
+      wanted(r.value),
+  );
+  for (const r of [...dropped]) {
+    const arr = at(doc.data, r.path);
+    if (!Array.isArray(arr)) continue;
+    let i = arr.length - 1;
+    while (i >= 0 && !same(arr[i], (r as { value: unknown }).value)) i--;
+    if (i < 0) continue; // gone by hand: only its record is left to drop
+    const was = { text: doc.text, data: doc.data };
+    try {
+      dropAt(doc, [...r.path, i], prev!.json);
+    } catch (err) {
+      if (!soft || !(err instanceof ConfigConflict)) throw err;
+      doc.text = was.text;
+      doc.data = was.data;
+      dropped.splice(dropped.indexOf(r), 1);
+    }
+  }
+  return dropped;
+}
+
 /** The doc's new text: a file created here ends with a newline. */
 function finalText(doc: Doc): string {
   if (!doc.exists && !doc.text.endsWith(doc.style.eol)) return doc.text + doc.style.eol;
@@ -990,16 +1038,7 @@ export function writeAgentConfig(
   // the developer wrote is not in the record, so it stays.
   let dropped: JsonRec[] = [];
   if (cortex) {
-    dropped = (prev?.json ?? []).filter(
-      (r) => r.op === 'item' && r.file === settings.rel && same(r.path, ['permissions', 'deny']),
-    );
-    for (const r of dropped) {
-      const arr = at(settings.data, r.path);
-      if (!Array.isArray(arr)) continue;
-      let i = arr.length - 1;
-      while (i >= 0 && !same(arr[i], (r as { value: unknown }).value)) i--;
-      if (i >= 0) dropAt(settings, [...r.path, i], prev!.json);
-    }
+    dropped = dropDenies(settings, prev, () => true);
     // The list itself, when an earlier `up` created it and nothing is left in it.
     const made = (prev?.json ?? []).find(
       (r) =>
@@ -1017,6 +1056,11 @@ export function writeAgentConfig(
       CLAUDE_DENY.filter((t) => !deny.includes(t)),
       recs,
     );
+    // A repository configured before #572 still lists the pre-2.0 tools, and each one costs a
+    // warning at every Claude Code start. The ones an earlier `up` added are taken back, after the
+    // additions above so the list is never emptied here; one the developer wrote is not in the
+    // record, so it stays (#574).
+    dropped = dropDenies(settings, prev, (v) => CLAUDE_RETIRED.includes(ruleTool(v)), true);
   }
   addItems(settings, ['enabledMcpjsonServers'], enabled.includes(SERVER) ? [] : [SERVER], recs);
   if (ocHave === undefined) setKey(oc, ['mcp', SERVER], { ...OPENCODE_SERVER }, recs);

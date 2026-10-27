@@ -156,6 +156,11 @@ file and key.
 | `CLAUDE.md`, `AGENTS.md` | A block between `<!-- sbx:begin -->` and `<!-- sbx:end -->` telling the agent how the sandbox works (below)                                                                                                                              |
 | `.sbx/`                  | `sandbox.json`, the binding (your sandbox's id and the service URL), and `agent-config.json`, the record of what `up` added. `.sbx/` is listed in `.git/info/exclude`, never in your `.gitignore`                                        |
 
+An older mocactl also denied `MultiEdit`, `LS` and `NotebookRead`, which current Claude Code does
+not know: it warns about each one at every start. Re-running `mocactl sbx up` takes those three
+back out — the ones its own record says it added. One you wrote yourself is not in that record, so
+it stays.
+
 They are ordinary files in your working tree, so `git status` shows them. Leave them uncommitted:
 committed, they would point every teammate's agents at a sandbox and deny their local tools.
 `mocactl sbx up --no-agent-config` creates and pushes without touching them.
