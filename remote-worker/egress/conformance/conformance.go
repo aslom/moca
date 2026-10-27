@@ -92,6 +92,20 @@ func Cases() []Case {
 		{"grant_refused_under_single", grantRefusedUnderSingle},
 		{"connect_tunnel_idle_deadline", connectTunnelIdleDeadline},
 		{"forward_response_header_timeout", forwardResponseHeaderTimeout},
+		{"credential_injected_placeholder_overwritten", credentialInjectedPlaceholderOverwritten},
+		{"no_credential_tunnelled_opaque", noCredentialTunnelledOpaque},
+		{"lookup_error_503_no_dial", lookupError503NoDial},
+		{"upstream_unverified_502", upstreamUnverified502},
+		{"inner_host_mismatch_421", innerHostMismatch421},
+		{"plaintext_http_credential_403", plaintextHTTPCredential403},
+		{"credential_keyed_by_session", credentialKeyedBySession},
+		{"lookup_cached_single_flight", lookupCachedSingleFlight},
+		{"credential_revoked_mid_connection_401", credentialRevokedMidConnection401},
+		{"credential_selected_by_path_prefix", credentialSelectedByPathPrefix},
+		{"path_traversal_refused_when_path_scoped", pathTraversalRefusedWhenPathScoped},
+		{"credential_sets_every_header", credentialSetsEveryHeader},
+		{"credential_port_scoped", credentialPortScoped},
+		{"trace_refused_on_intercepted_conn", traceRefusedOnInterceptedConn},
 	}
 }
 
@@ -601,8 +615,8 @@ func (s *silentUpstream) Close() error {
 
 // seenRequest is what the fake HTTP upstream received.
 type seenRequest struct {
-	method, path, rawQuery, host string
-	header                       http.Header
+	method, path, uri, rawQuery, host string
+	header                            http.Header
 }
 
 // httpUpstream is an HTTP/1.1 server on 127.0.0.1 that records every request
@@ -649,9 +663,15 @@ func (h *harness) httpUp() (*httpUpstream, error) {
 
 func (u *httpUpstream) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	u.mu.Lock()
-	u.reqs = append(u.reqs, seenRequest{method: r.Method, path: r.URL.Path, rawQuery: r.URL.RawQuery,
+	u.reqs = append(u.reqs, seenRequest{method: r.Method, path: r.URL.Path, uri: r.RequestURI, rawQuery: r.URL.RawQuery,
 		host: r.Host, header: r.Header.Clone()})
 	u.mu.Unlock()
+	if r.Method == "TRACE" { // a real server reflects the request, headers and all
+		w.Header().Set("Content-Type", "message/http")
+		fmt.Fprintf(w, "TRACE %s\r\n", r.RequestURI)
+		_ = r.Header.Write(w)
+		return
+	}
 	switch r.URL.Path {
 	case "/slow":
 		u.slowArrived <- struct{}{}
