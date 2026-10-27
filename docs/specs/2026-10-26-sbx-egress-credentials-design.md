@@ -568,7 +568,8 @@ own sessions, which have a semi-trusted multi-tenant worker that SBX lacks (§12
   - a terminated sandbox and a deleted sandbox;
   - no match;
   - one host yielding several elements (two ports, or two prefixes), sorted by port, then prefix
-    length descending;
+    length descending, then prefix string, then name, and a same-length prefix interleaved
+    between two duplicates still yields `destination_ambiguous`;
   - `500 destination_ambiguous` from a write race (seeded straight into the store);
   - a case-insensitive host match;
   - `basic`, `bearer` and two-header rendering, and the CR/LF refusal;

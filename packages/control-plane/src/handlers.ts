@@ -21,7 +21,13 @@ import {
 } from './bundle-budget.js';
 import { type AuditLog, defaultAuditLog } from './audit-log.js';
 import { CpError } from './errors.js';
-import { asRecord, auditBestEffort, isAdmin, seconds } from './handler-util.js';
+import {
+  asRecord,
+  auditBestEffort,
+  isAdmin,
+  requireEnrolledPrincipal,
+  seconds,
+} from './handler-util.js';
 import { subjectHash } from './subject-document.js';
 import {
   resolveInferenceName,
@@ -58,6 +64,18 @@ import type { RouteProfile } from './routes.js';
 import { isEnrolled, notEnrolled, type SandboxConfig } from './sandbox-config.js';
 import type { SandboxStore } from './sandbox-store.js';
 import { SANDBOX_HANDLERS } from './sandbox-handlers.js';
+import { EGRESS_HANDLERS } from './egress-handlers.js';
+import type { EgressHost } from './egress-config.js';
+import { formatDestination, parseDestination } from './egress-destination.js';
+
+/** A stored destination in normalized form; a legacy or corrupt entry compares as written. */
+function normalizeStored(h: string): string {
+  try {
+    return formatDestination(parseDestination(h));
+  } catch {
+    return h;
+  }
+}
 
 /** The `iss` this control plane mints API tokens under and accepts on API routes. */
 export function apiIssuer(config: Pick<CpConfig, 'routeProfile'>): string {
@@ -175,6 +193,8 @@ export interface RequestCtx {
   exchangeAuthorized?: boolean;
   /** Set by the router for `auth: 'janitor'` routes. */
   janitorAuthorized?: boolean;
+  /** Set by the router for `auth: 'egress'` routes: the host whose token was presented. */
+  egressHost?: EgressHost;
 }
 
 export type Handler = (ctx: RequestCtx, deps: CpDeps) => Promise<{ status: number; body: unknown }>;
@@ -794,7 +814,8 @@ export const HANDLERS: Record<string, Handler> = {
    * fact.
    */
   putCredential: async (ctx, deps) => {
-    const p = requirePrincipal(ctx);
+    const sandbox = deps.config.routeProfile === 'sandbox';
+    const p = sandbox ? requireEnrolledPrincipal(ctx, deps.config) : requirePrincipal(ctx);
     const name = validateCredentialName(ctx.params.name ?? '');
     if (name === OPERATOR_FALLBACK_NAME) {
       // The audit names the operator's key this way (exchange.ts, createSession): a subject's own
@@ -802,6 +823,25 @@ export const HANDLERS: Record<string, Handler> = {
       throw new CpError('invalid_request', `credential name '${name}' is reserved`);
     }
     const cred = parseCredentialBody(name, ctx.body);
+    if (sandbox && cred.descriptor.consumer !== 'sandbox-egress') {
+      throw new CpError(
+        'invalid_request',
+        'the sandbox service stores only consumer: sandbox-egress credentials',
+      );
+    }
+    if (sandbox) {
+      const mine = new Set(cred.descriptor.destination.hosts);
+      for (const other of await deps.credentials.list(p.sub)) {
+        if (other.consumer !== 'sandbox-egress' || other.name === name) continue;
+        const hit = other.destination.hosts.find((h) => mine.has(normalizeStored(h)));
+        if (hit !== undefined) {
+          throw new CpError(
+            'destination_conflict',
+            `destination '${hit}' is already held by credential '${other.name}'`,
+          );
+        }
+      }
+    }
     await deps.credentials.put(p.sub, cred);
     await auditBestEffort(deps, 'putCredential', `credential=${name}`, {
       subject: p.sub,
@@ -813,10 +853,12 @@ export const HANDLERS: Record<string, Handler> = {
 
   /** Metadata only, and it decrypts nothing: the descriptor lives in annotations (spec §6.2). */
   listCredentials: async (ctx, deps) => {
-    const p = requirePrincipal(ctx);
+    const sandbox = deps.config.routeProfile === 'sandbox';
+    const p = sandbox ? requireEnrolledPrincipal(ctx, deps.config) : requirePrincipal(ctx);
     // No ?owner= is read here. Listing another user's credential NAMES is not a privilege MU1
     // grants, and not reading the parameter is what stops it becoming one by accident.
-    const descriptors = await deps.credentials.list(p.sub);
+    const all = await deps.credentials.list(p.sub);
+    const descriptors = sandbox ? all.filter((d) => d.consumer === 'sandbox-egress') : all;
     return {
       status: 200,
       body: {
@@ -833,7 +875,10 @@ export const HANDLERS: Record<string, Handler> = {
   },
 
   deleteCredential: async (ctx, deps) => {
-    const p = requirePrincipal(ctx);
+    const p =
+      deps.config.routeProfile === 'sandbox'
+        ? requireEnrolledPrincipal(ctx, deps.config)
+        : requirePrincipal(ctx);
     const name = validateCredentialName(ctx.params.name ?? '');
     await deps.credentials.delete(p.sub, name);
     await auditBestEffort(deps, 'deleteCredential', `credential=${name}`, {
@@ -971,4 +1016,5 @@ export const HANDLERS: Record<string, Handler> = {
 
   // SBX0 §5.1: the sandbox resource (sandbox-handlers.ts), mounted on the sandbox profile only.
   ...SANDBOX_HANDLERS,
+  ...EGRESS_HANDLERS,
 };

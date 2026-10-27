@@ -22,10 +22,17 @@ export interface RouteSpec {
    * `api`      -- Ed25519 token with scope `api` (plan gap #7).
    * `exchange` -- the shared SH_EXCHANGE_TOKEN bearer (spec §5.3.1).
    * `janitor`  -- the sandbox host janitor's SH_JANITOR_TOKEN bearer (SBX0 §8.3).
+   * `egress`   -- one configured KVM host's egress token (SBX0.2b §4.2); names the host.
    */
-  auth: 'none' | 'api' | 'exchange' | 'janitor';
+  auth: 'none' | 'api' | 'exchange' | 'janitor' | 'egress';
   /** The profiles that mount this route (see RouteProfile). */
   profiles: readonly RouteProfile[];
+  /**
+   * On the `sandbox` profile the route is mounted only when egress is configured
+   * (`config.sandbox.egress` defined); otherwise it is unmounted like any unlisted route. Ignored on
+   * the `harness` profile, which mounts the route as it always did.
+   */
+  requiresEgress?: boolean;
   /** A `/v1/sandboxes/{id}` route: its handler goes through assertSandboxOwner (SBX0 §5.1). */
   sandboxScoped?: boolean;
   /** Goes through assertOwner(params.id, principal) before the handler body runs. */
@@ -205,7 +212,8 @@ export const ROUTES: readonly RouteSpec[] = [
     path: '/v1/credentials',
     auth: 'api',
     sessionScoped: false,
-    profiles: HARNESS,
+    profiles: BOTH,
+    requiresEgress: true,
     operationId: 'listCredentials',
   },
   {
@@ -213,7 +221,8 @@ export const ROUTES: readonly RouteSpec[] = [
     path: '/v1/credentials/{name}',
     auth: 'api',
     sessionScoped: false,
-    profiles: HARNESS,
+    profiles: BOTH,
+    requiresEgress: true,
     operationId: 'putCredential',
   },
   {
@@ -221,8 +230,18 @@ export const ROUTES: readonly RouteSpec[] = [
     path: '/v1/credentials/{name}',
     auth: 'api',
     sessionScoped: false,
-    profiles: HARNESS,
+    profiles: BOTH,
+    requiresEgress: true,
     operationId: 'deleteCredential',
+  },
+  {
+    method: 'POST',
+    path: '/v1/egress/credential',
+    auth: 'egress',
+    sessionScoped: false,
+    profiles: SANDBOX,
+    requiresEgress: true,
+    operationId: 'lookupEgressCredential',
   },
   {
     method: 'POST',
@@ -347,10 +366,12 @@ export function matchRoute(
   method: string,
   url: string,
   profile: RouteProfile = 'harness',
+  opts: { egress?: boolean } = {},
 ): { route: RouteSpec; params: Record<string, string> } | null {
   const pathname = url.split('?')[0] ?? '';
   for (const { route, re, names } of COMPILED) {
     if (route.method !== method || !route.profiles.includes(profile)) continue;
+    if (profile === 'sandbox' && route.requiresEgress && !opts.egress) continue;
     const m = re.exec(pathname);
     if (!m) continue;
     const params: Record<string, string> = {};
