@@ -322,8 +322,20 @@ export async function cmdUp(
   }
   // Cortex mode is a choice made once (the flag) and kept (the record): a later plain `up` keeps it.
   const cortex = !f.noAgentConfig && (f.cortex === true || cortexMode(root));
-  // Cortex is checked and its script installed now, with nothing created, bound or pushed: a
+  // The agent configuration is checked now, so a conflict stops `up` with nothing created,
+  // bound or pushed; it is written after the push, so the push carries the developer's tree.
+  if (!f.noAgentConfig) {
+    try {
+      writeAgentConfig(root, { dryRun: true, cortex });
+    } catch (err) {
+      if (!(err instanceof ConfigConflict)) throw err;
+      say(c, err.message);
+      return SBX_EXIT.failed;
+    }
+  }
+  // Then Cortex is checked and its script installed, still with nothing created, bound or pushed: a
   // repository in Cortex mode without the script would have nothing keeping the agent off local tools.
+  // After the dry run, because the install changes the shared Cortex (~/.cortex): a conflict must not.
   if (cortex) {
     const bad = await agentopProblem(agentop);
     if (bad) {
@@ -336,17 +348,6 @@ export async function cmdUp(
       return SBX_EXIT.failed;
     }
     if (got.message) c.io.err(got.message);
-  }
-  // The agent configuration is checked now, so a conflict stops `up` with nothing created,
-  // bound or pushed; it is written after the push, so the push carries the developer's tree.
-  if (!f.noAgentConfig) {
-    try {
-      writeAgentConfig(root, { dryRun: true, cortex });
-    } catch (err) {
-      if (!(err instanceof ConfigConflict)) throw err;
-      say(c, err.message);
-      return SBX_EXIT.failed;
-    }
   }
   const rid = await repoId(root);
   const found = await findOrCreate(c, rid, f);

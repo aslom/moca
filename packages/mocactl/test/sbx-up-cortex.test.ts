@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { checkAgentConfig } from '../src/sbx/agent-config.js';
@@ -62,6 +62,21 @@ describe('mocactl sbx up --cortex', () => {
     expect(h.err()).toContain('install.sh | sh');
     expect(h.cp.posts()).toHaveLength(0);
     expect(existsSync(join(h.r, '.sbx'))).toBe(false);
+  });
+
+  // The install changes the shared Cortex (~/.cortex), so a conflict must stop up before it runs.
+  it('a conflict in the agent configuration stops up before Cortex is touched', async () => {
+    const a = agentop(INSTALLED);
+    const h = harness({ agentop: a.exec });
+    mkdirSync(join(h.r, '.claude'), { recursive: true });
+    writeFileSync(
+      join(h.r, '.claude/settings.json'),
+      JSON.stringify({ permissions: { allow: ['Bash'] } }),
+    );
+    expect(await h.run(['up', '--cortex'])).toBe(1);
+    expect(h.err()).toContain('sbx: .claude/settings.json: permissions.allow');
+    expect(a.calls).not.toContain('script install moca-sandbox');
+    expect(h.cp.posts()).toHaveLength(0);
   });
 
   it("a failed install stops up before anything is created, with agentop's own words", async () => {
