@@ -164,6 +164,12 @@ export function orphanSweeper(
     return (running ??= sweepOrphans(deps, graceS, timeoutMs)
       .then((r) => {
         if (r.swept > 0) console.log(`provisioner: swept ${r.swept} orphaned workload(s)`);
+        if (r.kept > 0) {
+          console.error(
+            `provisioner: ${r.kept} PVC(s) kept on missing records; they count against the ` +
+              'moca-sandbox ResourceQuota until deleted by hand (docs/context-service.md)',
+          );
+        }
       })
       .catch((err: unknown) =>
         console.error('provisioner: orphan sweep failed:', (err as Error)?.message ?? String(err)),

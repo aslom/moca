@@ -936,6 +936,11 @@ export interface SweepResult {
   skipped: number;
   /** Workloads whose check or delete failed (a Redis read timed out, too); the next pass retries. */
   failed: number;
+  /**
+   * PVCs left on a missing record, this pass's and earlier ones'. Nothing collects them, and they
+   * count against moca-sandbox's ResourceQuota until an operator deletes them (spec §6.2).
+   */
+  kept: number;
   /** Set when the emptied-Redis guard stopped the pass before any delete. */
   aborted?: true;
 }
@@ -984,7 +989,7 @@ export async function sweepOrphans(
 ): Promise<SweepResult> {
   const selector = `app=${APP_LABEL},${MANAGED_BY_LABEL}=${MANAGED_BY}`;
   const groups = new Map<string, SweepGroup>();
-  const result: SweepResult = { swept: 0, skipped: 0, failed: 0 };
+  const result: SweepResult = { swept: 0, skipped: 0, failed: 0, kept: 0 };
   for (const kind of SWEPT_KINDS) {
     // A failed list fails the pass: deciding on a partial view could miss a group's live member.
     for (const obj of await deps.kube.list(kind, selector)) {
@@ -1009,7 +1014,8 @@ export async function sweepOrphans(
       const r = await firstLook(deps, g, graceS, timeoutMs);
       if (r.counted) read++;
       if (r.counted && r.missing) missing++;
-      if (r.outcome === 'skipped') result.skipped++;
+      if (r.outcome === 'skipped' && r.keptClaim) result.kept++;
+      else if (r.outcome === 'skipped') result.skipped++;
       if (r.outcome === 'due') due.push(r.due);
     } catch (err) {
       failed(g.wl, err);
@@ -1026,8 +1032,9 @@ export async function sweepOrphans(
   for (const d of due) {
     try {
       const r = await sweepDue(deps, d, graceS, timeoutMs);
-      if (r === 'swept') result.swept++;
-      if (r === 'skipped') result.skipped++;
+      if (r.outcome === 'swept') result.swept++;
+      if (r.outcome === 'skipped') result.skipped++;
+      if (r.keptClaim) result.kept++;
     } catch (err) {
       failed(d.g.wl, err);
     }
@@ -1150,7 +1157,7 @@ async function firstLook(
   graceS: number,
   timeoutMs: number,
 ): Promise<
-  | { outcome: 'kept' | 'skipped'; counted?: boolean; missing?: boolean }
+  | { outcome: 'kept' | 'skipped'; counted?: boolean; missing?: boolean; keptClaim?: true }
   | { outcome: 'due'; due: DueGroup; counted: boolean; missing: boolean }
 > {
   const skip = (why: string) => {
@@ -1179,7 +1186,7 @@ async function firstLook(
   // A claim already kept on a missing record: nothing else of it to delete, and it stays.
   if (lone && missing) {
     keptClaim(lone.metadata.name);
-    return { outcome: 'skipped' };
+    return { outcome: 'skipped', keptClaim: true };
   }
   return { outcome: 'due', due: { g, k, recordKey, gen }, counted, missing };
 }
@@ -1190,12 +1197,13 @@ async function sweepDue(
   d: DueGroup,
   graceS: number,
   timeoutMs: number,
-): Promise<'swept' | 'skipped' | 'kept'> {
+): Promise<{ outcome: 'swept' | 'skipped' | 'kept'; keptClaim?: true }> {
   const { k, recordKey, gen } = d;
   const skip = (why: string) => {
     console.error(`provisioner: orphan sweep skips workload ${k.wl}: ${why}`);
-    return 'skipped' as const;
+    return { outcome: 'skipped' as const };
   };
+  const kept = { outcome: 'kept' as const };
   // A throw here (a Redis read that timed out) ends this call, and serialized releases the queue.
   return serialized(k.own, async () => {
     // Again under the owner's queue, against fresh reads: a PUT or DELETE may have run since.
@@ -1204,16 +1212,16 @@ async function sweepDue(
       const obj = await deps.kube.get(kind, k.wl);
       if (obj && ours(obj, k)) fresh.objects.push({ kind, obj });
     }
-    if (fresh.objects.length === 0) return 'kept';
+    if (fresh.objects.length === 0) return kept;
     const again = groupKeys(fresh);
     if ('bad' in again) return skip(again.bad);
-    if (again.recordKey !== recordKey || again.gen !== gen) return 'kept';
+    if (again.recordKey !== recordKey || again.gen !== gen) return kept;
     for (const { obj } of fresh.objects) {
       const age = ageS(obj, nowOf(deps));
-      if (age === null || age < graceS) return 'kept';
+      if (age === null || age < graceS) return kept;
     }
     const verdict = await judge(deps, k, recordKey, gen, timeoutMs);
-    if (verdict.keep) return verdict.why ? skip(verdict.why) : 'kept';
+    if (verdict.keep) return verdict.why ? skip(verdict.why) : kept;
     // A missing record never deletes the claim: only an explicit deleted/deleting or another
     // generation does (spec §6.2).
     const keepClaim = verdict.why === MISSING;
@@ -1231,7 +1239,11 @@ async function sweepDue(
       keepClaim,
     );
     const claim = fresh.objects.find(({ kind }) => kind === 'persistentvolumeclaims');
-    if (keepClaim && claim) keptClaim(claim.obj.metadata.name);
-    return deleted > 0 ? 'swept' : 'kept';
+    const claimKept = keepClaim && claim !== undefined;
+    if (claimKept) keptClaim(claim.obj.metadata.name);
+    return {
+      outcome: deleted > 0 ? ('swept' as const) : ('kept' as const),
+      ...(claimKept ? { keptClaim: true as const } : {}),
+    };
   });
 }
