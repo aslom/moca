@@ -27,6 +27,7 @@ import { cmdMcp, cmdPut, cmdRun, parseTimeout, workspacePath } from './run.js';
 import { PushError, repoRoot } from './push.js';
 import { findSandboxFile, readBinding, readBoundSandbox, SANDBOX_ID_RE } from './state.js';
 import { checkBeforeRm, cmdPull, cmdPush, cmdUp, DEFAULT_TEMPLATE, unbind } from './sync.js';
+import { type AgentopExec } from './agentop.js';
 
 export const SBX_USAGE = `usage (the sandbox service, SBX0):
   mocactl sbx login [--control-plane-url URL] [--no-browser]
@@ -53,7 +54,7 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  the sandbox token's lifetime minus 60 s)
   mocactl sbx put PATH [--sandbox ID]            write stdin to PATH under /workspace
   mocactl sbx mcp [--sandbox ID]                 the stdio MCP server for Claude Code / OpenCode
-  mocactl sbx up [--template T] [--name N] [--include-secrets] [--max-push MiB] [--no-agent-config]
+  mocactl sbx up [--template T] [--name N] [--include-secrets] [--max-push MiB] [--no-agent-config] [--cortex]
                                                  in a git repository: create or reuse its sandbox,
                                                  push the working tree, bind it in .sbx/sandbox.json,
                                                  and point Claude Code and OpenCode at the sandbox's
@@ -63,6 +64,9 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  that conflicts stops up before anything is done)
                                                  (a reused sandbox with changes not yet pulled is
                                                  left unpushed, with a warning, and up exits 0)
+                                                 (--cortex: Cortex v0.9.3+ blocks the local tools
+                                                 instead of a deny list, so Claude Code loads the
+                                                 project's CLAUDE.md; kept by later runs)
   mocactl sbx push [--force] [--include-secrets] [--max-push MiB]   push the working tree again
                                                  (refused while the sandbox has changes not yet
                                                  pulled, unless --force; .env*, *.pem, *.key and
@@ -92,6 +96,8 @@ export interface SbxDeps {
   execFactory?: ExecFactory;
   /** `doctor`'s `claude --version` (default: asked of the `claude` on PATH). */
   claudeVersion?: () => Promise<string | undefined> | string | undefined;
+  /** Cortex's agentop, for `up --cortex` and `doctor` in Cortex mode (default: the one on PATH). */
+  agentop?: AgentopExec;
   /** `mcp`'s transport (default stdio). */
   mcpTransport?: Transport;
   /** `login`'s clipboard and browser; absent when nobody is at this machine's screen. */
@@ -226,6 +232,7 @@ const SYNC_FLAGS: [
     | 'apply'
     | 'out'
     | 'no-agent-config'
+    | 'cortex'
     | 'keep-config'
     | 'no-browser'
   ),
@@ -237,6 +244,7 @@ const SYNC_FLAGS: [
   ['apply', ['pull']],
   ['out', ['pull']],
   ['no-agent-config', ['up']],
+  ['cortex', ['up']],
   ['keep-config', ['rm']],
   ['no-browser', ['login']],
 ];
@@ -285,6 +293,7 @@ export async function sbxMain(
         apply: { type: 'boolean' },
         out: { type: 'string', short: 'o' },
         'no-agent-config': { type: 'boolean' },
+        cortex: { type: 'boolean' },
         'keep-config': { type: 'boolean' },
         'no-browser': { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
@@ -344,6 +353,12 @@ export async function sbxMain(
   );
   if (flagMisuse) {
     io.err(`sbx: --${flagMisuse[0]} only applies to ${flagMisuse[1].join(' and ')}\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (values.cortex && values['no-agent-config']) {
+    io.err(
+      `sbx: --cortex is a choice about the agent configuration, which --no-agent-config does not write\n${SBX_USAGE}`,
+    );
     return SBX_EXIT.usage;
   }
   if (values.template !== undefined && !values.template.trim()) {
@@ -553,10 +568,12 @@ export async function sbxMain(
           ...(values.template ? { template: values.template } : {}),
           ...(values.name ? { name: values.name } : {}),
           noAgentConfig: values['no-agent-config'] === true,
+          cortex: values.cortex === true,
           ...(upBound ? { boundId: upBound } : {}),
           cwd,
         },
         deps.execFactory,
+        deps.agentop,
       );
     case 'push':
       return cmdPush(
