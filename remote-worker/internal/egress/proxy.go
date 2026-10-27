@@ -401,7 +401,10 @@ type proxyConn struct {
 }
 
 func (pc *proxyConn) event(e Event) Event {
-	e.VMID, e.SID, e.Sub = pc.caller.VMID, pc.caller.SessionID, pc.caller.Subject
+	e.VMID, e.SID = pc.caller.VMID, pc.caller.SessionID
+	if e.Sub == "" { // an intercepted request carries the credential owner from the lookup
+		e.Sub = pc.caller.Subject
+	}
 	return e
 }
 

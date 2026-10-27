@@ -221,6 +221,13 @@ func credentialsFromEnv(get func(string) string, cfg *Config) error {
 		cfg.UpstreamRoots = pool
 	}
 
+	ca, err := NewLeafCA(cfg.InterceptCACertPEM, cfg.InterceptCAKeyPEM, time.Now)
+	if err != nil {
+		// The variable names, never key material: err says only what is wrong.
+		return fmt.Errorf("%s / %s: %w", envCACertFile, envCAKeyFile, err)
+	}
+	cfg.interceptor = newInterceptor(ca, cfg.UpstreamRoots)
+
 	timeout := 3 * time.Second
 	if v := strings.TrimSpace(get(envCredTimeout)); v != "" {
 		if timeout, err = time.ParseDuration(v); err != nil || timeout <= 0 {

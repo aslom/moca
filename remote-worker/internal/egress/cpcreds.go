@@ -332,3 +332,13 @@ func validPathPrefix(p string) error {
 	}
 	return nil
 }
+
+// Host names the control plane for the boot log: host and port only, never the
+// path, userinfo or token.
+func (c *CPCredentials) Host() string {
+	u, err := url.Parse(c.endpoint)
+	if err != nil {
+		return "?"
+	}
+	return u.Host
+}

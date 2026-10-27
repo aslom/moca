@@ -137,7 +137,8 @@ func TestConfigRejectsBadCIDRAndBadUID(t *testing.T) {
 
 func credEnv(t *testing.T, extra map[string]string) func(string) string {
 	dir := t.TempDir()
-	for name, content := range map[string]string{"tok": "secret-token\n", "ca.crt": testCACert, "ca.key": "KEYPEM"} {
+	ca := newTestCA(t, true)
+	for name, content := range map[string]string{"tok": "secret-token\n", "ca.crt": string(ca.certPEM), "ca.key": string(ca.keyPEM)} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -159,8 +160,6 @@ func credEnv(t *testing.T, extra map[string]string) func(string) string {
 	return envMap(m)
 }
 
-const testCACert = "-----BEGIN CERTIFICATE-----\nnot parsed here\n-----END CERTIFICATE-----\n"
-
 func TestConfigCredentialsLoaded(t *testing.T) {
 	cfg, _, err := ConfigFromEnv(credEnv(t, nil))
 	if err != nil {
@@ -169,14 +168,15 @@ func TestConfigCredentialsLoaded(t *testing.T) {
 	if _, ok := cfg.Credentials.(*CPCredentials); !ok {
 		t.Fatalf("credentials = %T", cfg.Credentials)
 	}
-	if string(cfg.InterceptCACertPEM) != testCACert || string(cfg.InterceptCAKeyPEM) != "KEYPEM" {
-		t.Fatal("CA not exposed")
+	if len(cfg.InterceptCACertPEM) == 0 || len(cfg.InterceptCAKeyPEM) == 0 || cfg.interceptor == nil {
+		t.Fatal("CA not exposed or interceptor not built")
 	}
 }
 
 func TestConfigCredentialsDirectoryDefaults(t *testing.T) {
 	dir := t.TempDir()
-	for name, content := range map[string]string{"egress-token": "tok", "egress-ca.crt": testCACert, "egress-ca.key": "K"} {
+	ca := newTestCA(t, true)
+	for name, content := range map[string]string{"egress-token": "tok", "egress-ca.crt": string(ca.certPEM), "egress-ca.key": string(ca.keyPEM)} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -210,6 +210,33 @@ func TestConfigCredentialsFailures(t *testing.T) {
 	if _, _, err := ConfigFromEnv(credEnv(t, map[string]string{"MOCA_EGRESS_CREDENTIALS_URL": "http://cp.example"})); err == nil ||
 		!strings.Contains(err.Error(), "MOCA_EGRESS_CREDENTIALS_URL") {
 		t.Errorf("url: %v", err)
+	}
+}
+
+func TestConfigBadInterceptCAFailsBoot(t *testing.T) {
+	good, other, notCA := newTestCA(t, true), newTestCA(t, true), newTestCA(t, false)
+	write := func(b []byte) string {
+		p := filepath.Join(t.TempDir(), "f")
+		if err := os.WriteFile(p, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	cases := map[string]map[string]string{
+		"garbage cert": {"MOCA_EGRESS_CA_CERT_FILE": write([]byte("junk"))},
+		"garbage key":  {"MOCA_EGRESS_CA_KEY_FILE": write([]byte("junk"))},
+		"mismatch":     {"MOCA_EGRESS_CA_CERT_FILE": write(good.certPEM), "MOCA_EGRESS_CA_KEY_FILE": write(other.keyPEM)},
+		"not a CA":     {"MOCA_EGRESS_CA_CERT_FILE": write(notCA.certPEM), "MOCA_EGRESS_CA_KEY_FILE": write(notCA.keyPEM)},
+	}
+	for name, extra := range cases {
+		_, _, err := ConfigFromEnv(credEnv(t, extra))
+		if err == nil || !strings.Contains(err.Error(), "MOCA_EGRESS_CA_") {
+			t.Errorf("%s: err = %v", name, err)
+			continue
+		}
+		if strings.Contains(err.Error(), "PRIVATE KEY") {
+			t.Errorf("%s: error carries key material", name)
+		}
 	}
 }
 
