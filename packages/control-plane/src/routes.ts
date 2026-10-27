@@ -22,8 +22,9 @@ export interface RouteSpec {
    * `api`      -- Ed25519 token with scope `api` (plan gap #7).
    * `exchange` -- the shared SH_EXCHANGE_TOKEN bearer (spec §5.3.1).
    * `janitor`  -- the sandbox host janitor's SH_JANITOR_TOKEN bearer (SBX0 §8.3).
+   * `egress`   -- one configured KVM host's egress token (SBX0.2b §4.2); names the host.
    */
-  auth: 'none' | 'api' | 'exchange' | 'janitor';
+  auth: 'none' | 'api' | 'exchange' | 'janitor' | 'egress';
   /** The profiles that mount this route (see RouteProfile). */
   profiles: readonly RouteProfile[];
   /**
@@ -232,6 +233,15 @@ export const ROUTES: readonly RouteSpec[] = [
     profiles: BOTH,
     requiresEgress: true,
     operationId: 'deleteCredential',
+  },
+  {
+    method: 'POST',
+    path: '/v1/egress/credential',
+    auth: 'egress',
+    sessionScoped: false,
+    profiles: SANDBOX,
+    requiresEgress: true,
+    operationId: 'lookupEgressCredential',
   },
   {
     method: 'POST',

@@ -64,6 +64,8 @@ import type { RouteProfile } from './routes.js';
 import { isEnrolled, notEnrolled, type SandboxConfig } from './sandbox-config.js';
 import type { SandboxStore } from './sandbox-store.js';
 import { SANDBOX_HANDLERS } from './sandbox-handlers.js';
+import { EGRESS_HANDLERS } from './egress-handlers.js';
+import type { EgressHost } from './egress-config.js';
 import { formatDestination, parseDestination } from './egress-destination.js';
 
 /** A stored destination in normalized form; a legacy or corrupt entry compares as written. */
@@ -191,6 +193,8 @@ export interface RequestCtx {
   exchangeAuthorized?: boolean;
   /** Set by the router for `auth: 'janitor'` routes. */
   janitorAuthorized?: boolean;
+  /** Set by the router for `auth: 'egress'` routes: the host whose token was presented. */
+  egressHost?: EgressHost;
 }
 
 export type Handler = (ctx: RequestCtx, deps: CpDeps) => Promise<{ status: number; body: unknown }>;
@@ -1012,4 +1016,5 @@ export const HANDLERS: Record<string, Handler> = {
 
   // SBX0 §5.1: the sandbox resource (sandbox-handlers.ts), mounted on the sandbox profile only.
   ...SANDBOX_HANDLERS,
+  ...EGRESS_HANDLERS,
 };

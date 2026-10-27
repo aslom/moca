@@ -1,5 +1,7 @@
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { CpError, writeError } from './errors.js';
+import type { EgressHost } from './egress-config.js';
 import { checkExchangeAuth, checkStaticBearer } from './exchange.js';
 import { HANDLERS, apiIssuer, type CpDeps, type RequestCtx } from './handlers.js';
 import { matchRoute, type RouteSpec, bodyLimitFor } from './routes.js';
@@ -65,6 +67,20 @@ function authorize(route: RouteSpec, req: IncomingMessage, deps: CpDeps, ctx: Re
     // refused here, and with none configured every call is (SBX0 §8.3).
     checkStaticBearer(presented, deps.config.sandbox?.janitorToken, 'janitor');
     ctx.janitorAuthorized = true;
+    return;
+  }
+  if (route.auth === 'egress') {
+    // Compare against EVERY configured host and never return early, so timing shows nothing about
+    // which host matched. Digests keep the comparison fixed-length (as checkStaticBearer does).
+    // With no hosts, no bearer or no match: 401, naming neither the host list nor the value.
+    const want = presented ? createHash('sha256').update(presented).digest() : undefined;
+    let found: EgressHost | undefined;
+    for (const h of deps.config.sandbox?.egress?.hosts ?? []) {
+      const have = createHash('sha256').update(h.token).digest();
+      if (want && timingSafeEqual(want, have) && found === undefined) found = h;
+    }
+    if (!found) throw new CpError('unauthorized', 'egress authentication failed');
+    ctx.egressHost = found;
     return;
   }
   if (!presented) throw new CpError('token_required', 'this route requires a token');

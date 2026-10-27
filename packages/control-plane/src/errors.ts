@@ -40,6 +40,8 @@ export const CP_ERROR_CODES = [
   'credential_unavailable',
   'credential_unsafe',
   'destination_conflict',
+  'destination_ambiguous',
+  'no_credential',
   'endpoint_unresolved',
   'model_unavailable',
   'model_catalog_unavailable',
@@ -92,6 +94,10 @@ const STATUS: Record<CpErrorCode, number> = {
   credential_unsafe: 500,
   // 409: another credential of the owner already holds the identical normalized destination.
   destination_conflict: 409,
+  // 500: two of an owner's egress destinations are identical; stored state from a write race.
+  destination_ambiguous: 500,
+  // 404: egress lookup for a live sandbox whose owner holds no credential for the host.
+  no_credential: 404,
   endpoint_unresolved: 400,
   // 400: the credential's endpoint does not offer that model id (per-session model spec §4.2).
   model_unavailable: 400,
