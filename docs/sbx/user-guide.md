@@ -160,6 +160,22 @@ They are ordinary files in your working tree, so `git status` shows them. Leave 
 committed, they would point every teammate's agents at a sandbox and deny their local tools.
 `mocactl sbx up --no-agent-config` creates and pushes without touching them.
 
+### Loading your project's `CLAUDE.md`: `sbx up --cortex`
+
+The `Read` deny in `.claude/settings.json` also stops Claude Code loading your project's own
+`CLAUDE.md`. With [Cortex](https://github.com/rossoctl/cortex) v0.9.3 or later installed,
+`mocactl sbx up --cortex` leaves the deny list out and has Cortex keep the agent off local tools
+instead:
+
+- `up` runs `agentop script install moca-sandbox` before it creates anything, and stops if that
+  fails.
+- `.claude/settings.json` gets the allow rule and `enabledMcpjsonServers`, but no
+  `permissions.deny`.
+- Later `up` runs keep the mode. `mocactl sbx doctor` checks the script is installed and loaded.
+
+Claude Code must reach the model through Cortex (`agentop configure claude-code`). Without it,
+nothing blocks the local tools.
+
 ### The first `claude` asks about the sandbox server
 
 Start Claude Code from the repository root, where `up` wrote `.mcp.json` and
