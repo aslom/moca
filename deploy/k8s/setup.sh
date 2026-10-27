@@ -381,6 +381,11 @@ configmap_json() { kc get configmap "$1" -n "$NS" --ignore-not-found -o json; }
 # cm_value JSON KEY: KEY's value from configmap_json's output (possibly empty), or nothing.
 cm_value() { printf '%s' "$1" | jq -r --arg k "$2" '.data[$k] // empty'; }
 
+# The live control plane Deployment, for the two steps that read the pre-0.8 hand patch
+# (hand_patched_catalog_hosts, strip_catalog_hosts_env). One command, like configmap_json: a
+# failed read must abort the run, never passing an unreadable Deployment off as a missing one.
+deployment_json() { kc get deployment moca-control-plane -n "$NS" --ignore-not-found -o json; }
+
 # normalize_p4_ids "a, b,," -> "a b": comma-separated; each entry trimmed, empty entries dropped. An
 # ID must match the relay's token-directory rule (spec §2.1: the relay reads <dir>/<id>) and appear
 # once -- two hosts with one ID would share a token and a workspace. DIR is reserved: the relay
@@ -971,6 +976,20 @@ sha256() {
 # remembers "changed" between runs, so a run that writes new settings and then fails cannot lose the
 # roll -- the next run renders the same new hash.
 #
+# The pre-0.8 catalog allow-list's only copy: a hand-patched literal env on the control plane
+# Deployment (the manifests did not wire the setting until 5615ffd6, so an operator patch was the
+# only way to set it on k8s). Prints its value, or nothing when the Deployment or the entry is
+# missing or the entry is a valueFrom this script applied. `|| return $?`: read through
+# write_settings' command substitution, a failed read must still abort there, not read as absent.
+hand_patched_catalog_hosts() {
+  local json
+  json="$(deployment_json)" || return $?
+  [[ -n "$json" ]] || return 0
+  printf '%s' "$json" | jq -r '
+    [.spec.template.spec.containers[]? | select(.name == "control-plane")
+      | .env[]? | select(.name == "SH_MODEL_CATALOG_HOSTS" and has("value")) | .value] | first // empty'
+}
+
 # Sticky: each input variable that is UNSET keeps the value moca-settings already holds; one that
 # is set, even to empty (SH_ADMIN_SUBJECTS=), replaces it. SH_PUBLIC_HARNESS_URL is an input on
 # port-forward-reached targets (public_harness_url); on Route-reached stacks it is derived from
@@ -980,7 +999,7 @@ sha256() {
 # same nine keys; an empty token lifetime is the control plane's default, and an empty catalog
 # allow-list its own.
 write_settings() {
-  local before after admins fb api_ttl session_ttl catalog_hosts url
+  local before after admins fb api_ttl session_ttl catalog_hosts catalog_src url
   before="$(configmap_json moca-settings)"
   if [[ -n "${SH_GITHUB_CLIENT_ID+x}" ]]; then CLIENT_ID="$SH_GITHUB_CLIENT_ID"; else CLIENT_ID="$(cm_value "$before" SH_GITHUB_CLIENT_ID)"; fi
   if [[ -z "$CLIENT_ID" && "$TARGET" == kind-ci ]]; then
@@ -992,7 +1011,21 @@ write_settings() {
   fb="${fb:-false}"
   if [[ -n "${SH_API_TOKEN_TTL_SECONDS+x}" ]]; then api_ttl="$SH_API_TOKEN_TTL_SECONDS"; else api_ttl="$(cm_value "$before" SH_API_TOKEN_TTL_SECONDS)"; fi
   if [[ -n "${SH_SESSION_TOKEN_TTL_SECONDS+x}" ]]; then session_ttl="$SH_SESSION_TOKEN_TTL_SECONDS"; else session_ttl="$(cm_value "$before" SH_SESSION_TOKEN_TTL_SECONDS)"; fi
-  if [[ -n "${SH_MODEL_CATALOG_HOSTS+x}" ]]; then catalog_hosts="$SH_MODEL_CATALOG_HOSTS"; else catalog_hosts="$(cm_value "$before" SH_MODEL_CATALOG_HOSTS)"; fi
+  catalog_src='moca-settings'
+  if [[ -n "${SH_MODEL_CATALOG_HOSTS+x}" ]]; then
+    catalog_hosts="$SH_MODEL_CATALOG_HOSTS"
+  else
+    catalog_hosts="$(cm_value "$before" SH_MODEL_CATALOG_HOSTS)"
+    # A pre-0.8 moca-settings has no catalog key at all (5615ffd6 introduced it), so the only
+    # copy of the allow-list is the hand patch on the control plane Deployment: carry it over
+    # before strip_catalog_hosts_env removes the env, or the strip would delete it. has(), not
+    # cm_value's emptiness -- an empty key is the operator's cleared allow-list and stays cleared.
+    # Precedence: a value given for this run, then moca-settings, then the hand patch.
+    if [[ "$(printf '%s' "$before" | jq -r '.data // {} | has("SH_MODEL_CATALOG_HOSTS")')" != true ]]; then
+      catalog_hosts="$(hand_patched_catalog_hosts)"
+      catalog_src='the hand-patched SH_MODEL_CATALOG_HOSTS env on deployment/moca-control-plane'
+    fi
+  fi
   # SH_PUBLIC_HARNESS_URL is sticky on port-forward-reached stacks (public_harness_url reads
   # moca-settings when the env var is unset); Route-reached stacks always derive from the Route host.
   url="$(public_harness_url)"
@@ -1002,7 +1035,7 @@ write_settings() {
   valid_ttl "$session_ttl" ||
     die "moca-settings holds SH_SESSION_TOKEN_TTL_SECONDS='$session_ttl': re-run with it set to a whole number of seconds, or set but empty (SH_SESSION_TOKEN_TTL_SECONDS=) for the default"
   valid_catalog_hosts "$catalog_hosts" ||
-    die "moca-settings holds SH_MODEL_CATALOG_HOSTS='$catalog_hosts': re-run with it set to comma-separated bare hostnames, or set but empty (SH_MODEL_CATALOG_HOSTS=) for the control plane's default"
+    die "$catalog_src holds SH_MODEL_CATALOG_HOSTS='$catalog_hosts': re-run with it set to comma-separated bare hostnames, or set but empty (SH_MODEL_CATALOG_HOSTS=) for the control plane's default"
   # Valid but long: a stray extra digit must not mint near-permanent bearer tokens unnoticed.
   ((${api_ttl:-0} <= 604800)) ||
     log "WARNING: SH_API_TOKEN_TTL_SECONDS=$api_ttl is over 7 days: every API token a login mints stays valid that long"
@@ -1450,25 +1483,22 @@ write_overlay() {
   } >"$GEN_DIR/kustomization.yaml"
 }
 
-# The pre-0.8 catalog allow-list: before the manifests wired it into moca-settings, the only way
-# to set it on k8s was a hand patch of the control plane Deployment -- a literal env value owned
-# by another field manager. The manifests apply that env entry as a configMapKeyRef, and
-# server-side apply never declares `value`, so the literal survives the merge and the API server
-# rejects the Deployment ("may not be specified when `value` is not empty"). Strip the hand patch
-# before the apply; write_settings has already carried the value into moca-settings by here. A
-# failed read aborts the run like configmap_json's: an unreadable Deployment must not look like a
-# missing one. An entry that is already valueFrom (a stack this script applied) is left alone, or
-# every re-run would roll the control plane for nothing.
+# Removing the hand patch (see hand_patched_catalog_hosts for what it is): the manifests apply
+# that env entry as a configMapKeyRef, and server-side apply never declares `value`, so the
+# literal survives the merge and the API server rejects the Deployment ("may not be specified
+# when `value` is not empty"). Strip it before the apply; write_settings has already carried its
+# value into moca-settings by here. An entry that is already valueFrom (a stack this script
+# applied) is left alone, or every re-run would roll the control plane for nothing.
 strip_catalog_hosts_env() {
   local json
-  json="$(kc get deployment moca-control-plane -n "$NS" --ignore-not-found -o json)"
+  json="$(deployment_json)"
   [[ -n "$json" ]] || return 0
   printf '%s' "$json" | jq -e '
     [.spec.template.spec.containers[]? | select(.name == "control-plane")
       | .env[]? | select(.name == "SH_MODEL_CATALOG_HOSTS" and has("value"))] | length != 0' \
     >/dev/null || return 0
   log 'removing the hand-patched SH_MODEL_CATALOG_HOSTS env from deployment/moca-control-plane (the allow-list now lives in moca-settings)'
-  kc set env deployment/moca-control-plane -n "$NS" SH_MODEL_CATALOG_HOSTS- >/dev/null
+  kc set env deployment/moca-control-plane -c control-plane -n "$NS" SH_MODEL_CATALOG_HOSTS- >/dev/null
 }
 
 apply_stack() {

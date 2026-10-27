@@ -161,7 +161,7 @@ case "${1-} ${2-}" in
   fi ;;
 # The 0.8 upgrade migration: a trailing dash removes the env entry from the stored Deployment.
 "set env")
-  [[ "$3" == deployment/moca-control-plane && "$4" == SH_MODEL_CATALOG_HOSTS- ]] ||
+  [[ "$3" == deployment/moca-control-plane && "$4" == -c && "$5" == control-plane && "$6" == SH_MODEL_CATALOG_HOSTS- ]] ||
     { echo "mock kubectl: unhandled: $*" >&2; exit 2; }
   f="$(store "$ns" Deployment moca-control-plane)"
   [[ -f "$f" ]] || { echo "Error from server (NotFound): deployments \"moca-control-plane\" not found" >&2; exit 1; }
@@ -1422,7 +1422,8 @@ pass 'a malformed catalog allow-list is refused, given (before any apply) or sto
 # literal env value owned by another field manager. The manifests now apply that env entry as a
 # configMapKeyRef, and server-side apply never declares `value`, so the literal survives the merge
 # and the API server rejects the Deployment ("may not be specified when `value` is not empty").
-# setup.sh must strip the hand patch before the apply; moca-settings carries the value from then on.
+# setup.sh must carry the hand-patched value into moca-settings (a pre-0.8 ConfigMap has no catalog
+# key, so the strip would otherwise delete the only copy) and strip the env before the apply.
 seed_control_plane_env() { # $1: the SH_MODEL_CATALOG_HOSTS env entry, as strict JSON (--argjson)
   jq -n --argjson entry "$1" '{apiVersion: "apps/v1", kind: "Deployment",
     metadata: {name: "moca-control-plane", namespace: "moca"},
@@ -1435,6 +1436,8 @@ seed_control_plane_env '{"name": "SH_MODEL_CATALOG_HOSTS", "value": "litellm.cb.
 (export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
 grep -q ' set env deployment/moca-control-plane .*SH_MODEL_CATALOG_HOSTS-$' "$MOCK_LOG" ||
   fail 'a hand-patched SH_MODEL_CATALOG_HOSTS env value was not stripped'
+[[ "$(setting SH_MODEL_CATALOG_HOSTS)" == litellm.cb.example.com ]] ||
+  fail 'the hand-patched allow-list was dropped instead of carried into moca-settings'
 strip_line="$(grep -n ' set env deployment/moca-control-plane ' "$MOCK_LOG" | head -1 | cut -d: -f1)"
 apply_line="$(grep -n 'apply -k' "$MOCK_LOG" | head -1 | cut -d: -f1)"
 [[ -n "$strip_line" && -n "$apply_line" && "$strip_line" -lt "$apply_line" ]] ||
@@ -1442,6 +1445,32 @@ apply_line="$(grep -n 'apply -k' "$MOCK_LOG" | head -1 | cut -d: -f1)"
 jq -e '(.spec.template.spec.containers[0].env // []) | map(select(.name == "SH_MODEL_CATALOG_HOSTS")) | length == 0' \
   "$MOCK_STATE/moca__Deployment__moca-control-plane.json" >/dev/null ||
   fail 'the strip left the SH_MODEL_CATALOG_HOSTS entry on the live Deployment'
+# The hand patch is the last resort: a value given for this run, and one an earlier run stored,
+# both win over it -- an operator who replaced or cleared the allow-list is never dragged back.
+reset_state
+seed_control_plane_env '{"name": "SH_MODEL_CATALOG_HOSTS", "value": "litellm.cb.example.com"}'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_MODEL_CATALOG_HOSTS=gw.override.example.com; expect_ok --target kind --skip-build)
+[[ "$(setting SH_MODEL_CATALOG_HOSTS)" == gw.override.example.com ]] ||
+  fail 'a SH_MODEL_CATALOG_HOSTS given for the run did not win over the hand patch'
+grep -q ' set env deployment/moca-control-plane ' "$MOCK_LOG" ||
+  fail 'the hand patch outlived a run that replaced its value'
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_MODEL_CATALOG_HOSTS=gw.stored.example.com; expect_ok --target kind --skip-build)
+seed_control_plane_env '{"name": "SH_MODEL_CATALOG_HOSTS", "value": "litellm.cb.example.com"}'
+: >"$MOCK_LOG" # only this run's calls: the stored value must win with the hand patch present
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
+[[ "$(setting SH_MODEL_CATALOG_HOSTS)" == gw.stored.example.com ]] ||
+  fail 'a stored SH_MODEL_CATALOG_HOSTS did not win over the hand patch'
+grep -q ' set env deployment/moca-control-plane ' "$MOCK_LOG" ||
+  fail 'the hand patch outlived the run that ignored its value'
+# A malformed hand-patched value is refused like a malformed given or stored one, naming where it
+# lives, and never reaches the stack apply (the Secret applies before write_settings are fine:
+# the stored-value refusal behaves the same way).
+reset_state
+seed_control_plane_env '{"name": "SH_MODEL_CATALOG_HOSTS", "value": "gw.example.com:4000"}'
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_fail --target kind --skip-build)
+expect_out "deployment/moca-control-plane holds SH_MODEL_CATALOG_HOSTS='gw.example.com:4000'"
+! grep -q 'apply -k' "$MOCK_LOG" || fail 'a malformed hand-patched allow-list reached the stack apply'
 # Without a hand patch there is nothing to strip: an absent entry (a stack that never set the
 # allow-list) and a valueFrom one (a stack this setup.sh already applied) must not be touched,
 # or every re-run would roll the control plane for nothing.
@@ -1454,7 +1483,7 @@ seed_control_plane_env '{"name": "SH_MODEL_CATALOG_HOSTS", "valueFrom": {"config
 (export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
 ! grep -q ' set env deployment/moca-control-plane' "$MOCK_LOG" ||
   fail 'a valueFrom SH_MODEL_CATALOG_HOSTS (a stack this setup.sh applied) was stripped, rolling the control plane for nothing'
-pass 'the 0.8 upgrade strips a hand-patched SH_MODEL_CATALOG_HOSTS env before the apply, and strips nothing without one'
+pass 'the 0.8 upgrade carries a hand-patched SH_MODEL_CATALOG_HOSTS into moca-settings and strips the env before the apply, and strips nothing without one'
 echo "== workload sandboxes (SH_WORKLOAD_SANDBOXES, workload sandboxes spec §4)"
 reset_state
 (export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
