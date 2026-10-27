@@ -34,10 +34,40 @@ type Config struct {
 	Audit       AuditSink
 
 	DialTimeout time.Duration // default 10s
+	// IdleTimeout bounds how long an established connection may go with no
+	// bytes moving, in either direction and on either path. It is refreshed on
+	// every read and every write, so a transfer of any duration survives; only
+	// a silent one expires. Default 300s. Zero selects the default: a slot
+	// unbounded in time is not an option a caller may choose.
+	IdleTimeout time.Duration
+	// ResponseHeaderTimeout bounds how long a forwarded request may wait for
+	// its response headers after the request is sent. Separate from
+	// IdleTimeout, and strictly tighter: it treats a silent upstream that has
+	// been asked a question as a fault sooner than the idle bound would.
+	//
+	// It defaults to IdleTimeout rather than to something shorter, because
+	// shorter is a policy call with a real cost and no safety benefit here. The
+	// slot is already bounded without it — the idle clock covers the upstream
+	// conn from the dial, so an upstream that never answers expires anyway —
+	// while a tighter value turns legitimate slow thinking into a 502: a plain
+	// HTTP inference endpoint can take minutes before its first header byte,
+	// and so can a forge packing a large repo. An operator who would rather
+	// fail fast sets MOCA_EGRESS_RESPONSE_HEADER_TIMEOUT_S below the idle
+	// bound; nothing stops them, and no default guesses on their behalf.
+	ResponseHeaderTimeout time.Duration
 }
 
 const (
 	defaultDialTimeout = 10 * time.Second
+	// defaultIdleTimeout matches squid's request_timeout. It has to outlast
+	// the quiet stretch of a real upstream doing work — a large repo being
+	// packed server-side before the first byte of the pack arrives, an
+	// inference endpoint thinking — because it is refreshed per read, not per
+	// request.
+	defaultIdleTimeout = 300 * time.Second
+	// defaultResponseHeaderTimeout is the idle bound: see the field's doc for
+	// why this knob does not default tighter than the bound it refines.
+	defaultResponseHeaderTimeout = defaultIdleTimeout
 	// sessionIdle is how long a session counter survives without a request.
 	sessionIdle = time.Hour
 	// sweepEvery bounds how often the lazy session sweep runs.
@@ -100,9 +130,22 @@ func NewProxy(cfg Config) (*Proxy, error) {
 		return nil, fmt.Errorf("egress: MaxRequestsPerSession %d must be positive", cfg.MaxRequestsPerSession)
 	case cfg.DialTimeout < 0:
 		return nil, fmt.Errorf("egress: negative DialTimeout %v", cfg.DialTimeout)
+	case cfg.IdleTimeout < 0:
+		return nil, fmt.Errorf("egress: negative IdleTimeout %v", cfg.IdleTimeout)
+	case cfg.ResponseHeaderTimeout < 0:
+		return nil, fmt.Errorf("egress: negative ResponseHeaderTimeout %v", cfg.ResponseHeaderTimeout)
 	}
 	if cfg.DialTimeout == 0 {
 		cfg.DialTimeout = defaultDialTimeout
+	}
+	if cfg.IdleTimeout == 0 {
+		cfg.IdleTimeout = defaultIdleTimeout
+	}
+	if cfg.ResponseHeaderTimeout == 0 {
+		// The effective idle bound, not defaultIdleTimeout: an operator who
+		// raises only the idle bound must not be left with a tighter header
+		// timeout hiding behind it.
+		cfg.ResponseHeaderTimeout = cfg.IdleTimeout
 	}
 	cfg.Allow = append([]AllowEntry(nil), cfg.Allow...)
 	cfg.PermitCIDRs = append([]netip.Prefix(nil), cfg.PermitCIDRs...)

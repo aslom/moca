@@ -3,6 +3,7 @@ package egress
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func envMap(m map[string]string) func(string) string {
@@ -38,6 +39,12 @@ func TestConfigDefaults(t *testing.T) {
 	if cfg.MaxConnsPerVM != 32 || cfg.MaxRequestsPerSession != 10000 {
 		t.Fatalf("caps = %d, %d", cfg.MaxConnsPerVM, cfg.MaxRequestsPerSession)
 	}
+	// The response-header bound defaults to the idle bound, not tighter: the
+	// slot is already bounded without it, and a tighter default would 502 an
+	// upstream that is legitimately slow to its first header byte.
+	if cfg.IdleTimeout != 300*time.Second || cfg.ResponseHeaderTimeout != 300*time.Second {
+		t.Fatalf("timeouts = %v, %v", cfg.IdleTimeout, cfg.ResponseHeaderTimeout)
+	}
 	if cc.Socket != "/run/moca-egress/control.sock" {
 		t.Fatalf("socket = %q", cc.Socket)
 	}
@@ -58,6 +65,9 @@ func TestConfigParsesOverrides(t *testing.T) {
 		"MOCA_EGRESS_MAX_REQUESTS_PER_SESSION": "7",
 		"MOCA_EGRESS_CONTROL_SOCK":             "/tmp/x.sock",
 		"MOCA_EGRESS_CONTROL_UIDS":             "0, 1000",
+		"MOCA_EGRESS_IDLE_TIMEOUT_S":           "45",
+		// Whitespace is trimmed, as for every other knob here.
+		"MOCA_EGRESS_RESPONSE_HEADER_TIMEOUT_S": " 5 ",
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -65,8 +75,30 @@ func TestConfigParsesOverrides(t *testing.T) {
 	if len(cfg.PermitCIDRs) != 2 || cfg.MaxConnsPerVM != 4 || cfg.MaxRequestsPerSession != 7 {
 		t.Fatalf("cfg = %+v", cfg)
 	}
+	if cfg.IdleTimeout != 45*time.Second || cfg.ResponseHeaderTimeout != 5*time.Second {
+		t.Fatalf("timeouts = %v, %v", cfg.IdleTimeout, cfg.ResponseHeaderTimeout)
+	}
 	if cc.Socket != "/tmp/x.sock" || len(cc.AllowedUIDs) != 2 || cc.AllowedUIDs[1] != 1000 {
 		t.Fatalf("cc = %+v", cc)
+	}
+}
+
+// TestResponseHeaderBoundFollowsARaisedIdleBound pins that the header bound's
+// default tracks the idle bound an operator actually set, not the compiled-in
+// one. Someone who raises MOCA_EGRESS_IDLE_TIMEOUT_S for a slow upstream would
+// otherwise be left with a tighter header bound hiding behind it, which fires
+// first and 502s the request the raise was meant to allow.
+func TestResponseHeaderBoundFollowsARaisedIdleBound(t *testing.T) {
+	cfg, _, err := ConfigFromEnv(envMap(map[string]string{
+		"MOCA_EGRESS_ALLOW":          "a.example:443",
+		"MOCA_EGRESS_IDLE_TIMEOUT_S": "900",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ResponseHeaderTimeout != 900*time.Second {
+		t.Fatalf("response header bound = %v with the idle bound raised to 900s, want 900s",
+			cfg.ResponseHeaderTimeout)
 	}
 }
 
@@ -78,6 +110,10 @@ func TestConfigRejectsBadCIDRAndBadUID(t *testing.T) {
 		"MOCA_EGRESS_MAX_CONNS_PER_VM":         "0",
 		"MOCA_EGRESS_MAX_REQUESTS_PER_SESSION": "abc",
 		"MOCA_EGRESS_RESOLVER":                 "nohostport",
+		// A zero is rejected, not read as "no bound": a connection unbounded
+		// in time is the #585 defect, not a configuration an operator may pick.
+		"MOCA_EGRESS_IDLE_TIMEOUT_S":            "0",
+		"MOCA_EGRESS_RESPONSE_HEADER_TIMEOUT_S": "-1",
 	}
 	for k, v := range cases {
 		m := base()

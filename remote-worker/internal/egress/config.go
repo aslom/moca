@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ControlConfig configures the control socket.
@@ -29,6 +30,8 @@ const (
 	envMaxRequests     = "MOCA_EGRESS_MAX_REQUESTS_PER_SESSION"
 	envControlSock     = "MOCA_EGRESS_CONTROL_SOCK"
 	envControlUIDs     = "MOCA_EGRESS_CONTROL_UIDS"
+	envIdleTimeout     = "MOCA_EGRESS_IDLE_TIMEOUT_S"
+	envRespHeaderTime  = "MOCA_EGRESS_RESPONSE_HEADER_TIMEOUT_S"
 )
 
 // ConfigFromEnv builds the proxy and control configuration from environment
@@ -72,6 +75,18 @@ func ConfigFromEnv(get func(string) string) (Config, ControlConfig, error) {
 		return cfg, cc, err
 	}
 	if cfg.MaxRequestsPerSession, err = positiveInt(get, envMaxRequests, defaultMaxRequests); err != nil {
+		return cfg, cc, err
+	}
+	// Seconds in, duration out. Both are positive-only: a zero would read as
+	// "no bound", and an established connection unbounded in time is the
+	// defect these exist to close, not a configuration an operator may pick.
+	if cfg.IdleTimeout, err = positiveSeconds(get, envIdleTimeout, defaultIdleTimeout); err != nil {
+		return cfg, cc, err
+	}
+	// The response-header bound defaults to whatever the idle bound came out
+	// as, including an operator-raised one, so it never sits tighter than the
+	// bound it refines unless an operator asked for that. See the field's doc.
+	if cfg.ResponseHeaderTimeout, err = positiveSeconds(get, envRespHeaderTime, cfg.IdleTimeout); err != nil {
 		return cfg, cc, err
 	}
 
@@ -122,6 +137,20 @@ func positiveInt(get func(string) string, name string, def int) (int, error) {
 		return 0, fmt.Errorf("%s=%q: want a positive integer", name, raw)
 	}
 	return n, nil
+}
+
+// positiveSeconds reads name as a whole number of seconds, rejecting the same
+// values positiveInt does and with the same message.
+func positiveSeconds(get func(string) string, name string, def time.Duration) (time.Duration, error) {
+	raw := strings.TrimSpace(get(name))
+	if raw == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("%s=%q: want a positive integer", name, raw)
+	}
+	return time.Duration(n) * time.Second, nil
 }
 
 // localAddrs lists the host's interface addresses.
