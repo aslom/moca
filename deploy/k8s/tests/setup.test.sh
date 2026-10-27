@@ -1430,6 +1430,8 @@ grep -q '^    newName: dev.local/moca-remote-worker$' "$MOCK_STATE/applied-kusto
 (export SH_GITHUB_CLIENT_ID=Iv1.a SH_WORKLOAD_SANDBOXES=; expect_ok --target kind --skip-build)
 ! grep -q 'workload-sandboxes' "$MOCK_STATE/applied-kustomization.yaml" || fail 'SH_WORKLOAD_SANDBOXES= did not turn it off'
 grep -q 'delete -n moca deployment/moca-provisioner' "$MOCK_LOG" || fail 'turning it off left the provisioner running'
+grep -q 'networkpolicy/moca-provisioner-redis networkpolicy/allow-openshift-dns-provisioner' "$MOCK_LOG" ||
+  fail "turning it off left the provisioner's Redis and DNS policies"
 grep -q 'delete validatingadmissionpolicybinding/moca-provisioner' "$MOCK_LOG" || fail 'turning it off left the admission policy'
 ! grep -q 'images:' "$MOCK_STATE/applied-kustomization.yaml" || fail 'the off render on kind is not the pre-feature one'
 pass 'SH_WORKLOAD_SANDBOXES=1 adds the component and makes the provisioner Secret once; sticky; empty turns it off and removes the provisioner'

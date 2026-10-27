@@ -192,6 +192,29 @@ outside the cluster.
    `MOCA_PROVISIONER_DELETE_WAIT_MS` (default 60 s), it answers `202` with `status: deleting`, and a
    repeated `DELETE` finishes it.
 
+**Orphans are swept.** A workload's StatefulSet, Service, Secret and PVC can outlive its record: a
+`DELETE` that answered `202` and was never repeated, or a record lost or replaced. Every
+`MOCA_PROVISIONER_RECONCILE_S` (default 5 minutes) the provisioner reads each workload's record from
+Redis, and deletes its objects once the record is missing, `deleted`, `deleting` or of another
+generation and all of them are older than `MOCA_PROVISIONER_ORPHAN_GRACE_S` (default 10 minutes).
+It only deletes, and skips (and logs) anything it cannot read as it wrote it. A `deleting` record
+still needs a repeated `DELETE` to remove its Context and itself.
+
+**A missing record never deletes a workload's storage.** It cannot be told apart from an emptied or
+wrong Redis, so on a missing record the provisioner deletes the StatefulSet, Secret and Service
+(freeing the sandboxes and the owner's cap) and keeps the PVC, logging
+`kept PVC <wl>: record missing` on every pass. Only a `deleted` or `deleting` record, or one of
+another generation, deletes the PVC. When most records are missing at once (at least two, and more
+than half of those it read) the pass deletes nothing and logs `ORPHAN SWEEP ABORTED`: check Redis and
+`REDIS_URL` first. To remove a kept PVC by hand, once its workspace is known to be unwanted:
+
+```bash
+kubectl -n moca-sandbox delete pvc <wl>
+```
+
+Each Redis read is bounded by `MOCA_PROVISIONER_REDIS_TIMEOUT_MS` (default 2 s); a read that times
+out skips that workload until the next pass.
+
 A failed provisioning leaves the record in `provisioning` with an `error` field, since a frozen
 revision cannot be unfrozen; a repeat activate with the same revision retries. The `error` goes once
 the record is `ready`, so a request that timed out but did create the sandboxes leaves no trace. The
@@ -231,7 +254,8 @@ container; a PVC it creates must be named `w-<32 hex>` and use an allowlisted St
 (`SH_WORKLOAD_STORAGE_CLASSES` on Kubernetes, which `setup.sh` also gives the provisioner and the
 workers, and whose other classes the `moca-sandbox` ResourceQuota holds at zero storage). Its
 egress is the Kubernetes API
-server's addresses only, which `setup.sh` reads from the `kubernetes` Service. It runs as exactly one
+server's addresses, which `setup.sh` reads from the `kubernetes` Service, and Redis (with DNS) for
+the orphan sweep. It runs as exactly one
 replica: the per-owner cap, and the order of one owner's activations, deletes and token re-mints, are
 serialized inside the process. Never scale it: a second replica makes the cap advisory. A request
 that only keeps or lowers a workload's `count` is never refused by the cap.
@@ -365,3 +389,15 @@ redis-cli --scan --pattern 'sh:workload:*' | xargs -r redis-cli del
 ```
 
 Current workloads are stored under `sh:wl:` keys, which that pattern does not match.
+
+A workload delete made by a provisioner before
+[#615](https://github.com/rossoctl/moca/pull/615) (the orphan sweep) deleted the Secret last, so a
+delete that failed after the PVC can have left a lone `<wl>-attach` Secret. The provisioner cannot
+list Secrets, so the sweep never sees it. List them, and delete each one whose workload `<wl>` has
+no StatefulSet left (`kubectl -n moca-sandbox get statefulset <wl>` answers `NotFound`):
+
+```bash
+kubectl -n moca-sandbox get secret \
+  -l app=moca-workload-sandbox,app.kubernetes.io/managed-by=moca-provisioner -L moca.dev/workload
+kubectl -n moca-sandbox delete secret <wl>-attach
+```

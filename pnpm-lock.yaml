@@ -217,6 +217,9 @@ importers:
       '@moca/control-plane':
         specifier: workspace:*
         version: link:../control-plane
+      redis:
+        specifier: ^6.3.0
+        version: 6.3.0
     devDependencies:
       '@types/node':
         specifier: ^22.0.0

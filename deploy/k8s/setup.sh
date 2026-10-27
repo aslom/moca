@@ -812,7 +812,8 @@ disable_workload_sandboxes() {
   fi
   log 'SH_WORKLOAD_SANDBOXES off: removing moca-provisioner and its policies'
   kc delete -n "$NS" deployment/moca-provisioner service/moca-provisioner \
-    networkpolicy/moca-provisioner serviceaccount/moca-provisioner --ignore-not-found >/dev/null
+    networkpolicy/moca-provisioner networkpolicy/moca-provisioner-redis \
+    networkpolicy/allow-openshift-dns-provisioner serviceaccount/moca-provisioner --ignore-not-found >/dev/null
   kc delete -n "$SBX_NS" role/moca-provisioner rolebinding/moca-provisioner \
     serviceaccount/moca-workload-sandbox podtemplate/moca-workload-sandbox \
     networkpolicy/moca-workload-sandbox networkpolicy/allow-dns-workload-sandbox \
