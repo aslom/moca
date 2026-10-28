@@ -358,8 +358,9 @@ MI1 §8.5 items 4–5 and §8.7, restated only where a choice is made here:
   through unchanged: the proxy never invents or removes a credential it does not own.
 - **`TRACE` and `TRACK`** on an intercepted connection are refused `405` and nothing is sent
   upstream, because they reflect the request, injected credential included, back to the guest.
-- The selected element's headers are each **set**, replacing any value the guest sent and adding
-  any it did not send. So the placeholder never reaches the upstream, and a client that sends no
+- On a match, the guest's own `Authorization` is **removed**, then the selected element's headers
+  are each **set**, replacing any value the guest sent and adding
+  any it did not send. An uncovered request keeps its `Authorization` (above). So the placeholder never reaches the upstream, and a client that sends no
   `Authorization` at all (an MCP client that would otherwise start OAuth discovery on a `401`) is
   authenticated anyway. `Proxy-*` and `X-Moca-*` are stripped by the existing `forward.go` logic, and
   bodies are streamed. Keep-alive is supported. **Each request re-reads the credential through the

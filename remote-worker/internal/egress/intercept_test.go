@@ -705,3 +705,19 @@ func TestInterceptUpstreamClosesAfterInjectionKeepsCredentialInAudit(t *testing.
 		t.Fatal("audit leaked a value")
 	}
 }
+
+func TestInterceptMatchedDropsGuestAuthorization(t *testing.T) {
+	e := newICEnv(t, icOpts{})
+	e.pol.Set(e.cred("keyed", "/", Header{Name: "X-Api-Key", Value: "real-key"}))
+	g := e.open()
+	if resp, _ := e.get(g, "/x", "Authorization: Bearer moca-placeholder", "X-Api-Key: guest"); resp.StatusCode != 200 {
+		t.Fatal(resp.StatusCode)
+	}
+	h := e.up.last(t).Header
+	if got := h.Values("X-Api-Key"); len(got) != 1 || got[0] != "real-key" {
+		t.Fatalf("upstream X-Api-Key %q", got)
+	}
+	if got := h.Values("Authorization"); len(got) != 0 {
+		t.Fatalf("upstream saw %d Authorization header(s), want none", len(got))
+	}
+}

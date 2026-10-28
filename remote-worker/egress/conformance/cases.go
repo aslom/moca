@@ -1823,7 +1823,9 @@ func credentialSetsEveryHeader(ctx context.Context, t Target) error {
 	return run(ctx, t, func(h *harness) (err error) {
 		w, err = h.interceptWorld()
 		if err == nil {
-			w.give("sid-a", 60, cred("two", "/", "Authorization: Bearer two-tok", "X-Api-Key: key-1"))
+			w.give("sid-a", 60,
+				cred("two", "/", "Authorization: Bearer two-tok", "X-Api-Key: key-1"),
+				cred("keyed", "/key", "X-Api-Key: key-2"))
 		}
 		return err
 	}, func(h *harness) error {
@@ -1842,7 +1844,19 @@ func credentialSetsEveryHeader(ctx context.Context, t Target) error {
 		if err := wantAuth(w.up, "/x", "Bearer two-tok"); err != nil {
 			return err
 		}
-		return wantHeader(w.up, "/x", "X-Api-Key", "key-1")
+		if err := wantHeader(w.up, "/x", "X-Api-Key", "key-1"); err != nil {
+			return err
+		}
+		// A matched element that sets no Authorization: the guest's own must
+		// not ride along next to the real credential (spec 5.2).
+		// pinned against: dropping the Authorization delete on a match.
+		if err := g.getOK("/key/y", w.hp, "Authorization: Bearer moca-placeholder", "X-Api-Key: guest"); err != nil {
+			return err
+		}
+		if err := wantAuth(w.up, "/key/y", ""); err != nil {
+			return err
+		}
+		return wantHeader(w.up, "/key/y", "X-Api-Key", "key-2")
 	})
 }
 

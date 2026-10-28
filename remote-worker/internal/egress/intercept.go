@@ -291,9 +291,10 @@ func (c *icConn) next() bool {
 
 	scrubHeaders(req.Header)
 	// An uncovered request gets ordinary scrubbing only (spec 5.2), so the
-	// guest's own Authorization passes. On a match, Set below overwrites a
-	// guest value of the same name.
+	// guest's own Authorization passes.
 	if matched {
+		// Matched: the guest's Authorization goes, then the element's headers are set; uncovered keeps it.
+		req.Header.Del("Authorization")
 		for _, h := range cred.Headers { // read-only: the slice is shared with the cache
 			req.Header.Set(h.Name, h.Value)
 		}
