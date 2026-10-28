@@ -22,6 +22,7 @@ export const CP_ERROR_CODES = [
   'subject_conflict',
   'unauthorized',
   'forbidden',
+  'not_found',
   'session_not_found',
   'session_mismatch',
   'not_enrolled',
@@ -70,6 +71,7 @@ const STATUS: Record<CpErrorCode, number> = {
   forbidden: 403,
   // 404, never 403, for another user's session: 403 is an existence oracle (spec §8.1). 403 is
   // reserved for "authenticated but insufficiently privileged on a resource you may know exists".
+  not_found: 404,
   session_not_found: 404,
   session_mismatch: 400,
   not_enrolled: 403,
