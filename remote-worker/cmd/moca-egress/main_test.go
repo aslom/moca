@@ -47,8 +47,7 @@ func TestBinaryServesAndShutsDown(t *testing.T) {
 		c.Write(buf)
 	}()
 
-	dir := shortdir.New(t, "meg")
-	defer os.RemoveAll(dir)
+	dir := shortdir.New(t, "meg", len("/c.sock"))
 	sock := filepath.Join(dir, "c.sock")
 
 	cmd := exec.Command(bin)

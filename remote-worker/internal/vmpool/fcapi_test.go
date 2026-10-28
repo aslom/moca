@@ -19,11 +19,12 @@ import (
 // $TMPDIR/TestName.../NNN, and $TMPDIR there is the sandboxed
 // "/var/folders/xx/........./T" path, which combined with a descriptive test name
 // routinely exceeds sockaddr_un's sun_path limit (104 bytes on Darwin, 108 on Linux) —
-// bind then fails with "invalid argument", not a clear "path too long". Using /tmp
-// directly keeps every path well under that limit on every platform this runs on.
+// bind then fails with "invalid argument", not a clear "path too long". shortdir
+// measures the directory it creates against the "/fc.sock" this appends, so what comes
+// back has room for it on every platform this runs on.
 func shortUnixSocketDir(t *testing.T) string {
 	t.Helper()
-	dir := shortdir.New(t, "vmpool-")
+	dir := shortdir.New(t, "vmpool-", len("/fc.sock"))
 	return dir
 }
 

@@ -71,8 +71,7 @@ func (b *recordingBinder) log() []string {
 // jailer's argv is "--id <id> ...", so the script derives the jail from $2.
 func egressLauncher(t *testing.T, b EgressBinder) (Launcher, string, string) {
 	t.Helper()
-	base := shortdir.New(t, "fceg")
-	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	base := shortdir.New(t, "fceg", len("/firecracker/vm-6/root/run/firecracker.socket"))
 	marker := filepath.Join(base, "jailer-marker")
 	jailer := filepath.Join(base, "jailer")
 	script := "#!/bin/sh\njail=" + base + "/firecracker/$2/root\n" +
@@ -193,8 +192,7 @@ func TestEgressRegisterIsDetachedFromTheCallersCancel(t *testing.T) {
 }
 
 func TestGateEgressTeardownOrdering(t *testing.T) {
-	base := shortdir.New(t, "fcto")
-	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	base := shortdir.New(t, "fcto", len("/root/run/v.sock_1025"))
 	jail := filepath.Join(base, "root")
 	if err := os.MkdirAll(filepath.Join(jail, "run"), 0o700); err != nil {
 		t.Fatal(err)
@@ -239,8 +237,7 @@ func TestGateEgressTeardownOrdering(t *testing.T) {
 }
 
 func TestEgressUnregisterFailureDoesNotFailDestroy(t *testing.T) {
-	base := shortdir.New(t, "fcuf")
-	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	base := shortdir.New(t, "fcuf", len("/root/run/v.sock_1025"))
 	jail := filepath.Join(base, "root")
 	if err := os.MkdirAll(filepath.Join(jail, "run"), 0o700); err != nil {
 		t.Fatal(err)

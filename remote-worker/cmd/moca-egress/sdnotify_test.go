@@ -4,7 +4,6 @@ package main
 
 import (
 	"net"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -20,8 +19,7 @@ func TestSdNotifyIsANoOpWithoutNotifySocket(t *testing.T) {
 }
 
 func TestSdNotifySendsTheStateDatagram(t *testing.T) {
-	dir := shortdir.New(t, "sdn")
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	dir := shortdir.New(t, "sdn", len("/notify"))
 	path := filepath.Join(dir, "notify")
 	ln, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: path, Net: "unixgram"})
 	if err != nil {

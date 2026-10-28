@@ -87,8 +87,7 @@ func TestGateEgressThroughVsock(t *testing.T) {
 	defer proxy.Close()
 
 	// Short path: the control socket and the jail's v.sock_1025 both live under sun_path's limit.
-	sockDir := shortdir.New(t, "egk")
-	defer os.RemoveAll(sockDir)
+	sockDir := shortdir.New(t, "egk", len("/c.sock"))
 	sock := filepath.Join(sockDir, "c.sock")
 	srv, err := control.NewServer(sock, []int{os.Getuid()}, proxy)
 	if err != nil {

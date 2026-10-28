@@ -8,9 +8,16 @@
 // `go test` itself honours TMPDIR, so hardcoding /tmp also meant the Go tests ignored the one knob
 // everything else in the repo respects.
 //
-// So: prefer TMPDIR when it is set AND short enough to leave room for a socket, and fall back to
-// the operating system's default (os.MkdirTemp's "", which is TMPDIR or /tmp) otherwise. Either
-// way the caller gets a directory it can put a socket in, or a test failure that says why.
+// So: prefer TMPDIR when a directory under it still leaves room for the caller's own socket path,
+// and fall back to /tmp or the operating system's default otherwise. Either way the caller gets a
+// directory it can put a socket in, or an error that says why not.
+//
+// The room a caller needs is the caller's to state, because it varies by two orders of magnitude
+// across this suite: "/c.sock" is 7 bytes, while the Firecracker collision test binds at
+// "/firecracker/vm-6/root/run/firecracker.socket", 45. A single built-in allowance cannot be right
+// for both -- too small and a long TMPDIR is accepted that cannot hold the socket, too large and a
+// perfectly usable TMPDIR is rejected -- so New and Make take `need` and measure the directory they
+// actually created against it.
 package shortdir
 
 import (
@@ -25,19 +32,21 @@ import (
 // fits here fits everywhere this code runs. The real limit is 104 on macOS and 108 on Linux.
 const MaxSocketPath = 104
 
-// budget is how much room a caller's own filenames may need under the directory we return: a
-// generous allowance for `MkdirTemp`'s random suffix plus something like "/control.sock".
-const budget = 40
-
 // New returns a directory for a test's Unix sockets, removed when the test ends.
 //
-// It tries each candidate in turn and takes the first that is short enough AND writable, so a
-// read-only /tmp or an over-long TMPDIR costs a fallback rather than a failure. If none works the
-// test fails naming every candidate and why, which is the information needed to fix the
-// environment -- far better than `bind` failing later with a bare EINVAL.
-func New(t *testing.T, prefix string) string {
+// need is how many bytes the caller will append to the returned directory for its longest socket
+// path, separator included -- normally written as a len() of the literal suffix, so it cannot drift
+// from the path the test actually binds:
+//
+//	dir := shortdir.New(t, "fcguard", len("/firecracker/vm-6/root/run/firecracker.socket"))
+//
+// It tries each candidate in turn and takes the first where the directory it creates is short
+// enough AND writable, so a read-only /tmp or an over-long TMPDIR costs a fallback rather than a
+// failure. If none works the test fails naming every candidate and why, which is the information
+// needed to fix the environment -- far better than `bind` failing later with a bare EINVAL.
+func New(t *testing.T, prefix string, need int) string {
 	t.Helper()
-	dir, err := Make(prefix)
+	dir, err := Make(prefix, need)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,23 +56,32 @@ func New(t *testing.T, prefix string) string {
 
 // Make is New without the testing dependency, for the conformance harness and anything else that
 // is not a test. The caller owns the cleanup.
-func Make(prefix string) (string, error) {
+func Make(prefix string, need int) (string, error) {
 	var tried []string
 	for _, base := range candidates() {
-		if len(base)+budget > MaxSocketPath {
-			tried = append(tried, fmt.Sprintf("%s (%d bytes, too long)", base, len(base)))
-			continue
-		}
+		// The length that matters is the one of the directory that actually exists: MkdirTemp's
+		// random suffix is up to 10 digits and the prefix is the caller's, so neither the base
+		// alone nor any fixed allowance for them predicts it. Create first, measure the real
+		// thing, and give the directory back if it does not fit.
 		dir, err := os.MkdirTemp(base, prefix)
 		if err != nil {
 			tried = append(tried, fmt.Sprintf("%s (%v)", base, err))
 			continue
 		}
+		if len(dir)+need > MaxSocketPath {
+			_ = os.RemoveAll(dir)
+			tried = append(tried, fmt.Sprintf(
+				"%s (%s is %d bytes, %d with the caller's %d-byte socket name, over the %d limit)",
+				base, dir, len(dir), len(dir)+need, need, MaxSocketPath,
+			))
+			continue
+		}
 		return dir, nil
 	}
 	return "", fmt.Errorf(
-		"shortdir: no directory short enough (limit %d) and writable for a Unix socket; tried: %s",
-		MaxSocketPath, strings.Join(tried, "; "),
+		"shortdir: no directory both writable and short enough to hold a %d-byte socket name under "+
+			"it (sun_path limit %d); tried: %s",
+		need, MaxSocketPath, strings.Join(tried, "; "),
 	)
 }
 

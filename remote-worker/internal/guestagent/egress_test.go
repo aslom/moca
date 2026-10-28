@@ -4,7 +4,6 @@ import (
 	"errors"
 	"io"
 	"net"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -53,8 +52,7 @@ func startForwarder(t *testing.T, dial func() (net.Conn, error)) (addr string, d
 
 func unixUpstream(t *testing.T) (net.Listener, func() (net.Conn, error)) {
 	t.Helper()
-	dir := shortdir.New(t, "gfwd")
-	t.Cleanup(func() { os.RemoveAll(dir) })
+	dir := shortdir.New(t, "gfwd", len("/u.sock"))
 	path := filepath.Join(dir, "u.sock")
 	ul, err := net.Listen("unix", path)
 	if err != nil {
