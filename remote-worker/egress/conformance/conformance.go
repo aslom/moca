@@ -196,7 +196,7 @@ func newHarness(ctx context.Context) (*harness, error) {
 	// Short AND writable: darwin's sun_path is 104 bytes, and /tmp is not writable everywhere
 	// (a sandbox, a hardened image), so this honours TMPDIR when a directory under it still has
 	// room for the "/c.sock" below, and falls back when it does not. See internal/shortdir.
-	dir, err := shortdir.Make("mconf", len("/c.sock"))
+	dir, err := shortdir.Make("mconf", len("/vm-a.sock"))
 	if err != nil {
 		return nil, err
 	}

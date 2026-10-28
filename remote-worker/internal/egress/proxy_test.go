@@ -219,7 +219,7 @@ func allow(t *testing.T, s string) []AllowEntry {
 
 func newHarness(t *testing.T, allowList string, mod func(*Config)) *harness {
 	t.Helper()
-	dir := shortdir.New(t, "eg", len("/vm-1.sock"))
+	dir := shortdir.New(t, "eg", len("/vm-quiet.sock"))
 	h := &harness{t: t, sink: &recSink{}, res: newResolver(), dir: dir}
 	cfg := Config{
 		Allow:                 allow(t, allowList),
