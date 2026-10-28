@@ -1,12 +1,15 @@
 package egress
 
 import (
+	"bytes"
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +35,15 @@ const (
 	envControlUIDs     = "MOCA_EGRESS_CONTROL_UIDS"
 	envIdleTimeout     = "MOCA_EGRESS_IDLE_TIMEOUT_S"
 	envRespHeaderTime  = "MOCA_EGRESS_RESPONSE_HEADER_TIMEOUT_S"
+	envCredURL         = "MOCA_EGRESS_CREDENTIALS_URL"
+	envCredTokenFile   = "MOCA_EGRESS_CREDENTIALS_TOKEN_FILE"
+	envCredCA          = "MOCA_EGRESS_CREDENTIALS_CA"
+	envCredTimeout     = "MOCA_EGRESS_CREDENTIALS_TIMEOUT"
+	envNoneTTL         = "MOCA_EGRESS_NONE_TTL_S"
+	envCACertFile      = "MOCA_EGRESS_CA_CERT_FILE"
+	envCAKeyFile       = "MOCA_EGRESS_CA_KEY_FILE"
+	envUpstreamCA      = "MOCA_EGRESS_UPSTREAM_CA"
+	envCredDir         = "CREDENTIALS_DIRECTORY"
 )
 
 // ConfigFromEnv builds the proxy and control configuration from environment
@@ -102,7 +114,9 @@ func ConfigFromEnv(get func(string) string) (Config, ControlConfig, error) {
 		}}
 	}
 	cfg.LocalAddrs = localAddrs
-	cfg.Credentials = NoCredentials{}
+	if err := credentialsFromEnv(get, &cfg); err != nil {
+		return cfg, cc, err
+	}
 	// Async, because this sink is stdout: a stalled journald must not block the
 	// proxy's hot path, nor Unregister and the control socket behind it. The
 	// caller flushes it on shutdown via CloseAudit.
@@ -125,6 +139,122 @@ func ConfigFromEnv(get func(string) string) (Config, ControlConfig, error) {
 		}
 	}
 	return cfg, cc, nil
+}
+
+// credentialsFromEnv wires the control-plane credential client and loads the
+// interception CA. With the URL unset, any other credential variable is a
+// boot failure: a half-configured host never runs silently without credentials.
+func credentialsFromEnv(get func(string) string, cfg *Config) error {
+	raw := strings.TrimSpace(get(envCredURL))
+	if raw == "" {
+		for _, n := range []string{envCredTokenFile, envCredCA, envCredTimeout, envNoneTTL, envCACertFile, envCAKeyFile, envUpstreamCA} {
+			if strings.TrimSpace(get(n)) != "" {
+				return fmt.Errorf("%s is set but %s is not", n, envCredURL)
+			}
+		}
+		cfg.Credentials = NoCredentials{}
+		return nil
+	}
+	dir := strings.TrimSpace(get(envCredDir))
+	// path returns the explicit value, else dir/def when dir is set.
+	path := func(name, def string) string {
+		if v := strings.TrimSpace(get(name)); v != "" {
+			return v
+		}
+		if dir != "" {
+			return filepath.Join(dir, def)
+		}
+		return ""
+	}
+	readFile := func(name, p string) ([]byte, error) {
+		if p == "" {
+			return nil, fmt.Errorf("%s is required when %s is set", name, envCredURL)
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return nil, fmt.Errorf("%s: cannot read the file", name)
+		}
+		if len(bytes.TrimSpace(b)) == 0 {
+			return nil, fmt.Errorf("%s: the file is empty", name)
+		}
+		return b, nil
+	}
+	tok, err := readFile(envCredTokenFile, path(envCredTokenFile, "egress-token"))
+	if err != nil {
+		return err
+	}
+	if cfg.InterceptCACertPEM, err = readFile(envCACertFile, path(envCACertFile, "egress-ca.crt")); err != nil {
+		return err
+	}
+	if cfg.InterceptCAKeyPEM, err = readFile(envCAKeyFile, path(envCAKeyFile, "egress-ca.key")); err != nil {
+		return err
+	}
+
+	var roots *x509.CertPool // nil = system roots
+	caPath := strings.TrimSpace(get(envCredCA))
+	if caPath == "" && dir != "" {
+		if p := filepath.Join(dir, "egress-api-ca.crt"); fileExists(p) {
+			caPath = p
+		}
+	}
+	if caPath != "" {
+		pem, err := readFile(envCredCA, caPath)
+		if err != nil {
+			return err
+		}
+		roots = x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(pem) {
+			return fmt.Errorf("%s: no certificate in the file", envCredCA)
+		}
+	}
+	if p := strings.TrimSpace(get(envUpstreamCA)); p != "" {
+		pem, err := readFile(envUpstreamCA, p)
+		if err != nil {
+			return err
+		}
+		pool, serr := x509.SystemCertPool()
+		if serr != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
+		if !pool.AppendCertsFromPEM(pem) {
+			return fmt.Errorf("%s: no certificate in the file", envUpstreamCA)
+		}
+		cfg.UpstreamRoots = pool
+	}
+
+	ca, err := NewLeafCA(cfg.InterceptCACertPEM, cfg.InterceptCAKeyPEM, time.Now)
+	if err != nil {
+		// The variable names, never key material: err says only what is wrong.
+		return fmt.Errorf("%s / %s: %w", envCACertFile, envCAKeyFile, err)
+	}
+	cfg.interceptor = newInterceptor(ca, cfg.UpstreamRoots)
+
+	timeout := 3 * time.Second
+	if v := strings.TrimSpace(get(envCredTimeout)); v != "" {
+		if timeout, err = time.ParseDuration(v); err != nil || timeout <= 0 {
+			return fmt.Errorf("%s=%q: want a positive Go duration", envCredTimeout, v)
+		}
+	}
+	noneTTL, err := positiveSeconds(get, envNoneTTL, 60*time.Second)
+	if err != nil {
+		return err
+	}
+	if noneTTL < minTTL || noneTTL > maxTTL {
+		return fmt.Errorf("%s=%q: want 5-300 seconds", envNoneTTL, strings.TrimSpace(get(envNoneTTL)))
+	}
+	cp, err := NewCPCredentials(CPCredentialsOptions{
+		URL: raw, Token: strings.TrimSpace(string(tok)), RootCAs: roots, Timeout: timeout, NoneTTL: noneTTL,
+	})
+	if err != nil {
+		return fmt.Errorf("%s: %w", envCredURL, err)
+	}
+	cfg.Credentials = cp
+	return nil
+}
+
+func fileExists(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && !st.IsDir()
 }
 
 func positiveInt(get func(string) string, name string, def int) (int, error) {

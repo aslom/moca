@@ -2,6 +2,7 @@ package egress
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log"
@@ -31,6 +32,15 @@ type Config struct {
 	LocalAddrs func() ([]netip.Addr, error)
 
 	Credentials CredentialPolicy
+	// InterceptCACertPEM and InterceptCAKeyPEM are the loaded interception CA
+	// (set by ConfigFromEnv when credentials are configured; Task 9 builds the
+	// interceptor from them). UpstreamRoots verifies upstream servers; nil
+	// means the system roots.
+	InterceptCACertPEM, InterceptCAKeyPEM []byte
+	UpstreamRoots                         *x509.CertPool
+	// interceptor serves hosts that have credentials. nil is allowed only
+	// while Credentials is NoCredentials.
+	interceptor interceptor
 	Audit       AuditSink
 
 	DialTimeout time.Duration // default 10s
@@ -124,6 +134,8 @@ func NewProxy(cfg Config) (*Proxy, error) {
 		return nil, errors.New("egress: nil Audit")
 	case cfg.Credentials == nil:
 		return nil, errors.New("egress: nil Credentials")
+	case cfg.interceptor == nil && !isNoCredentials(cfg.Credentials):
+		return nil, errors.New("egress: a credential policy needs an interceptor")
 	case cfg.MaxConnsPerVM <= 0:
 		return nil, fmt.Errorf("egress: MaxConnsPerVM %d must be positive", cfg.MaxConnsPerVM)
 	case cfg.MaxRequestsPerSession <= 0:
@@ -389,7 +401,10 @@ type proxyConn struct {
 }
 
 func (pc *proxyConn) event(e Event) Event {
-	e.VMID, e.SID, e.Sub = pc.caller.VMID, pc.caller.SessionID, pc.caller.Subject
+	e.VMID, e.SID = pc.caller.VMID, pc.caller.SessionID
+	if e.Sub == "" { // an intercepted request carries the credential owner from the lookup
+		e.Sub = pc.caller.Subject
+	}
 	return e
 }
 
@@ -452,4 +467,9 @@ func (pc *proxyConn) finish() {
 	if up != nil {
 		_ = up.Close()
 	}
+}
+
+func isNoCredentials(p CredentialPolicy) bool {
+	_, ok := p.(NoCredentials)
+	return ok
 }

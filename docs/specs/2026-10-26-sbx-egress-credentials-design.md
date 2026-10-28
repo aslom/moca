@@ -304,6 +304,18 @@ type CredentialPolicy interface {
 - `controlPlaneCredentials` calls §4.2, with a cache keyed by `(sid, host)` holding found **and**
   none results for `ttlSeconds`, and single-flight per key so a burst of parallel `git` connections
   makes one call. Errors are not cached.
+- **Expired elements are dropped.** Any element whose `expiresAt` is non-null and earlier than
+  `now + 5 s` (the §4.2 floor) is dropped before the TTL is computed. Dropping is not refusing: the
+  rest of the set stands, and a set that is all dropped is an empty set, cached at the 5 s floor.
+- **TTL of a `none` answer.** `no_credential` is cached for `MOCA_EGRESS_NONE_TTL_S` (default 60,
+  5 to 300). `sandbox_not_found` is cached for the 5 s floor only, so a sandbox that has just become
+  ready is not pinned to "none" for a minute. A numeric `ttlSeconds` in a 404 body is honoured,
+  clamped to [5, 300].
+- **Header grammar.** The client re-checks each element against the control plane's write-time
+  rules (`packages/control-plane/src/egress-binding.ts`): names match `^[A-Za-z0-9-]{1,64}$`, none
+  is `host`, `connection`, `content-length`, `transfer-encoding`, `te`, `trailer`, `upgrade`,
+  `keep-alive`, `cookie` or `set-cookie`, none starts with `proxy-` or `x-moca-`, and none repeats
+  within an element. A violation makes the whole response an uncached error.
 - `handler.go:202` becomes: no element with the CONNECT port → dial and tunnel (unchanged path); one
   or more → intercept (§5.2);
   error or timeout (`MOCA_EGRESS_CREDENTIALS_TIMEOUT`, default 3 s) → `503 credential_unavailable`,
@@ -341,10 +353,14 @@ MI1 §8.5 items 4–5 and §8.7, restated only where a choice is made here:
   gateway. `git`, `gh` and MCP clients do not send these to a gateway. A host whose only prefix is
   `/` has nothing to escape, so the rule does not apply to it. GitHub is that case.
 - **No match.** A request that no element matches, on a connection that has never injected for a
-  prefix covering it, is forwarded **without injection**. It is still intercepted, with the guest's
-  own headers scrubbed as on any other request.
-- The selected element's headers are each **set**, replacing any value the guest sent and adding
-  any it did not send. So the placeholder never reaches the upstream, and a client that sends no
+  prefix covering it, is forwarded **without injection**. It is still intercepted, with ordinary
+  scrubbing only (hop-by-hop headers, `Proxy-*`, `X-Moca-*`). The guest's own `Authorization` passes
+  through unchanged: the proxy never invents or removes a credential it does not own.
+- **`TRACE` and `TRACK`** on an intercepted connection are refused `405` and nothing is sent
+  upstream, because they reflect the request, injected credential included, back to the guest.
+- On a match, the guest's own `Authorization` is **removed**, then the selected element's headers
+  are each **set**, replacing any value the guest sent and adding
+  any it did not send. An uncovered request keeps its `Authorization` (above). So the placeholder never reaches the upstream, and a client that sends no
   `Authorization` at all (an MCP client that would otherwise start OAuth discovery on a `401`) is
   authenticated anyway. `Proxy-*` and `X-Moca-*` are stripped by the existing `forward.go` logic, and
   bodies are streamed. Keep-alive is supported. **Each request re-reads the credential through the
@@ -368,14 +384,16 @@ MI1 §8.5 items 4–5 and §8.7, restated only where a choice is made here:
 
 ### 5.3 Settings and files
 
-| Setting                           | Source                  | Meaning                                                                                      |
-| --------------------------------- | ----------------------- | -------------------------------------------------------------------------------------------- |
-| `MOCA_EGRESS_CREDENTIALS_URL`     | `moca-egress.env`       | The SBX control plane's API URL. Unset leaves credentials off.                               |
-| `MOCA_EGRESS_CREDENTIALS_TOKEN`   | `LoadCredential=` file  | This host's egress token (`SH_EGRESS_TOKEN_<ID>`). Never an environment variable (MI1 §6.7). |
-| `MOCA_EGRESS_CREDENTIALS_CA`      | file, optional          | A PEM CA for the API Route, as the janitor's `SBX_API_CA_FILE`.                              |
-| `MOCA_EGRESS_CA_CERT` / `_CA_KEY` | `LoadCredential=` files | The interception CA. The key is readable by `moca-egress` only.                              |
-| `MOCA_EGRESS_UPSTREAM_CA`         | file, optional          | Extra roots for internal upstreams (MI1 §8.5 item 4).                                        |
-| `MOCA_EGRESS_CREDENTIALS_TIMEOUT` | env                     | Default `3s`.                                                                                |
+| Setting                              | Source                 | Meaning                                                                                                                                     |
+| ------------------------------------ | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MOCA_EGRESS_CREDENTIALS_URL`        | `moca-egress.env`      | The SBX control plane's API URL: scheme and host only, no userinfo, path, query or fragment. Unset leaves credentials off.                  |
+| `MOCA_EGRESS_CREDENTIALS_TOKEN_FILE` | `LoadCredential=` file | This host's egress token (`SH_EGRESS_TOKEN_<ID>`). Default `$CREDENTIALS_DIRECTORY/egress-token`. Never an environment variable (MI1 §6.7). |
+| `MOCA_EGRESS_CREDENTIALS_CA`         | file, optional         | A PEM CA for the API Route, as the janitor's `SBX_API_CA_FILE`. Default `$CREDENTIALS_DIRECTORY/egress-api-ca.crt` when present.            |
+| `MOCA_EGRESS_CA_CERT_FILE`           | `LoadCredential=` file | The interception CA certificate. Default `$CREDENTIALS_DIRECTORY/egress-ca.crt`. It must be currently valid.                                |
+| `MOCA_EGRESS_CA_KEY_FILE`            | `LoadCredential=` file | The interception CA key. Default `$CREDENTIALS_DIRECTORY/egress-ca.key`. Readable by `moca-egress` only.                                    |
+| `MOCA_EGRESS_UPSTREAM_CA`            | file, optional         | Extra roots for internal upstreams (MI1 §8.5 item 4).                                                                                       |
+| `MOCA_EGRESS_CREDENTIALS_TIMEOUT`    | env                    | Default `3s`.                                                                                                                               |
+| `MOCA_EGRESS_NONE_TTL_S`             | env                    | How long `no_credential` is cached, in whole seconds. Default `60`, range 5 to 300 (§5.1).                                                  |
 
 Credentials mode is **independent of `MOCA_TENANCY`**, and the boot refusal of `multi` stays. That
 refusal guards MI1 S2's grant semantics, which this spec does not implement. Identity is per VM

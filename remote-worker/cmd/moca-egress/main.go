@@ -72,6 +72,11 @@ func main() {
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve() }()
+	if cp, ok := cfg.Credentials.(*egress.CPCredentials); ok {
+		log.Printf("moca-egress: credentials: on (control plane %s)", cp.Host())
+	} else {
+		log.Printf("moca-egress: credentials: off")
+	}
 	log.Printf("moca-egress: serving %d allowlist entries, control socket %s", len(cfg.Allow), cc.Socket)
 	// The control socket is bound (NewServer listened on it above), so a worker ordered After=
 	// this Type=notify unit can connect from here on. A failed notify is logged, not fatal:

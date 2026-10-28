@@ -843,6 +843,10 @@ the §8.3 control protocol. Every case is named:
 - per-VM connection cap and per-session request cap → `429`;
 - exactly one audit event per injection, with the query string removed.
 
+The interception cases for the SBX path (credential lookup, revocation, path scoping, port scoping,
+TRACE refusal) are specified in `docs/specs/2026-10-26-sbx-egress-credentials-design.md` §10.2 and run in
+this same suite.
+
 ### 12.4 Isolation at the worker, and the red-team check
 
 - **Two subjects, interleaved at `await` boundaries** (P5 §5's discipline; a sequential test would pass

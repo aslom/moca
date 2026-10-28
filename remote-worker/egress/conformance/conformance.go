@@ -36,6 +36,16 @@ const (
 	// had no time bound at all once its request headers were read.
 	EnvIdleTimeout    = "MOCA_EGRESS_IDLE_TIMEOUT_S"
 	EnvRespHeaderTime = "MOCA_EGRESS_RESPONSE_HEADER_TIMEOUT_S"
+	// Credential injection (SBX0.2b). With the URL unset, setting any of the
+	// others is a boot failure.
+	EnvCredentialsURL       = "MOCA_EGRESS_CREDENTIALS_URL"
+	EnvCredentialsTokenFile = "MOCA_EGRESS_CREDENTIALS_TOKEN_FILE"
+	EnvCredentialsCA        = "MOCA_EGRESS_CREDENTIALS_CA"
+	EnvCredentialsTimeout   = "MOCA_EGRESS_CREDENTIALS_TIMEOUT"
+	EnvNoneTTL              = "MOCA_EGRESS_NONE_TTL_S"
+	EnvCACertFile           = "MOCA_EGRESS_CA_CERT_FILE"
+	EnvCAKeyFile            = "MOCA_EGRESS_CA_KEY_FILE"
+	EnvUpstreamCA           = "MOCA_EGRESS_UPSTREAM_CA"
 )
 
 // Instance is one running implementation.
@@ -83,6 +93,20 @@ func Cases() []Case {
 		{"grant_refused_under_single", grantRefusedUnderSingle},
 		{"connect_tunnel_idle_deadline", connectTunnelIdleDeadline},
 		{"forward_response_header_timeout", forwardResponseHeaderTimeout},
+		{"credential_injected_placeholder_overwritten", credentialInjectedPlaceholderOverwritten},
+		{"no_credential_tunnelled_opaque", noCredentialTunnelledOpaque},
+		{"lookup_error_503_no_dial", lookupError503NoDial},
+		{"upstream_unverified_502", upstreamUnverified502},
+		{"inner_host_mismatch_421", innerHostMismatch421},
+		{"plaintext_http_credential_403", plaintextHTTPCredential403},
+		{"credential_keyed_by_session", credentialKeyedBySession},
+		{"lookup_cached_single_flight", lookupCachedSingleFlight},
+		{"credential_revoked_mid_connection_401", credentialRevokedMidConnection401},
+		{"credential_selected_by_path_prefix", credentialSelectedByPathPrefix},
+		{"path_traversal_refused_when_path_scoped", pathTraversalRefusedWhenPathScoped},
+		{"credential_sets_every_header", credentialSetsEveryHeader},
+		{"credential_port_scoped", credentialPortScoped},
+		{"trace_refused_on_intercepted_conn", traceRefusedOnInterceptedConn},
 	}
 }
 
@@ -491,7 +515,7 @@ func (h *harness) count(want event) int {
 func (h *harness) seenText() string {
 	var b strings.Builder
 	for _, m := range h.seen {
-		j, _ := json.Marshal(m)
+		j, _ := json.Marshal(redactEvent(m))
 		b.Write(j)
 		b.WriteByte('\n')
 	}
@@ -499,6 +523,27 @@ func (h *harness) seenText() string {
 		return "(no events)"
 	}
 	return "\n" + b.String()
+}
+
+// redactEvent copies m with every value that could carry a secret replaced:
+// those under a key such as authorization, cookie, x-api-key or value, and
+// any string that looks like a Bearer or Basic credential. Failure messages
+// of a public suite must not print a credential.
+func redactEvent(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		switch lk := strings.ToLower(k); {
+		case lk == "authorization" || lk == "cookie" || lk == "x-api-key" || lk == "value" || lk == "token":
+			out[k] = "<redacted>"
+		default:
+			if s, ok := v.(string); ok && (strings.Contains(s, "Bearer ") || strings.Contains(s, "Basic ")) {
+				out[k] = "<redacted>"
+			} else {
+				out[k] = v
+			}
+		}
+	}
+	return out
 }
 
 // ---- fake upstreams ----
@@ -592,8 +637,8 @@ func (s *silentUpstream) Close() error {
 
 // seenRequest is what the fake HTTP upstream received.
 type seenRequest struct {
-	method, path, rawQuery, host string
-	header                       http.Header
+	method, path, uri, rawQuery, host string
+	header                            http.Header
 }
 
 // httpUpstream is an HTTP/1.1 server on 127.0.0.1 that records every request
@@ -640,9 +685,15 @@ func (h *harness) httpUp() (*httpUpstream, error) {
 
 func (u *httpUpstream) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	u.mu.Lock()
-	u.reqs = append(u.reqs, seenRequest{method: r.Method, path: r.URL.Path, rawQuery: r.URL.RawQuery,
+	u.reqs = append(u.reqs, seenRequest{method: r.Method, path: r.URL.Path, uri: r.RequestURI, rawQuery: r.URL.RawQuery,
 		host: r.Host, header: r.Header.Clone()})
 	u.mu.Unlock()
+	if r.Method == "TRACE" { // a real server reflects the request, headers and all
+		w.Header().Set("Content-Type", "message/http")
+		fmt.Fprintf(w, "TRACE %s\r\n", r.RequestURI)
+		_ = r.Header.Write(w)
+		return
+	}
 	switch r.URL.Path {
 	case "/slow":
 		u.slowArrived <- struct{}{}
