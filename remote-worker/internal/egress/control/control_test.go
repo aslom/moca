@@ -65,7 +65,7 @@ func (r *recorder) Unregister(vmID string) error {
 
 func shortDir(t *testing.T) string {
 	t.Helper()
-	d := shortdir.New(t, "ectl", len("/vm1.sock"))
+	d := shortdir.New(t, "ectl", len("/vm-doomed.sock"))
 	return d
 }
 
