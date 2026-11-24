@@ -2046,6 +2046,11 @@ expect_out 'needs --target ocp-single'
 expect_out 'needs SH_ROUTE_DOMAIN'
 (export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=example.test; expect_fail --target ocp-single --profile combined)
 expect_out 'needs SH_ALLOWED_SUBJECTS'
+# The sandbox-only profile is refused on the same grounds: it serves the same sandbox routes.
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=example.test; expect_fail --target ocp --profile sandbox)
+expect_out 'needs --target ocp-single'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=example.test; expect_fail --target ocp-single --profile sandbox)
+expect_out 'needs SH_ALLOWED_SUBJECTS'
 # The enrolment flag is meaningless without sandbox routes to enrol for.
 (export SH_GITHUB_CLIENT_ID=Iv1.a SH_TEST_USERS=5 \
   SH_TEST_USERS_ACK=i-know-this-is-not-for-production SH_SANDBOX_TEST_USERS_ENROLLED=true
@@ -2205,6 +2210,44 @@ w_idle="$(in_target 'kind: Deployment, name: sbx-worker' | grep -o 'moca.dev/wor
 [[ "$w_idle" == 45m ]] ||
   fail "the sbx worker carries no SH_WORKSPACE_IDLE stamp ('$w_idle'), so a changed idle rolls the pool and leaves it behind"
 pass 'combined: the egress exceptions and the idle stamp reach the sbx worker, not only the shared pool'
+# --profile sandbox: the same sandbox objects, and the replica rule. Test users do NOT make a control
+# plane runnable -- it needs an identity provider to boot at all (configFromEnv), so a stack with
+# test users and no provider must still render 0 replicas; installing 1 there crash-loops the pod.
+reset_state
+# Every variable on the `export` line: an assignment on a CONTINUATION line is a separate statement,
+# so it never reaches setup.sh's environment and the case silently tests nothing.
+(export SH_ROUTE_DOMAIN=example.test SH_ALLOWED_SUBJECTS=github:1648338 SH_TEST_USERS=1000 \
+  SH_TEST_USERS_ACK=i-know-this-is-not-for-production SH_SANDBOX_TEST_USERS_ENROLLED=true
+  expect_ok --target ocp-single --profile sandbox)
+gen | grep -q '^  - ../../overlays/ocp-single/sandbox$' || fail 'the generated overlay does not list the sandbox component'
+[[ "$(jq -r '.data.SH_SANDBOX_TEST_USERS_ENROLLED' "$MOCK_STATE/moca-single__ConfigMap__sbx-settings.json")" == true ]] ||
+  fail 'the enrolment flag did not reach sbx-settings on the sandbox profile'
+# Asserted directly, not as an && chain ending in `fail`: such a chain passes whenever any link
+# misses, so it reports success for the very render it is meant to reject.
+[[ "$(replicas_of moca-control-plane)" == 0 ]] ||
+  fail 'test users with no identity provider must still render 0 replicas: the control plane cannot boot without one'
+expect_out 'nobody can log in without one'
+# With a provider, the same stack runs: that is the configuration test users are used in.
+(export SH_ROUTE_DOMAIN=example.test SH_ALLOWED_SUBJECTS=github:1648338 SH_TEST_USERS=1000 \
+  SH_TEST_USERS_ACK=i-know-this-is-not-for-production SH_SANDBOX_TEST_USERS_ENROLLED=true \
+  SH_GITHUB_CLIENT_ID=Iv1.a
+  expect_ok --target ocp-single --profile sandbox)
+[[ "$(replicas_of moca-control-plane)" == 1 ]] ||
+  fail 'the sandbox profile with an identity provider must run the control plane'
+# The shared pool answers the SUPERVISOR, which this profile holds at 0 replicas (the component's
+# patch-supervisor.yaml), so two Ready-and-unreachable sandbox pods are the default this profile
+# must not take. Asserted on the stored value, which is what a re-run inherits.
+[[ "$(jq -r '.data.SH_SANDBOX_COUNT' "$MOCK_STATE/moca-single__ConfigMap__moca-setup.json")" == 0 ]] ||
+  fail 'the sandbox profile must default SH_SANDBOX_COUNT to 0: its supervisor is scaled to 0, so the shared pool answers nothing'
+grep -q 'kubectl --context [^ ]* rollout status statefulset/moca-sandbox' "$MOCK_LOG" &&
+  fail 'with no container sandboxes the install must not wait for the pool' || true
+# An operator who asks for the pool anyway still gets it: the default is a default, not a refusal.
+(export SH_ROUTE_DOMAIN=example.test SH_ALLOWED_SUBJECTS=github:1648338 SH_GITHUB_CLIENT_ID=Iv1.a \
+  SH_SANDBOX_COUNT=1
+  expect_ok --target ocp-single --profile sandbox)
+[[ "$(jq -r '.data.SH_SANDBOX_COUNT' "$MOCK_STATE/moca-single__ConfigMap__moca-setup.json")" == 1 ]] ||
+  fail 'an explicit SH_SANDBOX_COUNT must stand on the sandbox profile'
+pass 'sandbox-only: the component is rendered, the enrolment flag lands, replicas follow the identity provider, and the shared pool defaults to 0'
 
 # The relay loads the sandbox token keyset once, at container start, so its pod template carries a
 # stamp of its own: rotating the session signer must roll the relay, or it keeps verifying against

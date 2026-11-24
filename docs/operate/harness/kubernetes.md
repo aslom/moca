@@ -1185,15 +1185,16 @@ The §12.3 tenant verified all of it: the operator's Let's Encrypt wildcard for
 controller's default certificate), a namespace-scoped ingress controller admitted by the
 `policy-group.network.openshift.io/ingress` selector, and mocactl logins and turns over the Routes.
 
-### 12.6 The sandbox service, opt-in (`--profile combined`)
+### 12.6 The sandbox service, opt-in (`--profile combined` or `--profile sandbox`)
 
 This target can also serve the **sandbox service** -- the `mocactl sbx` commands -- from the same
-namespace, beside the harness:
+namespace, beside the harness or instead of it:
 
-| `--profile`         | Serves                | The control plane's own routes |
-| ------------------- | --------------------- | ------------------------------ |
-| `harness` (default) | harness sessions only | yes                            |
-| `combined`          | both                  | yes                            |
+| `--profile`         | Serves                   | The harness's session routes |
+| ------------------- | ------------------------ | ---------------------------- |
+| `harness` (default) | harness sessions only    | yes                          |
+| `combined`          | both                     | yes                          |
+| `sandbox`           | the sandbox service only | no                           |
 
 It needs `SH_ROUTE_DOMAIN` (§12.5), because an `sbx` client reaches the Exec path over its own
 Route, and `SH_ALLOWED_SUBJECTS` -- who may use the sandbox routes, besides admins:
@@ -1232,8 +1233,29 @@ An identity provider is still required: the control plane does not boot without
 `SH_GITHUB_CLIENT_ID` (or `SH_OIDC_ISSUER`), and `SH_TEST_USERS` does not substitute for one. With
 neither set, the control plane is installed at 0 replicas and the run says so.
 
-`SH_TEST_USERS` works on this profile, but a test user is not enrolled by `SH_ALLOWED_SUBJECTS`
-at scale -- naming a thousand of them is ~10 KB of ConfigMap. Enrol the whole range instead:
+**`--profile sandbox`** installs the same sandbox half with none of the harness's: the control
+plane serves the sandbox routes only, and `moca-supervisor` is installed at **0 replicas** rather
+than deleted, so switching back to `combined` is a replica change and its ServiceAccount, Service
+and NetworkPolicy stay where the other manifests expect them. What still runs is what the sandbox
+path needs -- Redis (the sandbox records store), the relay with its exec sidecar, and `sbx-worker`.
+What does not: the shared sandbox pool, since `SH_SANDBOX_COUNT` defaults to **0** on this profile
+(an explicit value still stands), and on a 2-core namespace that headroom is the difference between
+fitting and not. The control plane also drops `SH_CREDENTIAL_STORE`/`SH_CREDENTIAL_NAMESPACE` and
+the credential KEK, because this profile issues no inference credentials and
+`sandboxConfigFromEnv` pairs that KEK with `SH_EGRESS_HOSTS` -- set one without the other and it
+crash-loops. Everything else on this page that is not a harness session applies unchanged:
+
+```bash
+SH_SINGLE_NAMESPACE=<ns> SH_ROUTE_DOMAIN=<domain> SH_ALLOWED_SUBJECTS=github:<id> \
+  deploy/k8s/setup.sh --target ocp-single --profile sandbox
+```
+
+A sandbox-only stack still needs an identity provider (`SH_GITHUB_CLIENT_ID` or `SH_OIDC_ISSUER`):
+`SH_TEST_USERS` is an extra login path, never a substitute for one, and a stack without either is
+installed at 0 replicas.
+
+`SH_TEST_USERS` works on both of these profiles, but a test user is not enrolled by
+`SH_ALLOWED_SUBJECTS` at scale -- naming a thousand of them is ~10 KB of ConfigMap. Enrol the whole range instead:
 
 ```bash
 SH_TEST_USERS=1000 SH_SANDBOX_TEST_USERS_ENROLLED=true   # test:1..test:1000 may use sbx
