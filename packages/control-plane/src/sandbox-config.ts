@@ -319,11 +319,13 @@ export function isEnrolled(
  * SH_ALLOWED_SUBJECTS validates with SUBJECT_RE (above), which DOES admit `test:<n>`, and
  * SH_ADMIN_SUBJECTS is not format-checked at all, so on a `combined` dev stack an operator can
  * deliberately put a test subject on either list and it passes here. That is what makes
- * `mocactl sbx login --test-user N` useful; it cannot happen on `sandbox`, where SH_TEST_USERS
- * refuses to boot (main.ts, ADR-0045).
+ * `mocactl sbx login --test-user N` useful on `combined`; on `sandbox` the same two lists do more
+ * than that -- enrollment is the login gate there, so they are what lets the login itself succeed
+ * (main.ts, ADR-0045).
  *
  * SH_SANDBOX_TEST_USERS_ENROLLED enrols the whole range instead, for a dev stack that wants all N
- * of them (`enrolledTestUser`, through `onAllowList`).
+ * of them (`enrolledTestUser`, through `onAllowList`). On the `sandbox` profile that is also what
+ * lets such a login succeed in the first place, since there enrollment IS the authentication.
  */
 export function isEnrolledForSandbox(
   subject: string,
@@ -356,8 +358,10 @@ function onAllowList(
  * a thousand SH_ALLOWED_SUBJECTS entries (ADR-0045 range-checks test users rather than pre-minting
  * them, and a thousand entries would undo that).
  *
- * It sits in `onAllowList`, so it answers both gates. On `combined` -- the only profile that serves
- * test users today -- that widens the sandbox routes alone, because login is open there anyway.
+ * It sits in `onAllowList`, so it answers both gates. On `combined` that only widens the sandbox
+ * routes, because login is open there anyway. On `sandbox` it widens LOGIN too -- which is the
+ * point: enrollment is that profile's only authentication, so a test user that is not enrolled
+ * cannot log in at all.
  *
  * `test:0` and an out-of-range index are refused, as they are at login: a subject the login
  * endpoint will not issue must not be enrolled here either.

@@ -791,18 +791,70 @@ describe('SH_TEST_USERS (ADR-0045)', () => {
     );
   });
 
-  // SBX0 §4.2 admits only enrolled github: subjects, which a test:N subject can never be. Refuse at
-  // boot rather than serve a route that would always 403.
-  it('cannot be combined with the sandbox profile', () => {
+  // ADR-0045 refused this pairing while a test:N subject could never be enrolled. That half
+  // changed: SUBJECT_RE admits test:<n> and SH_SANDBOX_TEST_USERS_ENROLLED enrols the range, so
+  // the profile can serve browser-free logins -- which is what an sbx-only dev stack wants.
+  it('is carried on the sandbox profile, where enrollment is the login gate', () => {
+    const sandboxEnv = {
+      ...baseEnv,
+      SH_CREDENTIAL_KEK: undefined,
+      SH_ROUTE_PROFILE: 'sandbox',
+      SH_ALLOWED_SUBJECTS: 'github:1',
+      SH_SANDBOX_TEMPLATES: JSON.stringify([
+        { id: 'default', worker: 'sbx_default', description: 'bash', tools: ['bash'] },
+      ]),
+      SH_SANDBOX_EXEC_ENDPOINT: 'sbx-exec.apps.example.invalid:443',
+    };
+    const enrolled = {
+      ...sandboxEnv,
+      SH_TEST_USERS: '10',
+      SH_TEST_USER_SECRET: SECRET,
+      SH_SANDBOX_TEST_USERS_ENROLLED: 'true',
+    };
+    const c = configFromEnv(enrolled);
+    expect(c.routeProfile).toBe('sandbox');
+    expect(c.testUsers).toBe(10);
+    // Naming the subjects by hand is the other way in, and it must work for exactly the subjects
+    // named: a count is not enrollment.
+    const named = configFromEnv({
+      ...sandboxEnv,
+      SH_ALLOWED_SUBJECTS: 'github:1,test:1',
+      SH_TEST_USERS: '10',
+      SH_TEST_USER_SECRET: SECRET,
+    });
+    expect(named.testUsers).toBe(10);
+    // The flag must not be silently inert here either: no count, no boot.
+    expect(() => configFromEnv({ ...sandboxEnv, SH_SANDBOX_TEST_USERS_ENROLLED: 'true' })).toThrow(
+      /needs SH_TEST_USERS/,
+    );
+  });
+
+  // The converse of the flag check, and the reason ADR-0045 refused the pairing outright: on this
+  // profile enrollment IS the login gate, so a count with nothing enrolling it mounts a route that
+  // answers not_enrolled to every call. Refuse at boot instead, as the old rule did.
+  it('refuses a count on the sandbox profile that nothing enrols', () => {
+    const sandboxEnv = {
+      ...baseEnv,
+      SH_CREDENTIAL_KEK: undefined,
+      SH_ROUTE_PROFILE: 'sandbox',
+      SH_ALLOWED_SUBJECTS: 'github:1',
+      SH_SANDBOX_TEMPLATES: JSON.stringify([
+        { id: 'default', worker: 'sbx_default', description: 'bash', tools: ['bash'] },
+      ]),
+      SH_SANDBOX_EXEC_ENDPOINT: 'sbx-exec.apps.example.invalid:443',
+    };
+    expect(() =>
+      configFromEnv({ ...sandboxEnv, SH_TEST_USERS: '10', SH_TEST_USER_SECRET: SECRET }),
+    ).toThrow(/needs its subjects enrolled/);
+    // Validated on this profile as on the harness one, rather than later in testUserProvider.
     expect(() =>
       configFromEnv({
-        ...baseEnv,
-        SH_ROUTE_PROFILE: 'sandbox',
-        SH_ALLOWED_SUBJECTS: 'github:1',
+        ...sandboxEnv,
         SH_TEST_USERS: '10',
-        SH_TEST_USER_SECRET: SECRET,
+        SH_TEST_USER_SECRET: undefined,
+        SH_SANDBOX_TEST_USERS_ENROLLED: 'true',
       }),
-    ).toThrow(/cannot be used on the sandbox profile/);
+    ).toThrow(/SH_TEST_USER_SECRET/);
   });
 });
 
